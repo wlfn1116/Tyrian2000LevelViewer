@@ -1,0 +1,801 @@
+using System.Runtime.InteropServices;
+using Hexa.NET.ImGui;
+using SdlNs = Hexa.NET.SDL2;
+using ImSdl = Hexa.NET.ImGui.Backends.SDL2;
+
+namespace T2LV;
+
+internal static unsafe class Program
+{
+    const uint SDL_INIT_VIDEO = 0x00000020u;
+    const int SDL_WINDOWPOS_CENTERED = 0x2FFF0000;
+
+    // SDL window flags
+    const uint SDL_WINDOW_MAXIMIZED = 0x00000080u;
+    const uint SDL_WINDOW_RESIZABLE = 0x00000020u;
+    const uint SDL_WINDOW_ALLOW_HIGHDPI = 0x00002000u;
+    // SDL renderer flags
+    const uint SDL_RENDERER_ACCELERATED = 0x00000002u;
+    const uint SDL_RENDERER_PRESENTVSYNC = 0x00000004u;
+
+    static int Main(string[] args)
+    {
+        bool smoke = Array.IndexOf(args, "--smoke") >= 0;
+        int uishot = Array.IndexOf(args, "--uishot");
+        if (Array.IndexOf(args, "--dump") >= 0)
+            return DumpSelfTest();
+        if (Array.IndexOf(args, "--export") >= 0)
+            return ExportLevel(args);
+        if (Array.IndexOf(args, "--findenemy") >= 0)
+            return FindEnemy(args);
+        if (Array.IndexOf(args, "--sprites") >= 0)
+            return SpriteGrid(args);
+        if (Array.IndexOf(args, "--checksprites") >= 0)
+            return CheckSprites();
+        if (Array.IndexOf(args, "--checktimelines") >= 0)
+            return CheckTimelines();
+        if (Array.IndexOf(args, "--checkalllevels") >= 0)
+            return CheckAllLevels();
+        if (Array.IndexOf(args, "--auditcontrol") >= 0)
+            return AuditControlEvents();
+        if (Array.IndexOf(args, "--auditspawns") >= 0)
+            return AuditSpawns();
+        if (Array.IndexOf(args, "--events") >= 0)
+            return DumpEvents(args);
+        if (Array.IndexOf(args, "--enemydat") >= 0)
+            return DumpEnemyDat(args);
+
+        PreloadBundledNativeLibraries();
+        if (SdlNs.SDL.Init(SDL_INIT_VIDEO) != 0)
+        {
+            Console.Error.WriteLine("SDL_Init failed: " + SdlNs.SDL.GetErrorS());
+            return 1;
+        }
+
+        // Only persist UI state in normal interactive runs (not --smoke / --uishot).
+        bool persist = !smoke && uishot < 0;
+        bool useSettings = Array.IndexOf(args, "--usesettings") >= 0;   // load (but don't save) in test runs
+        var settings = (persist || useSettings) ? AppSettings.Load() : new AppSettings();
+
+        int winW = settings.WinW > 200 ? settings.WinW : 1280;
+        int winH = settings.WinH > 200 ? settings.WinH : 800;
+        int winX = persist && settings.WinX != int.MinValue ? settings.WinX : SDL_WINDOWPOS_CENTERED;
+        int winY = persist && settings.WinY != int.MinValue ? settings.WinY : SDL_WINDOWPOS_CENTERED;
+        uint winFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+        if (persist && settings.WinMaximized) winFlags |= SDL_WINDOW_MAXIMIZED;
+
+        var window = SdlNs.SDL.CreateWindow("Tyrian 2000 Level Viewer", winX, winY, winW, winH, winFlags);
+        if (window.IsNull)
+        {
+            Console.Error.WriteLine("CreateWindow failed: " + SdlNs.SDL.GetErrorS());
+            return 1;
+        }
+
+        var renderer = SdlNs.SDL.CreateRenderer(window, -1,
+            SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        if (renderer.IsNull)
+        {
+            Console.Error.WriteLine("CreateRenderer failed: " + SdlNs.SDL.GetErrorS());
+            return 1;
+        }
+
+        var ctx = ImGui.CreateContext();
+        ImGui.SetCurrentContext(ctx);
+        ImSdl.ImGuiImplSDL2.SetCurrentContext(ctx);
+
+        var io = ImGui.GetIO();
+        // No NavEnableKeyboard: the arrow/page keys are viewer shortcuts (level switching,
+        // canvas jumps) and must not also wander the widget focus.
+        io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
+        io.IniFilename = null;   // window/panel state lives in settings.json, not imgui.ini
+
+        var bWindow = new ImSdl.SDLWindowPtr((ImSdl.SDLWindow*)(void*)window.Handle);
+        var bRenderer = new ImSdl.SDLRendererPtr((ImSdl.SDLRenderer*)(void*)renderer.Handle);
+
+        ImSdl.ImGuiImplSDL2.InitForSDLRenderer(bWindow, bRenderer);
+        ImSdl.ImGuiImplSDL2.SDLRenderer2Init(bRenderer);
+
+        Console.WriteLine("Init OK. ImGui " + ImGui.GetVersionS());
+
+        int si = Array.IndexOf(args, "--start");
+        int cliEp = si >= 0 && si + 1 < args.Length ? int.Parse(args[si + 1]) : -1;
+        int cliLevel = si >= 0 && si + 2 < args.Length ? int.Parse(args[si + 2]) : -1;
+        var app = new App(renderer, settings, cliEp, cliLevel, window);
+
+        bool running = true;
+        int frame = 0;
+        while (running)
+        {
+            SdlNs.SDLEvent e = default;
+            while (SdlNs.SDL.PollEvent(ref e) != 0)
+            {
+                ImSdl.ImGuiImplSDL2.ProcessEvent(new ImSdl.SDLEventPtr((ImSdl.SDLEvent*)&e));
+                if (e.Type == (uint)SdlNs.SDLEventType.Quit)
+                    running = false;
+            }
+
+            ImSdl.ImGuiImplSDL2.SDLRenderer2NewFrame();
+            ImSdl.ImGuiImplSDL2.NewFrame();
+            ImGui.NewFrame();
+
+            app.Render();
+
+            ImGui.Render();
+            SdlNs.SDL.SetRenderDrawColor(renderer, 30, 30, 35, 255);
+            SdlNs.SDL.RenderClear(renderer);
+            ImSdl.ImGuiImplSDL2.SDLRenderer2RenderDrawData(ImGui.GetDrawData(), bRenderer);
+
+            if (uishot >= 0 && ++frame >= 5)
+            {
+                int w, h; SdlNs.SDL.GetWindowSize(window, &w, &h);
+                var buf = new uint[w * h];
+                fixed (uint* bp = buf)
+                    SdlNs.SDL.RenderReadPixels(renderer, default, Render.Gfx.SDL_PIXELFORMAT_ABGR8888, (nint)bp, w * 4);
+                string outp = uishot + 1 < args.Length ? args[uishot + 1]
+                    : Path.Combine(Environment.CurrentDirectory, "uishot.png");
+                T2LV.Util.Png.WriteRgba(outp, w, h, buf);
+                Console.WriteLine($"Wrote UI screenshot {outp} ({w}x{h})");
+                running = false;
+            }
+
+            SdlNs.SDL.RenderPresent(renderer);
+
+            if (smoke && ++frame >= 3)
+                running = false;
+        }
+
+        if (persist)
+        {
+            uint fl = SdlNs.SDL.GetWindowFlags(window);
+            settings.WinMaximized = (fl & SDL_WINDOW_MAXIMIZED) != 0;
+            if (!settings.WinMaximized)  // keep the last *windowed* size/pos, not the maximized one
+            {
+                int w, h, x, y;
+                SdlNs.SDL.GetWindowSize(window, &w, &h);
+                SdlNs.SDL.GetWindowPosition(window, &x, &y);
+                settings.WinW = w; settings.WinH = h; settings.WinX = x; settings.WinY = y;
+            }
+            app.PopulateSettings(settings);
+            settings.Save();
+        }
+
+        app.Dispose();
+        ImSdl.ImGuiImplSDL2.SDLRenderer2Shutdown();
+        ImSdl.ImGuiImplSDL2.Shutdown();
+        ImGui.DestroyContext(ctx);
+        SdlNs.SDL.DestroyRenderer(renderer);
+        SdlNs.SDL.DestroyWindow(window);
+        SdlNs.SDL.Quit();
+
+        Console.WriteLine("Clean exit.");
+        return 0;
+    }
+
+    /// <summary>
+    /// Hexa loads its native libraries by filename. In a single-file build, preload the
+    /// copies extracted by the .NET host so those filename-based lookups resolve normally.
+    /// </summary>
+    private static void PreloadBundledNativeLibraries()
+    {
+        var nativeSearchPath = AppContext.GetData("NATIVE_DLL_SEARCH_DIRECTORIES") as string;
+        if (string.IsNullOrWhiteSpace(nativeSearchPath)) return;
+
+        string[] names = ["SDL2.dll", "cimgui.dll", "ImGuiImpl.dll", "ImGuiImplSDL2.dll"];
+        foreach (string directory in nativeSearchPath.Split(Path.PathSeparator,
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            foreach (string name in names)
+            {
+                string path = Path.Combine(directory, name);
+                if (File.Exists(path)) NativeLibrary.Load(path);
+            }
+        }
+    }
+
+    static int ExportLevel(string[] args)
+    {
+        int gi = Array.IndexOf(args, "--export");
+        int epNum = gi + 1 < args.Length ? int.Parse(args[gi + 1]) : 1;
+        int fileNum = gi + 2 < args.Length ? int.Parse(args[gi + 2]) : 1;
+        int pal = gi + 3 < args.Length ? int.Parse(args[gi + 3]) : AppSettings.GamePalette;
+        string defaultOut = Environment.CurrentDirectory;
+        string outDir = (gi + 4 < args.Length && (args[gi + 4].Contains('/') || args[gi + 4].Contains('\\'))) ? args[gi + 4] : defaultOut;
+        Directory.CreateDirectory(outDir);
+
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
+        var gd = new T2LV.Tyrian.GameData(dir);
+        var ep = gd.Episodes.Find(e => e.Number == epNum);
+        if (ep == null) { Console.Error.WriteLine("no episode"); return 1; }
+        var lv = gd.LoadLevel(ep, fileNum);
+        var shapes = gd.GetShapeTable(lv.ShapeChar);
+
+        bool objOnly = Array.IndexOf(args, "objonly") >= 0;
+        bool bgOnly = Array.IndexOf(args, "bgonly") >= 0;
+        bool parallax = Array.IndexOf(args, "parallax") >= 0;
+        bool uniformScale = Array.IndexOf(args, "uniformscale") >= 0;
+        bool route = Array.IndexOf(args, "route") >= 0;   // legacy route-axis render
+        bool customOrder = args.Any(a => a.StartsWith("ontop="));
+        var img = new T2LV.Render.CompositeImage();
+        var ed = gd.GetEnemyData(ep);
+        var timeline = T2LV.Tyrian.LevelTimeline.Build(lv);
+        var layerScroll = new T2LV.Tyrian.ObjectPlacer.LayerScroll();
+        var objs = T2LV.Tyrian.ObjectPlacer.Place(gd, ep, lv, ed,
+            route ? timeline : null, layerScroll);
+        foreach (var a in args)
+            if (a.StartsWith("isobase="))
+            {
+                int b = int.Parse(a.Substring(8));
+                var first = objs.First(o => o.Esize == 1 && o.SpriteIndex == b);
+                objs = new List<T2LV.Tyrian.PlacedObject> { first };
+                Console.WriteLine($"  isolating base {b} at ({first.X:0},{first.Y:0})");
+            }
+            else if (a == "iso2x2")
+            {
+                objs = objs.Where(o => o.Esize == 1).ToList();
+                Console.WriteLine($"  keeping only {objs.Count} 2x2 objects");
+            }
+            else if (a.StartsWith("isoy="))
+            {
+                int yc = int.Parse(a.Substring(5));
+                var near = objs.Where(o => o.Esize == 1 && Math.Abs(o.Y - yc) < 120).OrderBy(o => o.Y).ToList();
+                foreach (var o in near)
+                    Console.WriteLine($"    obj base={o.SpriteIndex} X={o.X:0} Y={o.Y:0} band={o.Band} cat={o.Cat}");
+            }
+        // Build the level's in-game layer stack and apply dev-flag overrides.
+        var stack = T2LV.Render.LayerStack.GameOrder(T2LV.Render.LayerStack.CreateDefault(), lv.ComputeStartFlags());
+        T2LV.Render.LayerDef Bg(int s) => stack.First(l => l.Kind == T2LV.Render.LayerKind.Background && l.Slot == s);
+        if (objOnly) foreach (var l in stack) if (l.Kind == T2LV.Render.LayerKind.Background) l.Visible = false;
+        if (Array.IndexOf(args, "l1only") >= 0) { foreach (var l in stack) l.Visible = false; Bg(0).Visible = true; }
+        if (Array.IndexOf(args, "l2only") >= 0) { foreach (var l in stack) l.Visible = false; Bg(1).Visible = true; }
+        if (Array.IndexOf(args, "l3only") >= 0) { foreach (var l in stack) l.Visible = false; Bg(2).Visible = true; }
+        foreach (var a in args)
+        {
+            if (a.StartsWith("a1=")) Bg(0).Alpha = int.Parse(a.Substring(3));
+            else if (a.StartsWith("a2=")) Bg(1).Alpha = int.Parse(a.Substring(3));
+            else if (a.StartsWith("a3=")) Bg(2).Alpha = int.Parse(a.Substring(3));
+            else if (a.StartsWith("ao=")) { int v = int.Parse(a.Substring(3)); foreach (var l in stack) if (l.Kind == T2LV.Render.LayerKind.Objects) l.Alpha = v; }
+        }
+        foreach (var a in args)
+            if (a.StartsWith("ontop="))   // dev: move layer with this id to the front
+            {
+                string id = a.Substring(6);
+                var l = stack.FirstOrDefault(x => x.Id == id);
+                if (l != null) { stack.Remove(l); stack.Insert(0, l); }
+            }
+        bool drawObjs = !bgOnly;
+        if (parallax)
+            T2LV.Render.LevelRenderer.ComposeParallax(img, lv, shapes, gd.Palettes.Get(pal),
+                stack, objs, drawObjs, timeline, uniformScale, !customOrder, !route, layerScroll);
+        else
+            T2LV.Render.LevelRenderer.Compose(img, lv, shapes, gd.Palettes.Get(pal),
+                stack, objs, drawObjs, route ? timeline : null, uniformScale, !customOrder,
+                !route, route ? null : layerScroll);
+        Console.WriteLine($"placed objects: {objs.Count}");
+        if (timeline.IsUnrolled)
+            Console.WriteLine($"  continuous length: {timeline.Distance}px " +
+                $"(layers {timeline.LayerDistance(0)}/{timeline.LayerDistance(1)}/{timeline.LayerDistance(2)}), " +
+                $"canvas: {img.Width}x{img.Height}");
+        int withSheet = objs.Count(o => o.Sheet != null);
+        Console.WriteLine($"  objects with resolved sprite: {withSheet}/{objs.Count}");
+        if (Array.IndexOf(args, "dump") >= 0)
+        {
+            int dmy = ArgInt("my", 15650);
+            var seen2 = new HashSet<int>();
+            foreach (var o in objs.Where(o => o.Esize == 1 && o.Sheet != null && o.Y >= dmy && o.Y <= dmy + 240))
+            {
+                if (!seen2.Add(o.SpriteIndex)) continue;
+                var sheet = o.Sheet!;
+                var sb = new System.Text.StringBuilder($"  base {o.SpriteIndex} cat={o.Cat} ani={ed.Get(o.EnemyId).Ani} Y={o.Y:0}: ");
+                foreach (int off in new[] { 0, 1, 19, 20 })
+                {
+                    var s = sheet.Decode(o.SpriteIndex + off);
+                    int nz = 0; if (s != null) foreach (var pp in s.Pixels) if (pp != 0) nz++;
+                    sb.Append($"+{off}={(s == null ? "NULL" : $"{s.W}x{s.H}/{nz}")}  ");
+                }
+                Console.WriteLine(sb.ToString());
+            }
+        }
+
+        int W = img.Width;
+        int H = img.Height;
+
+        // Flatten onto an opaque dark background so transparent areas are visible.
+        uint dark = T2LV.Render.Gfx.Rgba(18, 18, 22);
+        var flat = new uint[img.Pixels.Length];
+        for (int i = 0; i < flat.Length; i++)
+        {
+            uint p = img.Pixels[i];
+            flat[i] = (p >> 24) == 0 ? dark : (p | 0xFF000000u);
+        }
+
+        // Crop: bottom 2000 rows = the start of the level (or crop=Y0 for an arbitrary band).
+        int cropH = Math.Min(2000, H);
+        int y0 = H - cropH;
+        foreach (var a in args) if (a.StartsWith("crop=")) { y0 = Math.Clamp(int.Parse(a.Substring(5)), 0, H - 1); cropH = Math.Min(1600, H - y0); }
+        var crop = new uint[W * cropH];
+        Array.Copy(flat, y0 * W, crop, 0, crop.Length);
+        string startPath = Path.Combine(outDir, "export_start.png");
+        T2LV.Util.Png.WriteRgba(startPath, W, cropH, crop);
+
+        // Magnified crop (3x nearest) of a region with objects, so sprites are clear.
+        int ArgInt(string key, int def) { foreach (var a in args) if (a.StartsWith(key + "=")) return int.Parse(a.Substring(key.Length + 1)); return def; }
+        int mScale = 3, mw = 120, mh = 230;
+        int mx0 = ArgInt("mx", 30), my0 = ArgInt("my", H - 1500);
+        var mag = new uint[mw * mScale * mh * mScale];
+        for (int y = 0; y < mh * mScale; y++)
+            for (int x = 0; x < mw * mScale; x++)
+            {
+                int sxp = mx0 + x / mScale, syp = my0 + y / mScale;
+                mag[y * mw * mScale + x] = (sxp >= 0 && sxp < W && syp >= 0 && syp < H) ? flat[syp * W + sxp] : dark;
+            }
+        T2LV.Util.Png.WriteRgba(Path.Combine(outDir, "export_mag.png"), mw * mScale, mh * mScale, mag);
+
+        // Whole level downsampled vertically so structure is visible (fits the viewer).
+        int step = Math.Max(4, (H + 1699) / 1700);
+        int dh = H / step;
+        var thumb = new uint[W * dh];
+        for (int y = 0; y < dh; y++)
+            Array.Copy(flat, (y * step) * W, thumb, y * W, W);
+        string thumbPath = Path.Combine(outDir, "export_thumb.png");
+        T2LV.Util.Png.WriteRgba(thumbPath, W, dh, thumb);
+
+        Console.WriteLine($"Episode {epNum} level #{fileNum} '{(ep.Levels.Find(l => l.FileNum == fileNum)?.Name ?? "").Trim()}' shapes{char.ToLower(lv.ShapeChar)}.dat palette {pal}");
+        Console.WriteLine($"Wrote {startPath} ({W}x{cropH}) and {thumbPath} ({W}x{dh})");
+        img.Dispose();
+        return 0;
+    }
+
+    static int DumpEnemyDat(string[] args)
+    {
+        int gi = Array.IndexOf(args, "--enemydat");
+        int epNum = int.Parse(args[gi + 1]);
+        int lo = int.Parse(args[gi + 2]);
+        int hi = int.Parse(args[gi + 3]);
+        var gd = new T2LV.Tyrian.GameData(T2LV.Tyrian.GameData.FindDataDir()!);
+        var ep = gd.Episodes.Find(e => e.Number == epNum)!;
+        var ed = gd.GetEnemyData(ep);
+        for (int i = lo; i <= hi; i++)
+        {
+            var d = ed.Get(i);
+            Console.WriteLine($"  enemyDat[{i}] esize={d.Esize} egr0={(d.EGraphic!=null&&d.EGraphic.Length>0?d.EGraphic[0]:0)} bank={d.ShapeBank} armor={d.Armor} value={d.Value} startX={d.StartX}+/-{d.StartXC} startY={d.StartY}+/-{d.StartYC}");
+        }
+        return 0;
+    }
+
+    static int DumpEvents(string[] args)
+    {
+        int gi = Array.IndexOf(args, "--events");
+        int epNum = gi + 1 < args.Length ? int.Parse(args[gi + 1]) : 1;
+        int fileNum = gi + 2 < args.Length ? int.Parse(args[gi + 2]) : 1;
+        int wantType = gi + 3 < args.Length ? int.Parse(args[gi + 3]) : -1;
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        var gd = new T2LV.Tyrian.GameData(dir!);
+        var ep = gd.Episodes.Find(e => e.Number == epNum)!;
+        var lv = gd.LoadLevel(ep, fileNum);
+        var ed = gd.GetEnemyData(ep);
+        Console.WriteLine($"ep{epNum} #{fileNum} mapX={lv.MapX},{lv.MapX2},{lv.MapX3} events={lv.Events.Length}");
+        foreach (var e in lv.Events)
+        {
+            if (wantType >= 0 && e.Type != wantType) continue;
+            string extra = "";
+            if (e.Type == 12 || e.Type == 6 || e.Type == 7 || e.Type == 15 || e.Type == 10)
+            {
+                var d = ed.Get(e.Dat);
+                extra = $" enemyDat[{e.Dat}] esize={d.Esize} egr0={(d.EGraphic!=null&&d.EGraphic.Length>0?d.EGraphic[0]:0)} bank={d.ShapeBank}";
+            }
+            Console.WriteLine($"  t={e.Time} type={e.Type} dat={e.Dat} dat2={e.Dat2} dat3={e.Dat3} dat4={e.Dat4} dat5={e.Dat5} dat6={e.Dat6}{extra}");
+        }
+        return 0;
+    }
+
+    static int CheckSprites()
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        var gd = new T2LV.Tyrian.GameData(dir!);
+        foreach (var ep in gd.Episodes)
+        {
+            var ed = gd.GetEnemyData(ep);
+            foreach (var item in ep.Levels)
+            {
+                var lv = gd.LoadLevel(ep, item.FileNum);
+                var objs = T2LV.Tyrian.ObjectPlacer.Place(gd, ep, lv, ed);
+                int big = 0, nullBottom = 0, shortTop = 0;
+                var seen = new HashSet<int>();
+                foreach (var o in objs)
+                {
+                    if (o.Esize != 1 || o.Sheet == null || o.SpriteIndex <= 0) continue;
+                    big++;
+                    var s0 = o.Sheet.Decode(o.SpriteIndex);
+                    var s19 = o.Sheet.Decode(o.SpriteIndex + 19);
+                    var s20 = o.Sheet.Decode(o.SpriteIndex + 20);
+                    if (s19 == null || s20 == null) nullBottom++;
+                    if (s0 != null && s0.H < 13) shortTop++;
+                    if (seen.Add(o.SpriteIndex) && seen.Count <= 3 && (s19 == null || s20 == null))
+                        Console.WriteLine($"      ep{ep.Number} {item.Name.Trim()} base {o.SpriteIndex} sheetCount {o.Sheet.Count} +0H={s0?.H} +19={(s19==null?"NULL":s19.H.ToString())} +20={(s20==null?"NULL":s20.H.ToString())}");
+                }
+                if (big > 0 && (nullBottom > 0 || shortTop > 0))
+                    Console.WriteLine($"  ep{ep.Number} #{item.FileNum} {item.Name.Trim(),-10} 2x2={big} nullBottom={nullBottom} shortTop={shortTop}");
+            }
+        }
+        return 0;
+    }
+
+    static int CheckTimelines()
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
+        var gd = new T2LV.Tyrian.GameData(dir);
+        bool failed = false;
+        var seen = new HashSet<(int Episode, int File)>();
+        foreach (var ep in gd.Episodes)
+        foreach (var item in ep.Levels)
+        {
+            if (!seen.Add((ep.Number, item.FileNum))) continue;
+            var level = gd.LoadLevel(ep, item.FileNum);
+            var timeline = T2LV.Tyrian.LevelTimeline.Build(level);
+            if (!timeline.IsUnrolled) continue;
+            var objects = T2LV.Tyrian.ObjectPlacer.Place(
+                gd, ep, level, gd.GetEnemyData(ep), timeline);
+            int invalidObjects = objects.Count(o =>
+                o.PathDistance < 0 || o.PathDistance > timeline.Distance ||
+                o.UniformPathDistance < 0 || o.UniformPathDistance > timeline.UniformExtent);
+            int badAnchors = objects.Count(o => o.UniformLayer >= 0 &&
+                timeline.SourceY(o.UniformLayer, o.UniformPathDistance, true) != o.UniformSourceY);
+            int badGameAnchors = objects.Count(o => o.UniformLayer >= 0 &&
+                timeline.SourceY(o.UniformLayer, o.PathDistance) != o.GameSourceY);
+            var badFootprintObjects = objects.Where(o =>
+            {
+                if (o.UniformLayer < 0) return false;
+                int screenY = (int)o.ScreenY;
+                int sampleDistance = o.UniformPathDistance - screenY;
+                if (sampleDistance < 0 || sampleDistance > timeline.Distance) return false;
+                if (timeline.HasSourceDiscontinuity(o.UniformLayer,
+                    o.UniformPathDistance, sampleDistance, true)) return false;
+                return timeline.SourceY(o.UniformLayer, sampleDistance, true) !=
+                    o.UniformSourceY + screenY;
+            }).ToList();
+            int badFootprints = badFootprintObjects.Count;
+            static bool SameFlags(in T2LV.Tyrian.LevelStartFlags a,
+                in T2LV.Tyrian.LevelStartFlags b) =>
+                a.Background2Over == b.Background2Over &&
+                a.Background3Over == b.Background3Over &&
+                a.TopEnemyOver == b.TopEnemyOver &&
+                a.SkyEnemyOverAll == b.SkyEnemyOverAll &&
+                a.Background2NotTransparent == b.Background2NotTransparent;
+            var expectedFlags = T2LV.Tyrian.LevelStartFlags.Defaults;
+            bool expectedStars = true;
+            var flagsByGameDistance = new Dictionary<int, T2LV.Tyrian.LevelStartFlags>();
+            var flagsByUniformDistance = new Dictionary<int, T2LV.Tyrian.LevelStartFlags>();
+            var starsByGameDistance = new Dictionary<int, bool>();
+            var starsByUniformDistance = new Dictionary<int, bool>();
+            foreach (var occurrence in timeline.Occurrences)
+            {
+                var e = occurrence.Event;
+                switch (e.Type)
+                {
+                    case 8: expectedStars = false; break;
+                    case 9: expectedStars = true; break;
+                    case 21: expectedFlags.Background3Over = 1; break;
+                    case 22: expectedFlags.Background3Over = 0; break;
+                    case 28: expectedFlags.TopEnemyOver = false; break;
+                    case 29: expectedFlags.TopEnemyOver = true; break;
+                    case 42: expectedFlags.Background3Over = 2; break;
+                    case 43: expectedFlags.Background2Over = unchecked((byte)e.Dat); break;
+                    case 48: expectedFlags.Background2NotTransparent = true; break;
+                    case 73: expectedFlags.SkyEnemyOverAll = e.Dat == 1; break;
+                }
+                flagsByGameDistance[occurrence.PathDistance] = expectedFlags;
+                flagsByUniformDistance[occurrence.UniformDistance1] = expectedFlags;
+                starsByGameDistance[occurrence.PathDistance] = expectedStars;
+                starsByUniformDistance[occurrence.UniformDistance1] = expectedStars;
+            }
+            int badVisualStates =
+                flagsByGameDistance.Count(kv => !SameFlags(timeline.RenderFlags(kv.Key), kv.Value)) +
+                flagsByUniformDistance.Count(kv => !SameFlags(timeline.RenderFlags(kv.Key, true), kv.Value)) +
+                starsByGameDistance.Count(kv => timeline.StarActive(kv.Key) != kv.Value) +
+                starsByUniformDistance.Count(kv => timeline.StarActive(kv.Key, true) != kv.Value);
+            int expectedHeight = timeline.Distance + T2LV.Tyrian.LevelTimeline.ViewBottom;
+            int expectedUniformHeight = timeline.UniformExtent + T2LV.Tyrian.LevelTimeline.ViewBottom;
+            bool badHeight = T2LV.Render.LevelRenderer.HeightFor(timeline, false) != expectedHeight ||
+                T2LV.Render.LevelRenderer.HeightFor(timeline, true) != expectedHeight ||
+                T2LV.Render.LevelRenderer.HeightFor(timeline, false, true) != expectedUniformHeight ||
+                T2LV.Render.LevelRenderer.HeightFor(timeline, true, true) != expectedUniformHeight;
+            Console.WriteLine($"ep{ep.Number} #{item.FileNum,-2} {item.Name.Trim(),-10} {timeline.Distance,6}px " +
+                $"uniform {timeline.UniformExtent,6}px " +
+                $"[{timeline.LayerDistance(0),6}/{timeline.LayerDistance(1),6}/{timeline.LayerDistance(2),6}] " +
+                $"wraps {timeline.WrapCount(0)}/{timeline.WrapCount(1)}/{timeline.WrapCount(2)} " +
+                $"objects {objects.Count} anchors {badGameAnchors}/{badAnchors} footprints {badFootprints} " +
+                $"states {badVisualStates}");
+            if (timeline.Distance >= 120_000 || invalidObjects != 0 ||
+                badGameAnchors != 0 || badAnchors != 0 || badVisualStates != 0 || badHeight)
+            {
+                Console.Error.WriteLine($"  invalid transformed objects: {invalidObjects}; " +
+                    $"misaligned anchors: game={badGameAnchors}, uniform={badAnchors}; " +
+                    $"visual states={badVisualStates}; height={(badHeight ? "bad" : "ok")}");
+                failed = true;
+            }
+            foreach (var o in badFootprintObjects.Take(8))
+                Console.WriteLine($"  footprint mismatch t={o.Time} enemy={o.EnemyId} " +
+                    $"band={o.Band} layer={o.UniformLayer + 1} y={o.ScreenY} " +
+                    $"distance={o.UniformPathDistance}");
+        }
+        return failed ? 1 : 0;
+    }
+
+    static int CheckAllLevels()
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
+        var gd = new T2LV.Tyrian.GameData(dir);
+        var image = new T2LV.Render.CompositeImage();
+        var seen = new HashSet<(int Episode, int File)>();
+        bool failed = false;
+        int rendered = 0;
+        foreach (var ep in gd.Episodes)
+        foreach (var item in ep.Levels)
+        {
+            if (!seen.Add((ep.Number, item.FileNum))) continue;
+            try
+            {
+                var level = gd.LoadLevel(ep, item.FileNum);
+                var timeline = T2LV.Tyrian.LevelTimeline.Build(level);
+                var objects = T2LV.Tyrian.ObjectPlacer.Place(
+                    gd, ep, level, gd.GetEnemyData(ep), timeline);
+                int unresolved = objects.Count(o => o.SpriteIndex > 0 && o.SpriteIndex != 999 &&
+                    (o.Sheet == null || o.Sheet.Decode(o.SpriteIndex) == null));
+                int nonFinite = objects.Count(o => !float.IsFinite(o.X) || !float.IsFinite(o.Y) ||
+                    !float.IsFinite(o.ScreenY));
+                var layers = T2LV.Render.LayerStack.GameOrder(
+                    T2LV.Render.LayerStack.CreateDefault(), level.ComputeStartFlags());
+                var palette = gd.Palettes.Get(AppSettings.GamePalette);
+                T2LV.Render.LevelRenderer.ComposeParallax(image, level,
+                    gd.GetShapeTable(level.ShapeChar), palette, layers, objects, true,
+                    timeline, false, true);
+                if (timeline.IsUnrolled)
+                    T2LV.Render.LevelRenderer.ComposeParallax(image, level,
+                        gd.GetShapeTable(level.ShapeChar), palette, layers, objects, true,
+                        timeline, true, true);
+                Console.WriteLine($"ep{ep.Number} #{item.FileNum,-2} {item.Name.Trim(),-10} " +
+                    $"events {level.Events.Length,4} objects {objects.Count,4} " +
+                    $"{image.Width}x{image.Height} unresolved {unresolved}");
+                if (unresolved != 0 || nonFinite != 0)
+                {
+                    Console.Error.WriteLine($"  invalid sprites={unresolved}, coordinates={nonFinite}");
+                    failed = true;
+                }
+                rendered++;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"ep{ep.Number} #{item.FileNum} {item.Name.Trim()}: {ex}");
+                failed = true;
+            }
+        }
+        Console.WriteLine($"rendered {rendered} unique levels in normal and preserved modes");
+        return failed ? 1 : 0;
+    }
+
+    static int AuditControlEvents()
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
+        var gd = new T2LV.Tyrian.GameData(dir);
+        int[] controlTypes = [8, 9, 21, 22, 26, 28, 29, 38, 42, 43, 44, 48, 53, 54, 61, 63,
+            64, 65, 66, 67, 70, 71, 72, 73, 75, 76, 77, 80, 81, 84];
+        var wanted = controlTypes.ToHashSet();
+        var seen = new HashSet<(int Episode, int File)>();
+        foreach (var ep in gd.Episodes)
+        foreach (var item in ep.Levels)
+        {
+            if (!seen.Add((ep.Number, item.FileNum))) continue;
+            var level = gd.LoadLevel(ep, item.FileNum);
+            var counts = level.Events.Where(e => wanted.Contains(e.Type))
+                .GroupBy(e => e.Type).OrderBy(g => g.Key)
+                .Select(g => $"{g.Key}:{g.Count()}").ToArray();
+            if (counts.Length != 0)
+            {
+                Console.WriteLine($"ep{ep.Number} #{item.FileNum,-2} {item.Name.Trim(),-10} " +
+                    string.Join(" ", counts));
+                foreach (var e in level.Events.Where(e => e.Type is 21 or 22 or 28 or 29 or 42 or 43 or 44 or 48 or 64 or 73))
+                    Console.WriteLine($"  t={e.Time} type={e.Type} dat={e.Dat} dat2={e.Dat2} " +
+                        $"dat3={e.Dat3} dat4={e.Dat4} dat5={e.Dat5} dat6={e.Dat6}");
+            }
+        }
+        return 0;
+    }
+
+    static int AuditSpawns()
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
+        var gd = new T2LV.Tyrian.GameData(dir);
+        byte[] spawnTypes = [6, 7, 10, 12, 15, 17, 18, 23, 32, 49, 50, 51, 52, 56];
+        var wanted = spawnTypes.ToHashSet();
+        var seen = new HashSet<(int Episode, int File)>();
+        foreach (var ep in gd.Episodes)
+        {
+            var enemyData = gd.GetEnemyData(ep);
+            foreach (var item in ep.Levels)
+            {
+                if (!seen.Add((ep.Number, item.FileNum))) continue;
+                var level = gd.LoadLevel(ep, item.FileNum);
+                var special = new List<string>();
+                foreach (var e in level.Events.Where(e => wanted.Contains(e.Type)))
+                {
+                    int count = e.Type == 12 ? 4 : 1;
+                    for (int k = 0; k < count; k++)
+                    {
+                        int enemyId = e.Type is >= 49 and <= 52 ? 0 : e.Dat + k;
+                        var d = enemyData.Get(enemyId);
+                        if (e.Dat2 == -200)
+                            special.Add($"t{e.Time}:type{e.Type}:id{enemyId}:randomX");
+                        else if (e.Dat2 == -99)
+                            special.Add($"t{e.Time}:type{e.Type}:id{enemyId}:default" +
+                                (d.StartXC != 0 || d.StartYC != 0
+                                    ? $"({d.StartX}+/-{d.StartXC},{d.StartY}+/-{d.StartYC})"
+                                    : $"({d.StartX},{d.StartY})"));
+                    }
+                }
+                if (special.Count != 0)
+                    Console.WriteLine($"ep{ep.Number} #{item.FileNum,-2} {item.Name.Trim(),-10} " +
+                        string.Join(" ", special));
+            }
+        }
+        return 0;
+    }
+
+    static int SpriteGrid(string[] args)
+    {
+        int gi = Array.IndexOf(args, "--sprites");
+        int epNum = gi + 1 < args.Length ? int.Parse(args[gi + 1]) : 1;
+        int fileNum = gi + 2 < args.Length ? int.Parse(args[gi + 2]) : 1;
+        string outDir = Environment.CurrentDirectory;
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        var gd = new T2LV.Tyrian.GameData(dir!);
+        var ep = gd.Episodes.Find(e => e.Number == epNum)!;
+        var lv = gd.LoadLevel(ep, fileNum);
+        var edd = gd.GetEnemyData(ep);
+        var objs = T2LV.Tyrian.ObjectPlacer.Place(gd, ep, lv, edd);
+        var pal = gd.Palettes.Get(0);
+
+        // distinct enemies by (sprite, esize), with a resolved sheet
+        var seen = new HashSet<(int, int)>();
+        var distinct = new List<T2LV.Tyrian.PlacedObject>();
+        foreach (var o in objs)
+            if (o.Sheet != null && o.SpriteIndex > 0 && o.SpriteIndex != 999 && seen.Add((o.SpriteIndex, o.Esize)))
+                distinct.Add(o);
+
+        // grid layout
+        int cols = 10, cellW = 30, cellH = 36, scale = 4;
+        int rows = (distinct.Count + cols - 1) / cols;
+        int gw = cols * cellW, gh = rows * cellH;
+        var buf = new uint[gw * gh];
+        for (int i = 0; i < buf.Length; i++) buf[i] = T2LV.Render.Gfx.Rgba(20, 20, 28);
+
+        void BlitG(T2LV.Tyrian.CompShapes sheet, int index, int x, int y)
+        {
+            var s = sheet.Decode(index);
+            if (s == null) return;
+            for (int sy = 0; sy < s.H; sy++)
+            {
+                int dy = y + sy; if (dy < 0 || dy >= gh) continue;
+                for (int sx = 0; sx < s.W; sx++)
+                {
+                    byte v = s.Pixels[sy * s.W + sx]; if (v == 0) continue;
+                    int dx = x + sx; if (dx < 0 || dx >= gw) continue;
+                    buf[dy * gw + dx] = pal[v];
+                }
+            }
+        }
+
+        for (int i = 0; i < distinct.Count; i++)
+        {
+            var o = distinct[i];
+            int cellX = (i % cols) * cellW, cellY = (i / cols) * cellH;
+            // cell reference point (matches in-game ex,ey within the 24x28 box)
+            int rx = cellX + 12, ry = cellY + 12;
+            if (o.Esize == 1)
+            {
+                BlitG(o.Sheet!, o.SpriteIndex, rx - 6, ry - 7);
+                BlitG(o.Sheet!, o.SpriteIndex + 1, rx + 6, ry - 7);
+                BlitG(o.Sheet!, o.SpriteIndex + 19, rx - 6, ry + 7);
+                BlitG(o.Sheet!, o.SpriteIndex + 20, rx + 6, ry + 7);
+            }
+            else BlitG(o.Sheet!, o.SpriteIndex, rx - 6, ry - 7);
+            // cell border
+            for (int x = 0; x < cellW; x++) { buf[cellY * gw + cellX + x] = 0xFF404050; }
+            for (int y = 0; y < cellH; y++) { buf[(cellY + y) * gw + cellX] = 0xFF404050; }
+        }
+
+        // print decoded heights for first 16 distinct
+        foreach (var o in distinct.Take(16))
+        {
+            string dims;
+            if (o.Esize == 1)
+                dims = string.Join(",", new[] { 0, 1, 19, 20 }.Select(off => { var s = o.Sheet!.Decode(o.SpriteIndex + off); return s == null ? "null" : $"{s.W}x{s.H}"; }));
+            else { var s = o.Sheet!.Decode(o.SpriteIndex); dims = s == null ? "null" : $"{s.W}x{s.H}"; }
+            Console.WriteLine($"  id{o.EnemyId} esize{o.Esize} base{o.SpriteIndex} cat={o.Cat}: {dims}");
+        }
+
+        // magnify
+        var mag = new uint[gw * scale * gh * scale];
+        for (int y = 0; y < gh * scale; y++)
+            for (int x = 0; x < gw * scale; x++)
+                mag[y * gw * scale + x] = buf[(y / scale) * gw + (x / scale)];
+        string path = Path.Combine(outDir, "sprites.png");
+        T2LV.Util.Png.WriteRgba(path, gw * scale, gh * scale, mag);
+        Console.WriteLine($"{distinct.Count} distinct enemy sprites -> {path} ({gw * scale}x{gh * scale})");
+        return 0;
+    }
+
+    static int FindEnemy(string[] args)
+    {
+        int gi = Array.IndexOf(args, "--findenemy");
+        int epNum = gi + 1 < args.Length ? int.Parse(args[gi + 1]) : 1;
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        var gd = new T2LV.Tyrian.GameData(dir!);
+        var ep = gd.Episodes.Find(e => e.Number == epNum)!;
+        var (raw, blockStart) = T2LV.Tyrian.EnemyData.LocateBlock(gd.DataDir, ep);
+        int computed = blockStart + new T2LV.Tyrian.EnemyData().PreEnemyOffset();
+        Console.WriteLine($"ep{epNum} blockStart={blockStart} computedEnemies={computed} fileLen={raw.Length}");
+
+        // Lightweight scorer: read shapebank(off+63), esize(off+20), egr0(off+21) per 77-byte record.
+        int Score(int off)
+        {
+            int good = 0;
+            for (int i = 0; i < 600; i++)
+            {
+                int rec = off + i * 77;
+                if (rec + 77 > raw.Length) break;
+                int esize = raw[rec + 20];
+                int bank = raw[rec + 63];
+                int egr0 = raw[rec + 21] | (raw[rec + 22] << 8);
+                if (esize <= 1 && bank >= 1 && bank <= 36 && egr0 > 0 && egr0 < 2000) good++;
+            }
+            return good;
+        }
+
+        // Find the lowest delta where the score becomes high (the table-start boundary).
+        int firstHigh = int.MinValue;
+        for (int delta = -8000; delta <= 8000; delta++)
+        {
+            int off = computed + delta;
+            if (off < 0 || off + 600 * 77 > raw.Length) continue;
+            if (Score(off) >= 580) { firstHigh = delta; break; }
+        }
+        Console.WriteLine($"  first high-score delta: {firstHigh}  -> enemiesOffset={computed + firstHigh}");
+        // Print scores in a fine window around the boundary to confirm the low->high edge.
+        if (firstHigh != int.MinValue)
+        {
+            for (int d = firstHigh - 5; d <= firstHigh + 2; d++)
+                Console.WriteLine($"     delta {d}: score {Score(computed + d)}");
+        }
+        return 0;
+    }
+
+    static int DumpSelfTest()
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("Could not find Tyrian 2000 data files."); return 1; }
+        Console.WriteLine($"Data dir: {dir}");
+        var gd = new T2LV.Tyrian.GameData(dir);
+        Console.WriteLine($"Palettes: {gd.Palettes.Count}");
+        foreach (var ep in gd.Episodes)
+        {
+            Console.WriteLine($"\n== Episode {ep.Number}: lvlNum={ep.Container.LvlNum} sections={ep.Container.SectionCount} scriptLevels={ep.ScriptLevels.Count}");
+            foreach (var item in ep.Levels)
+                Console.WriteLine($"   {item.Display}");
+
+            // Parse first section as a sanity check.
+            if (ep.Levels.Count > 0)
+            {
+                var lv = gd.LoadLevel(ep, ep.Levels[0].FileNum);
+                var sh = gd.GetShapeTable(lv.ShapeChar);
+                int nonBlank = 0; foreach (var t in sh.Tiles) if (t != null) nonBlank++;
+                Console.WriteLine($"   -> section {lv.FileNum}: shape='{lv.ShapeChar}' mapX={lv.MapX},{lv.MapX2},{lv.MapX3} enemies={lv.LevelEnemy.Length} events={lv.Events.Length} shapeTiles={nonBlank}/600");
+            }
+        }
+        return 0;
+    }
+}

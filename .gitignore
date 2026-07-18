@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+.vs/
+.claude/
+artifacts/
+imgui.ini
+*.user

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>Tyrian2000LevelViewer</AssemblyName>
+    <RootNamespace>T2LV</RootNamespace>
+    <Platforms>x64</Platforms>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationTitle>Tyrian 2000 Level Viewer</ApplicationTitle>
+    <Description>Viewer and PNG exporter for Tyrian 2000 level data.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Hexa.NET.ImGui" Version="2.2.9" />
+    <PackageReference Include="Hexa.NET.ImGui.Backends" Version="1.0.18" />
+    <PackageReference Include="Hexa.NET.ImGui.Backends.SDL2" Version="1.0.18" />
+    <PackageReference Include="Hexa.NET.SDL2" Version="1.2.17" />
+  </ItemGroup>
+
+</Project>
