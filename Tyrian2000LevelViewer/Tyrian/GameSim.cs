@@ -19,6 +19,29 @@ public sealed class GameSim
 {
     public const int ScreenW = 320, ScreenH = 200, Pitch = 320;   // vanilla engine surface
     public const int ViewX = 24, ViewW = 264, ViewH = 184;        // playfield crop (JE_starShowVGA)
+    /// <summary>Widescreen playfield crop width: the widescreen build widens vga_width to
+    /// 356 and crops PLAYFIELD_WIDTH = 356 - HUD 57 = 299 (video.h / notes.md §Widescreen).
+    /// <see cref="ViewW"/> is the vanilla 264; <see cref="PlayfieldWidth"/> picks between
+    /// them per <see cref="Widescreen"/>. ViewX (PLAYFIELD_LEFT crop) stays 24 either way.</summary>
+    public const int WideViewW = 299;
+    /// <summary>Background/object horizontal phase in widescreen (video.h PLAYFIELD_X_SHIFT):
+    /// every background row AND every enemy/shot tempMapXOfs shifts left by this, so terrain and
+    /// objects stay locked together as the playfield widens (the widescreen build applies it in
+    /// backgrnd.c and to every JE_drawEnemy pass). Vanilla applies no shift. notes.md §Widescreen.</summary>
+    private const int PlayfieldXShift = -12;
+
+    // Widescreen gameplay/cull bounds, mirrored from the widescreen source's video.h macros
+    // (PLAYFIELD_LEFT=24, PLAYFIELD_WIDTH=299, PLAYFIELD_RIGHT=322, vga_width=356). Each is
+    // used only when Widescreen is set; the vanilla path keeps its own literals unchanged, so
+    // normal playback stays byte-for-byte identical. The widescreen author deliberately
+    // retuned several of these (not a pure width shift) — see tyrian2.c/shots.c comments.
+    private const int WsDrawGateL  = -28;  // enemy draw/animate gate, left   (vanilla -29)
+    private const int WsDrawGateR  = 360;  // enemy draw/animate gate, right = PLAYFIELD_RIGHT+38 (vanilla 300)
+    private const int WsEnemyCullR = 376;  // enemy despawn X                 = vga_width+20      (vanilla 340)
+    private const int WsScoreParkL = 19;   // score-item park, left           = PLAYFIELD_LEFT-5  (vanilla -5)
+    private const int WsScoreParkR = 305;  // score-item park, right          = PLAYFIELD_RIGHT-17 (vanilla 245)
+    private const int WsOnScreenR  = 332;  // enemyOnScreen count gate, right = vga_width-24      (vanilla 296)
+    private const int WsShotCullR  = 335;  // enemy-shot despawn X            = PLAYFIELD_RIGHT+13 (vanilla 275)
     // Extended render buffer: the vanilla surface plus margins so the view can zoom out
     // and show terrain/enemies before they reach the screen. Vanilla (x, y) lives at
     // buffer (x + OX, y + OY).
@@ -27,8 +50,9 @@ public sealed class GameSim
     public const double TicksPerSecond = 35.0;
     /// <summary>How many repetitions of a player-gated (boss) loop the preview keeps
     /// before it continues as though the gate was cleared. The loop body still plays
-    /// once on the way in, so the retained region spans this many marked cycles.</summary>
-    public const int PreviewLoopCycles = 2;
+    /// once on the way in, so the retained region spans this many marked cycles.
+    /// Settable per run (the viewer exposes it); a change needs a rebuild.</summary>
+    public int PreviewLoopCycles = 2;
 
     // --- static level data (not part of snapshots) ---
     private readonly Level _lv;
@@ -46,6 +70,25 @@ public sealed class GameSim
     public bool PreviewEnemyGates = true; // keep PreviewLoopCycles boss loops, then continue as if defeated
     public int PlayerX = 100, PlayerY = 180;   // phantom player (aim/chase target)
     public uint RngSeed = 5489;
+    /// <summary>True-widescreen playback, mirroring the widescreen game build: the playfield
+    /// widens from 264 to 299px and the player range, parallax, spotlight and enemy/shot cull
+    /// bounds all follow, exactly as the widescreen source derives them (notes.md §Widescreen).
+    /// A sim parameter — it changes the simulation, so a change requires a rebuild. Off =
+    /// vanilla, byte-for-byte.</summary>
+    public bool Widescreen;
+    /// <summary>Widescreen-only "Extra Parallax" (OpenTyrian2000-Engaged commits edd8118 +
+    /// ae13d1c): the near terrain layer pans across EXACTLY its 336px map — mapXOfs sweeps 36
+    /// (far-left flush) to -1 (far-right flush), normalized over the ship's actual travel — so
+    /// a strafe runs it edge to edge with 0px spilling off either side; the mid/deep layers keep
+    /// the original coupled 4:2:1 ratio and intentionally over-pan/uncover their edges at
+    /// far-left. Bound ground enemies ride the same offsets, so they slide much further too.
+    /// Only meaningful with <see cref="Widescreen"/>; a sim parameter, so a change requires a
+    /// rebuild.</summary>
+    public bool ExpandedParallax;
+    /// <summary>Playfield crop width in effect: <see cref="WideViewW"/> (299) in widescreen,
+    /// else vanilla <see cref="ViewW"/> (264). Drives the display crop, screen filter, flip
+    /// and spotlight geometry.</summary>
+    public int PlayfieldWidth => Widescreen ? WideViewW : ViewW;
 
     // --- view options (draw-only; safe to change without a rebuild + redraw) ---
     public bool ExtendedDraw;           // render beyond the vanilla screen bounds
@@ -54,6 +97,15 @@ public sealed class GameSim
     public bool ShowSpotlight = true;       // JE_starShowVGA light cone
     public bool ShowScreenFlip = true;      // JE_starShowVGA vertical flip
     public bool ShowBossBars = true;        // draw_boss_bar armor readouts
+
+    /// <summary>Widescreen-only "Mirrored Layers" (commit 1f7ba83): background columns panned
+    /// past a layer's side edge re-read the same row's edge columns in reflected order and draw
+    /// horizontally FLIPPED, so the layer continues past its edge as a seamless mirror image
+    /// (mirrored-repeat) instead of wrapping into the adjacent map row. Independent of
+    /// <see cref="ExpandedParallax"/> — the stock widescreen span already uncovers ~12px of
+    /// layer 3 at far-left. Draw-only (a redraw suffices; no rebuild). App gates it on
+    /// <see cref="Widescreen"/>.</summary>
+    public bool MirrorLayers;
 
     // Layer-stack visibility, mirrored from the viewer's layer list. These gate blitting
     // only — scroll cursors, star positions and enemy logic all still run, so a hidden
@@ -142,7 +194,8 @@ public sealed class GameSim
             int cyc = Math.Clamp(e.enemycycle - 1, 0, 19);
             if (e.egr[cyc] == 999) continue;           // the engine frees these on sight
             int sx = e.ex + e.mapoffset;
-            bool onScreen = sx > -29 && sx < 300;
+            bool onScreen = Widescreen ? (sx > WsDrawGateL && sx < WsDrawGateR)
+                                       : (sx > -29 && sx < 300);
             if (!onScreen && !ExtendedDraw) continue;   // not drawn this frame
 
             bool big = e.size == 1;
@@ -207,9 +260,27 @@ public sealed class GameSim
             int cols = layer == 2 ? 15 : 14;
             var map = _map[layer];
 
+            // Mirror DrawBgLayer's widescreen shift / mirror / suppression exactly, so hover
+            // reports the tile actually drawn under the cursor.
+            int xshift = Widescreen ? PlayfieldXShift : 0;
+            int start = posIdx + bp - (Widescreen ? 14 : 12);
+            int col0 = cols == 15 ? bp : bp - 1;
+            bool mirror = MirrorLayers && Widescreen;
+            if (mirror) { if (start - col0 < 0) { start = 0; col0 = 0; } }
+            else if (ExpandedParallax && start < 0) start = 0;
             int i = FloorDiv(bufY - OY - backPos, 28);
-            int t = FloorDiv(bufX - OX - xPos, 24);
-            int idx = posIdx + bp - 12 + (i + 1) * cols + t;
+            int t = FloorDiv(bufX - OX - xPos - xshift, 24);
+            int rowBase = start + (i + 1) * cols;
+            int idx = rowBase + t;
+            if (mirror)
+            {
+                int c = col0 + t;
+                if (c < 0 || c >= cols)   // mirrored region: report the reflected source tile
+                    idx = rowBase - col0 + (c < 0 ? -1 - c : 2 * cols - 1 - c);
+            }
+            // Mirror off: expanded parallax's phantom-copy tiles are not drawn -> not pickable.
+            else if (ExpandedParallax && bp <= 0 &&
+                FloorDiv(idx, cols) != FloorDiv(rowBase + (Widescreen ? 13 : 11), cols)) continue;
             if ((uint)idx >= (uint)map.Length || map[idx] == null) continue;
 
             int row = FloorDiv(idx, cols);
@@ -401,6 +472,7 @@ public sealed class GameSim
         Array.Fill(_shotAvail, (byte)1);
         _expl = new Expl[200];
         _repExpl = new RepExpl[20];
+        if (PreviewLoopCycles < 1) PreviewLoopCycles = 1;   // guard array sizing below
         _gateLoopVisits = new ushort[_maxEvent + 1];
         _gateLoopTicks = new int[(_maxEvent + 1) * PreviewLoopCycles];
         _releaseGateEvent = -1;
@@ -506,15 +578,57 @@ public sealed class GameSim
         0 => _s.sheetId0, 1 => _s.sheetId1, 2 => _s.sheetId2, 3 => _s.sheetId3, _ => 0,
     };
 
-    /// <summary>Neutral-frame parallax offsets (mainint.c:4693, phantom player).</summary>
+    /// <summary>Neutral-frame parallax offsets (mainint.c:4693, phantom player). In
+    /// widescreen the widescreen build's rewritten formula (mainint.c
+    /// JE_mainGamePlayerFunctions) applies instead: a clamped 0..1 ramp over the widened
+    /// player range, with layer 2 pulled back 17px. notes.md §Widescreen.</summary>
     private void ComputeParallax()
     {
         int tempX = PlayerX;
-        int tempW = (int)MathF.Floor((float)(260 - (tempX - 36)) / (260 - 36) * (24 * 3) - 1);
-        _s.mapX3Ofs = tempW;
-        _s.mapX3Pos = _s.mapX3Ofs % 24;
-        _s.mapX3bp = 1 - _s.mapX3Ofs / 24;
-        _s.mapX2Ofs = tempW * 2 / 3;
+        int tempW;
+        if (Widescreen)
+        {
+            // w_f is the shared float driver for all three layers: mapX3Ofs = w_f,
+            // mapX2Ofs = (w_f-17)*2/3, mapXOfs = mapX2Ofs/2 (the original coupled 4:2:1 ratio).
+            float wf;
+            if (ExpandedParallax)
+            {
+                // Extra Parallax (commit ae13d1c): pan the NEAR layer across EXACTLY its 336px
+                // map -- mapXOfs sweeps 36 (far-left: map plane-px 0 at the window's left edge)
+                // down by the slack (336 - 299 = 37) to -1 (far-right: last map px at the right
+                // edge) -- normalized over the ship's ACTUAL travel [SHIP_LEFT_MARGIN,
+                // PLAYFIELD_WIDTH - SHIP_RIGHT_MARGIN] = [29, 303] so BOTH walls are reached.
+                // w_f is back-derived (3*near + 17) so the mid/deep layers keep the coupled
+                // ratio and still over-pan/uncover their edges at far-left (DrawBgLayer's base
+                // clamp guards the resulting out-of-range read).
+                const float shipLeft = 29f, shipRight = WideViewW + 4;   // SHIP_LEFT/RIGHT_MARGIN 29/-4
+                const float nearFlushLeft = ViewX - PlayfieldXShift;     // 24 - (-12) = 36
+                const float nearSlack = 14 * 24 - WideViewW;             // 336 - 299 = 37
+                float uu = Math.Clamp((tempX - shipLeft) / (shipRight - shipLeft), 0f, 1f);
+                wf = 3f * (nearFlushLeft - nearSlack * uu) + 17f;        // 125 (far-left) .. 14 (far-right)
+            }
+            else
+            {
+                // Stock widescreen amplitude and normalization. (The build's far-left bg2
+                // sub-pixel snap only touches its smooth-motion float mirrors; the viewer
+                // renders the integer offsets directly, which is already the crisp result.)
+                float u = Math.Clamp((tempX - 40f) / (WideViewW + 64 - 40), 0f, 1f);
+                wf = (1f - u) * (24 * 3);
+            }
+            tempW = (int)MathF.Floor(wf);
+            _s.mapX3Ofs = tempW;
+            _s.mapX3Pos = _s.mapX3Ofs % 24;
+            _s.mapX3bp = 1 - _s.mapX3Ofs / 24;
+            _s.mapX2Ofs = ((tempW - 17) * 2) / 3;
+        }
+        else
+        {
+            tempW = (int)MathF.Floor((float)(260 - (tempX - 36)) / (260 - 36) * (24 * 3) - 1);
+            _s.mapX3Ofs = tempW;
+            _s.mapX3Pos = _s.mapX3Ofs % 24;
+            _s.mapX3bp = 1 - _s.mapX3Ofs / 24;
+            _s.mapX2Ofs = tempW * 2 / 3;
+        }
         _s.mapX2Pos = _s.mapX2Ofs % 24;
         _s.mapX2bp = 1 - _s.mapX2Ofs / 24;
         _s.mapXOfs = _s.mapX2Ofs / 2;
@@ -525,6 +639,20 @@ public sealed class GameSim
             _s.mapX3Ofs = _s.mapXOfs;
             _s.mapX3Pos = _s.mapXPos;
             _s.mapX3bp = _s.mapXbp - 1;
+        }
+
+        // Layer 2 (bg2 overlay) right-edge coverage guard (commit ae13d1c). Its 14-tile (336px)
+        // strip is 1px too short of the widescreen playfield's right edge (col 322) once the pan
+        // pushes mapX2Ofs to its far-right -2 (strip at x=-14 ends on col 321); the near layer
+        // bottoms out at -1, so clamp layer 2 to that same floor. Applied AFTER mapXOfs is
+        // derived from the unclamped value (engine order), so only layer 2 itself moves. Not
+        // gated on ExpandedParallax -- the gap exists in plain widescreen too; vanilla mapX2Ofs
+        // never drops below 0, so the Widescreen gate keeps normal mode byte-identical.
+        if (Widescreen && _s.mapX2Ofs < -1)
+        {
+            _s.mapX2Ofs = -1;
+            _s.mapX2Pos = _s.mapX2Ofs % 24;
+            _s.mapX2bp = 1 - _s.mapX2Ofs / 24;
         }
     }
 
@@ -682,7 +810,15 @@ public sealed class GameSim
         if (_s.background2over == 2) DrawBackground2(draw);
 
         if (_s.randomExplosions && _rng.Next() % 10 == 1)
-            SetupExplosionLarge(false, 20, (int)(_rng.Next() % 280), (int)(_rng.Next() % 180));
+        {
+            // Widescreen spreads them across the widened playfield (PLAYFIELD_LEFT + rand %
+            // PLAYFIELD_WIDTH) and the full 184px height (vanilla stopped at 180). Same two
+            // RNG draws either way, so the timeline stays deterministic. tyrian2.c:3513.
+            if (Widescreen)
+                SetupExplosionLarge(false, 20, ViewX + (int)(_rng.Next() % WideViewW), (int)(_rng.Next() % 184));
+            else
+                SetupExplosionLarge(false, 20, (int)(_rng.Next() % 280), (int)(_rng.Next() % 180));
+        }
 
         if (_s.returnActive && _s.enemyOnScreen == 0)
         {
@@ -761,29 +897,75 @@ public sealed class GameSim
     {
         var map = _map[layer];
         int cols = layer == 2 ? 15 : 14;
-        int start = posIdx + bp - 12;
+        // Widescreen (backgrnd.c): the band cursor starts one BG_TILE_COUNT (14) back instead of
+        // 12, draws 14 on-screen columns (lastCol 13) instead of 12, and every row blits shifted
+        // by PLAYFIELD_X_SHIFT -- so terrain rides the same phase as the objects (see DrawEnemy).
+        int start = posIdx + bp - (Widescreen ? 14 : 12);
+        // col0 = map-column index of the strip's first tile within its row: the mapY*Pos cursors
+        // carry a -1 bias, so the 14-wide layers sit at bp-1; layer 3's 15-wide stride absorbs
+        // the bias, leaving bp (commit 1f7ba83 bg_mirror_setup call sites).
+        int col0 = cols == 15 ? bp : bp - 1;
+        // Mirror Layers (commit 1f7ba83 bg_mirror_tile): columns outside [0, cols) re-read the
+        // same row's edge columns in reflected order and draw horizontally flipped, so a layer
+        // panned past its side edge continues as a seamless mirror image instead of wrapping
+        // into the adjacent map row. If the first row itself starts before the map (level-end
+        // re-seat), fall back to the base clamp with mirroring inert (col0 = 0).
+        bool mirror = MirrorLayers && Widescreen;
+        if (mirror)
+        {
+            if (start - col0 < 0) { start = 0; col0 = 0; }
+        }
+        // Mirror off: Extra Parallax keeps the old base clamp (commit edd8118 bg_clamp_map) so
+        // the top-of-scroll over-pan repeats row 0 rather than reading out of bounds.
+        else if (ExpandedParallax && start < 0) start = 0;
+        int lastCol = Widescreen ? 13 : 11;          // rightmost on-screen tile column
+        int xshift = Widescreen ? PlayfieldXShift : 0;
+        // Mirror off + expanded parallax: the flat map layout would fill the over-panned strip
+        // (offset >= 24 <=> bp <= 0) with the PREVIOUS row's right columns -- a phantom second
+        // copy of the map on the left. Skip those foreign-row tiles so the uncovered edge reads
+        // black instead (user request; the build's notes call black the intent). Aligned strips
+        // (leftRow == rightRow) are no-ops, so event-77 mid-row seats (SQUADRON's backdrop) keep
+        // their authored wrap except while actually over-panned.
+        bool suppressWrap = !mirror && ExpandedParallax && bp <= 0;
 
         int iMin = ExtendedDraw ? -6 : -1;
         int iMax = ExtendedDraw ? 7 : 6;
         int tMin = ExtendedDraw ? -4 : 0;
-        int tMax = ExtendedDraw ? 16 : 11;
+        int tMax = ExtendedDraw ? 16 : lastCol;
 
         var tgt = _tgt;
         for (int i = iMin; i <= iMax; i++)
         {
             int rowBase = start + (i + 1) * cols;
-            int leftRow = FloorDiv(rowBase, cols);          // map row of on-screen column 0
-            int rightRow = FloorDiv(rowBase + 11, cols);    // map row of on-screen column 11
+            int leftRow = FloorDiv(rowBase, cols);              // map row of on-screen column 0
+            int rightRow = FloorDiv(rowBase + lastCol, cols);  // map row of the rightmost on-screen column
             int y = i * 28 + backPos;
             for (int t = tMin; t <= tMax; t++)
             {
                 int idx = rowBase + t;
-                if (t < 0 && FloorDiv(idx, cols) != leftRow) continue;
-                if (t > 11 && FloorDiv(idx, cols) != rightRow) continue;
+                bool flip = false;
+                if (mirror)
+                {
+                    int c = col0 + t;
+                    if (c < 0 || c >= cols)
+                    {
+                        // Reflected re-read from inside the same row, drawn flipped: per-tile
+                        // reflection + pixel flip compose to the exact plane-pixel mirror
+                        // p -> -1-p about the map edge (bg_mirror_tile).
+                        flip = true;
+                        idx = rowBase - col0 + (c < 0 ? -1 - c : 2 * cols - 1 - c);
+                    }
+                }
+                if (!flip)
+                {
+                    if (t < 0 && FloorDiv(idx, cols) != leftRow) continue;
+                    if (t > lastCol && FloorDiv(idx, cols) != rightRow) continue;
+                    if (suppressWrap && FloorDiv(idx, cols) != rightRow) continue;
+                }
                 if ((uint)idx >= (uint)map.Length) continue;
                 byte[]? data = map[idx];
                 if (data == null) continue;
-                int bx = xPos + t * 24;
+                int bx = xPos + xshift + t * 24;
                 for (int ty = 0; ty < 28; ty++)
                 {
                     int dy = y + ty + OY;
@@ -792,7 +974,7 @@ public sealed class GameSim
                     int dstRow = dy * BufW;
                     for (int tx = 0; tx < 24; tx++)
                     {
-                        byte v = data[src + tx];
+                        byte v = data[src + (flip ? 23 - tx : tx)];
                         if (v == 0) continue;
                         int dx = bx + tx + OX;
                         if ((uint)dx >= BufW) continue;
@@ -1084,6 +1266,11 @@ public sealed class GameSim
     // =====================================================================
     private void DrawEnemy(int enemyOffset, int tempMapXOfs, int tempBackMove, bool draw)
     {
+        // Widescreen shifts every pass's tempMapXOfs by PLAYFIELD_X_SHIFT (tyrian2.c sets it on
+        // the tempMapXOfs global before each JE_drawEnemy). This flows to the enemy blit position,
+        // e.mapoffset (hover/on-screen), the draw/cull gates, aim, and shot creation (sh.sx), so
+        // objects ride the same shifted playfield as the background. notes.md §Widescreen.
+        if (Widescreen) tempMapXOfs += PlayfieldXShift;
         int px = PlayerX - 25;   // player[0].x -= 25 wrapper
         for (int i = enemyOffset - 25; i < enemyOffset; i++)
         {
@@ -1102,7 +1289,8 @@ public sealed class GameSim
                 else { if (e.eyc >= 0 || -e.eyc < e.yaccel - 89) e.eyc--; }
             }
 
-            if (e.ex + tempMapXOfs > -29 && e.ex + tempMapXOfs < 300)
+            if (e.ex + tempMapXOfs > (Widescreen ? WsDrawGateL : -29) &&
+                e.ex + tempMapXOfs < (Widescreen ? WsDrawGateR : 300))
             {
                 if (e.aniactive == 1)
                 {
@@ -1166,7 +1354,7 @@ public sealed class GameSim
             e.ey += e.fixedmovey;
 
             e.ex += e.exc;
-            if (e.ex < -80 || e.ex > 340) { _avail[i] = 1; continue; }
+            if (e.ex < -80 || e.ex > (Widescreen ? WsEnemyCullR : 340)) { _avail[i] = 1; continue; }
             e.ey += e.eyc;
             if (e.ey < -112 || e.ey > 190) { _avail[i] = 1; continue; }
 
@@ -1175,13 +1363,13 @@ public sealed class GameSim
 
             if (e.scoreitem)
             {
-                if (e.ex < -5) e.ex++;
-                if (e.ex > 245) e.ex--;
+                if (e.ex < (Widescreen ? WsScoreParkL : -5)) e.ex++;
+                if (e.ex > (Widescreen ? WsScoreParkR : 245)) e.ex--;
             }
 
             e.ey += tempBackMove;
 
-            if (e.ex <= -24 || e.ex >= 296) continue;
+            if (e.ex <= -24 || e.ex >= (Widescreen ? WsOnScreenR : 296)) continue;
 
             int tempX = e.ex, tempY = e.ey;
 
@@ -1382,7 +1570,8 @@ public sealed class GameSim
                 if (sh.sy > PlayerY) { if (sh.sym > -sh.ty) sh.sym--; }
                 else { if (sh.sym < sh.ty) sh.sym++; }
             }
-            if (sh.duration-- == 0 || sh.sy > 190 || sh.sy <= -14 || sh.sx > 275 || sh.sx <= 0)
+            if (sh.duration-- == 0 || sh.sy > 190 || sh.sy <= -14 ||
+                sh.sx > (Widescreen ? WsShotCullR : 275) || sh.sx <= 0)
             {
                 _shotAvail[z] = 1;
                 continue;
@@ -1562,9 +1751,14 @@ public sealed class GameSim
 
         if (draw && ShowBossBars)
         {
+            // Widescreen re-centres the bars in the wider playfield (the widescreen build centres
+            // its boss bars on PLAYFIELD_WIDTH/2), so a centred bar stays centred rather than
+            // sitting left of centre. The bars are HUD overlays, so they take the centring delta,
+            // not the terrain's PLAYFIELD_X_SHIFT.
+            int wsBarShift = Widescreen ? (WideViewW - ViewW) / 2 : 0;   // 17
             for (int bi = 0; bi < bars; bi++)
             {
-                int x = bars == 2 ? (bi == 0 ? 125 : 185) : (_s.levelTimer ? 250 : 155);
+                int x = (bars == 2 ? (bi == 0 ? 125 : 185) : (_s.levelTimer ? 250 : 155)) + wsBarShift;
                 int y = _s.levelTimer ? 15 : 7;
                 BarX(x - 25, y, x + 25, y + 5, 115);
                 BarX(x - armor[bi] / 10, y, x + (armor[bi] + 5) / 10, y + 5, 118 + color[bi]);
@@ -1606,13 +1800,14 @@ public sealed class GameSim
 
         if (!draw || !ShowScreenFilter) return;
 
+        int pw = PlayfieldWidth;   // 299 widescreen / 264 vanilla
         if (col != -99)
         {
             int hue = (col << 4) & 0xF0;
             for (int y = 0; y < ViewH; y++)
             {
                 int row = (y + OY) * BufW + ViewX + OX;
-                for (int x = 0; x < ViewW; x++)
+                for (int x = 0; x < pw; x++)
                     Screen[row + x] = (byte)(hue | (Screen[row + x] & 0x0F));
             }
         }
@@ -1621,7 +1816,7 @@ public sealed class GameSim
             for (int y = 0; y < ViewH; y++)
             {
                 int row = (y + OY) * BufW + ViewX + OX;
-                for (int x = 0; x < ViewW; x++)
+                for (int x = 0; x < pw; x++)
                 {
                     byte s = Screen[row + x];
                     uint t = (uint)((s & 0x0F) + bright);
@@ -1635,9 +1830,13 @@ public sealed class GameSim
     // =====================================================================
     //  Presentation (JE_starShowVGA): flip / spotlight special codes.
     // =====================================================================
+    /// <summary>True when this frame is presented vertically flipped (JE_starShowVGA code 1).</summary>
+    public bool ScreenFlipped => ShowScreenFlip && _s.smoothies[8] + (_s.smoothies[5] << 1) == 1;
+
     public void PreparePresent()
     {
         Array.Copy(Screen, PresentScreen, Screen.Length);
+        int pw = PlayfieldWidth;   // 299 widescreen / 264 vanilla
         int code = _s.smoothies[8] + (_s.smoothies[5] << 1);
         if (code == 1 && ShowScreenFlip)
         {
@@ -1646,22 +1845,24 @@ public sealed class GameSim
             {
                 int dst = (r + OY) * BufW + ViewX + OX;
                 int src = (ViewH - 1 - r + OY) * BufW + ViewX + OX;
-                Array.Copy(Screen, src, PresentScreen, dst, ViewW);
+                Array.Copy(Screen, src, PresentScreen, dst, pw);
             }
         }
         else if (code == 2 && ShowSpotlight)
         {
-            // spotlight around the (phantom) player; everything else darkened
+            // spotlight around the (phantom) player; everything else darkened. lightx/x
+            // widen with the playfield: 281 = 264+17, 316 = 299+17 (widescreen
+            // composite_playfield: PLAYFIELD_WIDTH - PLAYFIELD_X_SHIFT + 5). notes.md §Widescreen.
             int lighty = 172 - PlayerY;
-            int lightx = 281 - PlayerX;
+            int lightx = pw + 17 - PlayerX;
             for (int r = 0; r < ViewH; r++)
             {
                 int y = 184 - r;
                 int row = (r + OY) * BufW + ViewX + OX;
-                for (int c = 0; c < ViewW; c++)
+                for (int c = 0; c < pw; c++)
                 {
                     byte s = Screen[row + c];
-                    int x = 264 - c;
+                    int x = pw - c;
                     if (lighty > y)
                     {
                         PresentScreen[row + c] = (byte)((s & 0xF0) | ((s >> 2) & 0x03));
@@ -1858,22 +2059,27 @@ public sealed class GameSim
 
         if (ev.Dat2 != -99)
         {
+            // Widescreen starts the background map cursor 2 tiles earlier (DrawBgLayer's
+            // -tile_count), so event-spawned enemies compensate by 2 tiles -- (mapX-3) vs the
+            // vanilla (mapX-1), and case 50's else form drops the -24*2 -- to stay locked to the
+            // terrain column they are authored onto. tyrian2.c JE_createNewEventEnemy.
+            int mapXAdj = Widescreen ? 3 : 1;
             switch (enemyOffset)
             {
                 case 0:
-                    e.ex = ev.Dat2 - (_lv.MapX - 1) * 24;
+                    e.ex = ev.Dat2 - (_lv.MapX - mapXAdj) * 24;
                     e.ey -= _s.backMove2;
                     break;
                 case 25:
                 case 75:
-                    e.ex = ev.Dat2 - (_lv.MapX - 1) * 24 - 12;
+                    e.ex = ev.Dat2 - (_lv.MapX - mapXAdj) * 24 - 12;
                     e.ey -= _s.backMove;
                     break;
                 case 50:
                     if (_s.background3x1)
-                        e.ex = ev.Dat2 - (_lv.MapX - 1) * 24 - 12;
+                        e.ex = ev.Dat2 - (_lv.MapX - mapXAdj) * 24 - 12;
                     else
-                        e.ex = ev.Dat2 - _lv.MapX3 * 24 - 24 * 2 + 6;
+                        e.ex = ev.Dat2 - _lv.MapX3 * 24 + 6 - (Widescreen ? 0 : 24 * 2);
                     e.ey -= _s.backMove3;
                     if (_s.background3x1b) e.ex -= 6;
                     break;
@@ -2599,7 +2805,10 @@ public sealed class GameSim
                     if (ev.Dat4 != 0 && _enemy[i].linknum != ev.Dat4) continue;
                     if (ev.Dat5 != -99) _enemy[i].xminbounce = ev.Dat5;
                     if (ev.Dat6 != -99) _enemy[i].yminbounce = ev.Dat6;
-                    if (ev.Dat != -99) _enemy[i].xmaxbounce = ev.Dat;
+                    // Widescreen: the right bounce bound was authored for the 320px field; shift
+                    // it out by the widescreen extension (vga_width - LEGACY_WIDTH = 36) so
+                    // sweeping enemies cover the full widened playfield. tyrian2.c case 74.
+                    if (ev.Dat != -99) _enemy[i].xmaxbounce = ev.Dat + (Widescreen ? 36 : 0);
                     if (ev.Dat2 != -99) _enemy[i].ymaxbounce = ev.Dat2;
                 }
                 break;

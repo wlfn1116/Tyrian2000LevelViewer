@@ -25,6 +25,9 @@ public sealed class AppSettings
     public bool UniformTextureScale { get; set; }
     public bool GameLayerOrder { get; set; } = true;   // auto-apply the level's in-game layer order
     public bool SimExtendedView { get; set; }
+    public bool Widescreen { get; set; }               // true-widescreen playback (356px playfield)
+    public bool ExpandedParallax { get; set; }         // widescreen sub-option: wider all-layer parallax sweep
+    public bool MirrorLayers { get; set; } = true;     // widescreen sub-option: mirror layers past their side edges
     public bool ShowScreenFilter { get; set; } = true;
     public bool ShowSmoothies { get; set; } = true; // retained JSON name: terrain smoothies
     // Nullable so an older settings file can inherit its former broad smoothie toggle.

@@ -117,7 +117,11 @@ internal static unsafe class Program
             settings.ShowSpotlight = false;
         if (noSmoothies || Array.IndexOf(args, "--no-screen-flip") >= 0)
             settings.ShowScreenFlip = false;
-        var app = new App(renderer, settings, cliEp, cliLevel, window, cliPlaybackTick);
+        if (Array.IndexOf(args, "--no-boss-bars") >= 0) settings.ShowBossBars = false;
+        int pli = Array.IndexOf(args, "--player");
+        int cliPlayerX = pli >= 0 && pli + 1 < args.Length && int.TryParse(args[pli + 1], out int pxv) ? pxv : -1;
+        int cliPlayerY = pli >= 0 && pli + 2 < args.Length && int.TryParse(args[pli + 2], out int pyv) ? pyv : 150;
+        var app = new App(renderer, settings, cliEp, cliLevel, window, cliPlaybackTick, cliPlayerX, cliPlayerY);
 
         int mi = Array.IndexOf(args, "--mouse");
         var inv = System.Globalization.CultureInfo.InvariantCulture;

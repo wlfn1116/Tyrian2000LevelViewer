@@ -41,10 +41,10 @@ public sealed class SimPlayback
     {
         0 => "capped",
         1 when _loopRegions[0].Kind == HoldLoopKind.ScriptedLoop =>
-            "enemy-gated loop, 3 cycles kept",
+            $"enemy-gated loop, {_loopRegions[0].CycleEnds.Length} cycles kept",
         1 when _loopRegions[0].Kind == HoldLoopKind.EnemyHold =>
             "enemy-gated hold, 20 s preview",
-        1 => "conditional route loop, 3 cycles kept",
+        1 => $"conditional route loop, {_loopRegions[0].CycleEnds.Length} cycles kept",
         _ => $"{_loopRegions.Count} loop/hold sections previewed",
     };
 
@@ -110,7 +110,7 @@ public sealed class SimPlayback
     /// A level that never ends without a player is usually replaying a scripted attack
     /// loop while it waits for the boss (or linked enemies) to die. Only accept a loop
     /// whose event still recurs near the precompute cap, then retain
-    /// GameSim.PreviewLoopCycles cycles (matching the scripted-gate preview).
+    /// Sim.PreviewLoopCycles cycles (matching the scripted-gate preview).
     /// </summary>
     private void DetectHoldingLoop()
     {
@@ -164,7 +164,7 @@ public sealed class SimPlayback
             int tolerance = Math.Max(2, cycle / 10);
 
             // Walk back to the first stable recurrence, keeping the authored lead-in.
-            int keep = GameSim.PreviewLoopCycles;
+            int keep = Sim.PreviewLoopCycles;
             int start = ticks.Count - 1 - keep;
             while (start > 0 && Math.Abs((ticks[start] - ticks[start - 1]) - cycle) <= tolerance)
                 start--;

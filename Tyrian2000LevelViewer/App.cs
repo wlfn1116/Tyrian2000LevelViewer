@@ -62,14 +62,31 @@ public sealed unsafe class App
     private int _simDifficulty = 2;          // normal
     private bool _simFire = true;
     private int _simMaxMinutes = 10;
+    private int _simLoopCycles = 2;          // boss-gate / route-loop repeats kept in the preview
     private float _playZoom;                 // 0 = fit to the panel automatically
     private Vector2 _playPan;                // manual pan offset, screen px
     private bool _simExtendedView;           // show beyond the in-game screen
+    private bool _widescreen;                // true-widescreen playback (356px playfield, wider bounds)
+    private bool _expandedParallax;          // widescreen sub-option: wider all-layer parallax sweep (commit edd8118)
+    private bool _mirrorLayers = true;       // widescreen sub-option: mirror layers past their side edges (commit 1f7ba83)
     private bool _showScreenFilter = true;   // event-44 hue/brightness filter
     private bool _showTerrainSmoothies = true; // lava/water/ice/blur
     private bool _showSpotlight = true;       // light-cone presentation
     private bool _showScreenFlip = true;      // vertical-flip presentation
     private bool _showBossBars = true;        // boss armor readout bars
+    private bool _playerSimMode;              // show/drag the phantom-player marker
+    private bool _pivotInvisible;             // hide the marker+guide but keep the position live
+    private int _simPlayerX = 100, _simPlayerY = 150;  // phantom player pos (sticky; drives parallax/aim)
+    private bool _draggingPlayer;             // a player-marker drag is in progress
+    // Playfield crop width for the current mode (widescreen 299 / vanilla 264) and the phantom-
+    // player X range derived from it. Vanilla keeps the viewer's historical 36..260; widescreen
+    // uses the widescreen build's ACTUAL ship clamp [SHIP_LEFT_MARGIN, PLAYFIELD_WIDTH -
+    // SHIP_RIGHT_MARGIN] = [29, 303] -- the expanded-parallax sweep normalizes over exactly this
+    // travel, so both walls must be reachable. Field-based (not sim-based) so it is valid before
+    // a playback exists (constructor --player clamp).
+    private int PlayfieldW => _widescreen ? GameSim.WideViewW : GameSim.ViewW;
+    private int PlayerXMin => _widescreen ? 29 : 36;
+    private int PlayerXMax => _widescreen ? GameSim.WideViewW + 4 : GameSim.ViewW - 4;   // 303 / 260
     private readonly GameViewImage _gameView = new();
     private static readonly float[] SpeedSteps = { 0.25f, 0.5f, 1f, 2f, 4f, 8f };
     private static readonly string[] DifficultyNames =
@@ -90,12 +107,21 @@ public sealed unsafe class App
     private bool _restoreView;
 
     public App(SdlNs.SDLRendererPtr renderer, AppSettings settings, int cliEp = -1, int cliLevelIdx = -1,
-        SdlNs.SDLWindowPtr window = default, int cliPlaybackTick = -1)
+        SdlNs.SDLWindowPtr window = default, int cliPlaybackTick = -1, int cliPlayerX = -1, int cliPlayerY = -1)
     {
         _renderer = renderer;
         _settings = settings;
         _window = window;
         if (cliPlaybackTick >= 0) _playbackMode = true;
+        _widescreen = settings.Widescreen;   // needed before the --player clamp (PlayerXMax) below
+        _expandedParallax = settings.ExpandedParallax;
+        _mirrorLayers = settings.MirrorLayers;
+        if (cliPlayerX >= 0)   // --player x y: start in phantom-player mode at a fixed spot (testing)
+        {
+            _playerSimMode = true;
+            _simPlayerX = Math.Clamp(cliPlayerX, PlayerXMin, PlayerXMax);
+            _simPlayerY = Math.Clamp(cliPlayerY, 0, 170);
+        }
 
         _palette = Math.Max(0, settings.Palette);
         _objMode = Math.Clamp(settings.ObjMode, 0, 2);
@@ -180,6 +206,9 @@ public sealed unsafe class App
         s.ObjMode = _objMode;
         s.GameLayerOrder = _gameLayerOrder;
         s.SimExtendedView = _simExtendedView;
+        s.Widescreen = _widescreen;
+        s.ExpandedParallax = _expandedParallax;
+        s.MirrorLayers = _mirrorLayers;
         s.ShowScreenFilter = _showScreenFilter;
         s.ShowSmoothies = _showTerrainSmoothies;
         s.ShowSpotlight = _showSpotlight;
@@ -306,11 +335,18 @@ public sealed unsafe class App
                 ScrollMult = _simScrollMult,
                 FireEnabled = _simFire,
                 ExtendedDraw = _simExtendedView,
+                Widescreen = _widescreen,
+                ExpandedParallax = _widescreen && _expandedParallax,   // widescreen-only sub-option
+                MirrorLayers = _widescreen && _mirrorLayers,           // widescreen-only sub-option (draw-only)
                 ShowScreenFilter = _showScreenFilter,
                 ShowTerrainSmoothies = _showTerrainSmoothies,
                 ShowSpotlight = _showSpotlight,
                 ShowScreenFlip = _showScreenFlip,
                 ShowBossBars = _showBossBars,
+                PreviewLoopCycles = _simLoopCycles,   // boss-gate / route-loop repeats kept
+                PlayerX = _simPlayerX,   // sticky: the phantom player keeps its last position
+                PlayerY = _simPlayerY,   // whether or not the drag marker is currently shown
+
             };
             _playback = new SimPlayback(sim, Math.Max(1, _simMaxMinutes) * 60 * 35);
             _playback.SeekTo(Math.Clamp(keepTick, 1, _playback.Duration));
@@ -398,7 +434,7 @@ public sealed unsafe class App
                 0, 0, GameSim.BufW, GameSim.BufH);
         else
             _gameView.Update(_renderer, _playback.Sim.PresentScreen, pal,
-                GameSim.OX + GameSim.ViewX, GameSim.OY, GameSim.ViewW, GameSim.ViewH);
+                GameSim.OX + GameSim.ViewX, GameSim.OY, _playback.Sim.PlayfieldWidth, GameSim.ViewH);
     }
 
     public void Render()
@@ -544,101 +580,6 @@ public sealed unsafe class App
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Simulate the level exactly like in-game: enemies move, fire and\nlaunch, all level events run, camera locked to the player's view.\nSpace = play/pause, Left/Right = step (Shift = 1 s).");
-        if (_playbackMode && _playback != null)
-        {
-            int dif = _simDifficulty;
-            ImGui.PushItemWidth(140);
-            if (ImGui.Combo("difficulty", &dif, DifficultyNames, DifficultyNames.Length))
-            { _simDifficulty = dif; BuildPlayback(); }
-
-            float mult = _simScrollMult;
-            if (ImGui.SliderFloat("scroll speed", &mult, 0.25f, 3f, "x%.2f"))
-                _simScrollMult = mult;
-            if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("What-if terrain scroll multiplier. The level's own variable\nscroll-rate events still apply on top; the event clock follows\nthe terrain, so spawn pacing changes with it.");
-
-            bool fire = _simFire;
-            if (ImGui.Checkbox("enemy fire", &fire)) { _simFire = fire; BuildPlayback(); }
-            ImGui.SameLine();
-            int cap = _simMaxMinutes;
-            ImGui.PushItemWidth(90);
-            if (ImGui.SliderInt("cap (min)", &cap, 1, 30))
-                _simMaxMinutes = cap;
-            if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
-            ImGui.PopItemWidth();
-            ImGui.PopItemWidth();
-
-            // view-only options: instant, no rebuild
-            bool extv = _simExtendedView;
-            if (ImGui.Checkbox("extended view", &extv))
-            {
-                _simExtendedView = extv;
-                _playback.Sim.ExtendedDraw = extv;
-                _playback.RedrawCurrent();
-                _playZoom = 0;
-                _playPan = Vector2.Zero;
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Zoom out beyond the in-game screen: full map width plus\nenemies/terrain before they scroll in. The yellow rectangle\nmarks what the player actually sees.");
-
-            bool sm = _showTerrainSmoothies;
-            if (ImGui.Checkbox("terrain smoothies", &sm))
-            {
-                _showTerrainSmoothies = sm;
-                _playback.Sim.ShowTerrainSmoothies = sm;
-                _playback.RedrawCurrent();
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Lava, water, iced-blur, and blur feedback effects.");
-            ImGui.SameLine();
-            bool sf = _showScreenFilter;
-            if (ImGui.Checkbox("color / fades", &sf))
-            {
-                _showScreenFilter = sf;
-                _playback.Sim.ShowScreenFilter = sf;
-                _playback.RedrawCurrent();
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Full-screen event-44 color, darken, lighten, and fade effects.");
-
-            bool spot = _showSpotlight;
-            if (ImGui.Checkbox("spotlight", &spot))
-            {
-                _showSpotlight = spot;
-                _playback.Sim.ShowSpotlight = spot;
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("The light-cone presentation only; terrain smoothies stay unchanged.");
-            ImGui.SameLine();
-            bool flip = _showScreenFlip;
-            if (ImGui.Checkbox("screen flip", &flip))
-            {
-                _showScreenFlip = flip;
-                _playback.Sim.ShowScreenFlip = flip;
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("The event-driven upside-down playfield presentation.");
-
-            bool bossbars = _showBossBars;
-            if (ImGui.Checkbox("boss bars", &bossbars))
-            {
-                _showBossBars = bossbars;
-                _playback.Sim.ShowBossBars = bossbars;
-                _playback.RedrawCurrent();
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("The boss/enemy armor readout bars drawn across the top of the screen.");
-
-            var sim = _playback.Sim;
-            ImGui.TextDisabled($"tick {_playback.CurrentTick}/{_playback.Duration}  loc {sim.CurLoc}  " +
-                $"enemies {sim.EnemyOnScreen}");
-            var (b1, b2, b3) = sim.BackMoves;
-            ImGui.TextDisabled($"scroll {b1}/{b2}/{b3}  " +
-                (_playback.EndedNaturally ? _playback.LoopDetected
-                        ? $"ends naturally; {_playback.LoopSummary}" : "ends naturally"
-                    : _playback.LoopDetected ? _playback.LoopSummary : "capped (no natural end)"));
-        }
 
         // --- Palette ---
         ImGui.SeparatorText("Palette");
@@ -974,6 +915,433 @@ public sealed unsafe class App
     }
 
     // =====================================================================
+    //  Transport-bar vector glyphs. The default ImGui font has no media
+    //  symbols, so the play / step / skip icons are drawn straight into the
+    //  button rect from simple triangles and bars.
+    // =====================================================================
+    private enum Glyph { JumpStart, Rewind, Play, Pause, FastFwd, JumpEnd }
+
+    private static void TriRight(ImDrawListPtr dl, Vector2 c, float r, uint col)
+        => dl.AddTriangleFilled(
+            new Vector2(c.X - r * 0.60f, c.Y - r),
+            new Vector2(c.X + r * 0.82f, c.Y),
+            new Vector2(c.X - r * 0.60f, c.Y + r), col);
+
+    private static void TriLeft(ImDrawListPtr dl, Vector2 c, float r, uint col)
+        => dl.AddTriangleFilled(
+            new Vector2(c.X + r * 0.60f, c.Y - r),
+            new Vector2(c.X - r * 0.82f, c.Y),
+            new Vector2(c.X + r * 0.60f, c.Y + r), col);
+
+    private static void VBar(ImDrawListPtr dl, float cx, float cy, float halfH, float halfW, uint col)
+        => dl.AddRectFilled(new Vector2(cx - halfW, cy - halfH), new Vector2(cx + halfW, cy + halfH), col, 1f);
+
+    /// <summary>A transport button with a vector-drawn icon; returns true on click.</summary>
+    private bool TransportBtn(string id, Glyph g, string tip, Vector2 size,
+        bool primary = false, bool active = false, float gap = 4f)
+    {
+        int pushed = 0;
+        if (primary)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, Gfx.Rgba(58, 104, 182));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Gfx.Rgba(78, 128, 212));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, Gfx.Rgba(98, 150, 232));
+            pushed = 3;
+        }
+        else if (active)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, Gfx.Rgba(150, 92, 52));
+            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Gfx.Rgba(184, 116, 68));
+            ImGui.PushStyleColor(ImGuiCol.ButtonActive, Gfx.Rgba(206, 138, 84));
+            pushed = 3;
+        }
+
+        bool hit = ImGui.Button(id, size);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(tip);
+
+        var mn = ImGui.GetItemRectMin();
+        var mx = ImGui.GetItemRectMax();
+        var c = new Vector2((mn.X + mx.X) * 0.5f, (mn.Y + mx.Y) * 0.5f);
+        float r = MathF.Max(3f, MathF.Round((mx.Y - mn.Y) * 0.22f));
+        float tk = MathF.Max(1.5f, r * 0.28f);
+        uint col = Gfx.Rgba(241, 241, 247);
+        var dl = ImGui.GetWindowDrawList();
+        switch (g)
+        {
+            case Glyph.JumpStart:
+                VBar(dl, c.X - r * 1.02f, c.Y, r, tk, col);
+                TriLeft(dl, new Vector2(c.X + r * 0.42f, c.Y), r, col);
+                break;
+            case Glyph.Rewind:
+                TriLeft(dl, new Vector2(c.X - r * 0.52f, c.Y), r, col);
+                TriLeft(dl, new Vector2(c.X + r * 0.78f, c.Y), r, col);
+                break;
+            case Glyph.Play:
+                TriRight(dl, new Vector2(c.X + r * 0.14f, c.Y), r * 1.14f, col);
+                break;
+            case Glyph.Pause:
+                VBar(dl, c.X - r * 0.46f, c.Y, r, MathF.Max(1.5f, r * 0.32f), col);
+                VBar(dl, c.X + r * 0.46f, c.Y, r, MathF.Max(1.5f, r * 0.32f), col);
+                break;
+            case Glyph.FastFwd:
+                TriRight(dl, new Vector2(c.X - r * 0.78f, c.Y), r, col);
+                TriRight(dl, new Vector2(c.X + r * 0.52f, c.Y), r, col);
+                break;
+            case Glyph.JumpEnd:
+                TriRight(dl, new Vector2(c.X - r * 0.42f, c.Y), r, col);
+                VBar(dl, c.X + r * 1.02f, c.Y, r, tk, col);
+                break;
+        }
+
+        if (pushed > 0) ImGui.PopStyleColor(pushed);
+        ImGui.SameLine(0, gap);
+        return hit;
+    }
+
+    private static void OverlayHeader(string label)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Text, Gfx.Rgba(135, 190, 250));
+        ImGui.Text(label);
+        ImGui.PopStyleColor();
+        ImGui.Separator();
+    }
+
+    /// <summary>
+    /// The on-canvas control HUD: a real draggable, collapsible window floated over the
+    /// playfield with the simulation parameters, the phantom-player control, the display
+    /// toggles and a live status block. Anchored top-right on first show; the user can
+    /// drag it by its title bar or fold it with the arrow.
+    /// </summary>
+    private void DrawSimOverlay(Vector2 viewPos, Vector2 viewSize)
+    {
+        if (_playback == null) return;
+
+        ImGui.SetNextWindowPos(new Vector2(viewPos.X + viewSize.X - 12f, viewPos.Y + 12f),
+            ImGuiCond.FirstUseEver, new Vector2(1f, 0f));
+
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, Gfx.Rgba(15, 17, 23, 232));
+        ImGui.PushStyleColor(ImGuiCol.Border, Gfx.Rgba(92, 104, 140, 210));
+        ImGui.PushStyleColor(ImGuiCol.TitleBg, Gfx.Rgba(28, 36, 56, 235));
+        ImGui.PushStyleColor(ImGuiCol.TitleBgActive, Gfx.Rgba(44, 60, 92, 245));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 7f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(11, 9));
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(5, 2));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(7, 4));
+
+        if (ImGui.Begin("Playback controls##pbhud",
+                ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.AlwaysAutoResize |
+                ImGuiWindowFlags.NoNavInputs | ImGuiWindowFlags.NoNavFocus |
+                ImGuiWindowFlags.NoFocusOnAppearing))
+        {
+            var sim = _playback!.Sim;
+
+            OverlayHeader("SIMULATION");
+            ImGui.PushItemWidth(112);
+            int dif = _simDifficulty;
+            if (ImGui.Combo("difficulty", &dif, DifficultyNames, DifficultyNames.Length))
+            { _simDifficulty = dif; BuildPlayback(); }
+
+            float mult = _simScrollMult;
+            if (ImGui.SliderFloat("scroll speed", &mult, 0.25f, 3f, "x%.2f"))
+                _simScrollMult = mult;
+            if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("What-if terrain scroll multiplier. The level's own variable\nscroll-rate events still apply on top; the event clock follows\nthe terrain, so spawn pacing changes with it.");
+
+            int cap = _simMaxMinutes;
+            if (ImGui.SliderInt("cap (min)", &cap, 1, 30))
+                _simMaxMinutes = cap;
+            if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
+
+            int loops = _simLoopCycles;
+            if (ImGui.SliderInt("loop cycles", &loops, 1, 8))
+                _simLoopCycles = loops;
+            if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("How many times each boss gate / route loop repeats in the\npreview before it continues as if the gate was cleared. The\nloop still plays once on the way in. Higher = watch more\nrepeats, but a longer build and timeline.");
+            ImGui.PopItemWidth();
+
+            bool fire = _simFire;
+            if (ImGui.Checkbox("enemy fire", &fire)) { _simFire = fire; BuildPlayback(); }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Simulate enemy turrets firing and launching.");
+
+            ImGui.Dummy(new Vector2(0, 3));
+            OverlayHeader("PLAYER");
+            bool ws = _widescreen;
+            if (ImGui.Checkbox("widescreen mode", &ws))
+            {
+                _widescreen = ws;
+                _draggingPlayer = false;
+                _simPlayerX = Math.Clamp(_simPlayerX, PlayerXMin, PlayerXMax);  // keep the marker inside the new bounds
+                _playZoom = 0; _playPan = Vector2.Zero;                 // refit the view to the new width
+                BuildPlayback();   // widescreen changes the sim (parallax, cull bounds) -> full rebuild
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Play in true widescreen (299px playfield vs the vanilla 264),\n" +
+                    "exactly like the widescreen game build: wider view and player\n" +
+                    "range, parallax, spotlight, and enemies / shots that persist\n" +
+                    "across the widened edges. Rebuilds the timeline.");
+            if (_widescreen)
+            {
+                bool ep = _expandedParallax;
+                if (ImGui.Checkbox("expanded parallax", &ep)) { _expandedParallax = ep; BuildPlayback(); }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Wider parallax (widescreen build's Extra Parallax): the terrain\n" +
+                        "layer pans edge-to-edge across its full 336px map over the\n" +
+                        "player's travel -- nothing left hidden off either side -- and the\n" +
+                        "mid/deep layers sweep proportionally further (uncovering their\n" +
+                        "edges at far-left). Bound ground enemies ride the same offsets\n" +
+                        "and slide much further too. Rebuilds the timeline.");
+                bool ml = _mirrorLayers;
+                if (ImGui.Checkbox("mirror layers", &ml))
+                {
+                    // Draw-only (tile reads/flips at blit time), so no timeline rebuild needed.
+                    _mirrorLayers = ml;
+                    sim.MirrorLayers = _widescreen && ml;
+                    _playback!.RedrawCurrent();
+                }
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Widescreen build's Mirrored Layers: where the parallax pans a\n" +
+                        "background layer past its own side edge, the layer continues as\n" +
+                        "a seamless mirror image of itself instead of wrapping into the\n" +
+                        "adjacent map row. Off = the original edge wrap.");
+            }
+            bool psm = _playerSimMode;
+            if (ImGui.Checkbox("drag player position", &psm))
+            {
+                // The position is sticky, so toggling only shows / hides the marker;
+                // the sim already holds the last dragged spot — no rebuild needed.
+                _playerSimMode = psm;
+                _draggingPlayer = false;
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show a draggable player marker on the view. The parallax\nbackground scroll, the light cone and enemy aim/fire all\nfollow it, exactly as the engine derives them in-game.\nThe position sticks when you turn the marker back off.");
+            if (_playerSimMode)
+            {
+                bool pv = _pivotInvisible;
+                if (ImGui.Checkbox("make pivot invisible", &pv)) _pivotInvisible = pv;
+                if (ImGui.IsItemHovered())
+                    ImGui.SetTooltip("Hide the marker and its guide line but keep the\nplayer position active (parallax / aim still follow it).");
+
+                // Playfield-centre targets, from the phantom-player -> buffer mapping.
+                // cX widens with the playfield (149 vanilla / 166 widescreen).
+                int cX = GameSim.OX + GameSim.ViewX + PlayfieldW / 2 - PlayerBufOX;
+                const int cY = GameSim.OY + GameSim.ViewH / 2 - PlayerBufOY;                  // 80
+                void SetPlayer(int px, int py)
+                {
+                    _simPlayerX = Math.Clamp(px, PlayerXMin, PlayerXMax);
+                    _simPlayerY = Math.Clamp(py, 0, 170);
+                    BuildPlayback();
+                }
+
+                ImGui.TextDisabled($"x {_simPlayerX}   y {_simPlayerY}");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("reset")) SetPlayer(100, 150);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Return the phantom player to its default spot.");
+
+                ImGui.TextDisabled("center:");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("X##ctr")) SetPlayer(cX, _simPlayerY);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Center the player on the X axis.");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Y##ctr")) SetPlayer(_simPlayerX, cY);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Center the player on the Y axis.");
+                ImGui.SameLine();
+                if (ImGui.SmallButton("both##ctr")) SetPlayer(cX, cY);
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Center the player on both axes.");
+            }
+
+            ImGui.Dummy(new Vector2(0, 3));
+            OverlayHeader("DISPLAY");
+
+            void ViewToggle(string label, ref bool field, Action apply, string tip)
+            {
+                bool v = field;
+                if (ImGui.Checkbox(label, &v)) { field = v; apply(); }
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip(tip);
+            }
+
+            ViewToggle("boss bars", ref _showBossBars,
+                () => { _playback!.Sim.ShowBossBars = _showBossBars; _playback!.RedrawCurrent(); },
+                "The boss / enemy armor readout bars drawn across the top of the screen.");
+            ViewToggle("terrain smoothies", ref _showTerrainSmoothies,
+                () => { _playback!.Sim.ShowTerrainSmoothies = _showTerrainSmoothies; _playback!.RedrawCurrent(); },
+                "Lava, water, iced-blur, and blur feedback effects.");
+            ViewToggle("color / fades", ref _showScreenFilter,
+                () => { _playback!.Sim.ShowScreenFilter = _showScreenFilter; _playback!.RedrawCurrent(); },
+                "Full-screen event-44 color, darken, lighten, and fade effects.");
+            ViewToggle("spotlight", ref _showSpotlight,
+                () => { _playback!.Sim.ShowSpotlight = _showSpotlight; _playback!.RedrawCurrent(); },
+                "The light-cone presentation only; terrain smoothies stay unchanged.");
+            ViewToggle("screen flip", ref _showScreenFlip,
+                () => { _playback!.Sim.ShowScreenFlip = _showScreenFlip; _playback!.RedrawCurrent(); },
+                "The event-driven upside-down playfield presentation.");
+            ViewToggle("extended view", ref _simExtendedView,
+                () =>
+                {
+                    _playback!.Sim.ExtendedDraw = _simExtendedView;
+                    _playback!.RedrawCurrent();
+                    _playZoom = 0;
+                    _playPan = Vector2.Zero;
+                },
+                "Zoom out beyond the in-game screen: full map width plus\nenemies/terrain before they scroll in. The yellow rectangle\nmarks what the player actually sees.");
+
+            ImGui.Dummy(new Vector2(0, 3));
+            OverlayHeader("STATUS");
+            ImGui.PushTextWrapPos(0f);
+            ImGui.TextDisabled($"tick {_playback!.CurrentTick}/{_playback.Duration}   " +
+                $"loc {sim.CurLoc}   enemies {sim.EnemyOnScreen}");
+            var (b1, b2, b3) = sim.BackMoves;
+            ImGui.TextDisabled($"scroll {b1}/{b2}/{b3}   " +
+                (_playback.EndedNaturally ? _playback.LoopDetected
+                        ? $"ends naturally; {_playback.LoopSummary}" : "ends naturally"
+                    : _playback.LoopDetected ? _playback.LoopSummary : "capped (no natural end)"));
+            ImGui.PopTextWrapPos();
+
+            DrawRoutesAndGates(_playback!);
+        }
+        ImGui.End();
+        ImGui.PopStyleVar(5);
+        ImGui.PopStyleColor(4);
+    }
+
+    /// <summary>
+    /// The loop/gate inventory the precompute found: every boss gate, enemy hold and route
+    /// loop, with its start time and retained-cycle count (set by "loop cycles"). Each row
+    /// seeks to that section on click; the section under the playhead is highlighted. The
+    /// textual companion to the hatched regions on the timeline.
+    /// </summary>
+    private void DrawRoutesAndGates(SimPlayback pb)
+    {
+        ImGui.Dummy(new Vector2(0, 3));
+        OverlayHeader($"ROUTES & GATES ({pb.LoopRegions.Count})");
+
+        if (pb.LoopRegions.Count == 0)
+        {
+            ImGui.TextDisabled(pb.EndedNaturally
+                ? "none - level plays straight through"
+                : "none detected (capped)");
+            return;
+        }
+
+        static string Mmss(int tick)
+        {
+            int s = (int)Math.Round(tick / GameSim.TicksPerSecond);
+            return $"{s / 60}:{s % 60:00}";
+        }
+
+        var dl = ImGui.GetWindowDrawList();
+        float h = ImGui.GetTextLineHeight();
+        for (int i = 0; i < pb.LoopRegions.Count; i++)
+        {
+            var r = pb.LoopRegions[i];
+            bool active = pb.CurrentTick >= r.StartTick && pb.CurrentTick <= r.EndTick;
+            int n = r.CycleEnds.Length;
+            (string kind, string amount, uint swatch) = r.Kind switch
+            {
+                SimPlayback.HoldLoopKind.ScriptedLoop =>
+                    ("boss gate", $"x{n} kept (until destroyed)", Gfx.Rgba(255, 150, 90)),
+                SimPlayback.HoldLoopKind.RouteLoop =>
+                    ("route loop", $"x{n} cycles", Gfx.Rgba(120, 200, 255)),
+                _ => ("enemy hold", "holds until destroyed", Gfx.Rgba(230, 120, 210)),
+            };
+
+            // colour swatch (boss = orange, route = blue, hold = magenta), then the row.
+            var p = ImGui.GetCursorScreenPos();
+            dl.AddRectFilled(new Vector2(p.X, p.Y + 2), new Vector2(p.X + h, p.Y + h), swatch);
+            ImGui.Dummy(new Vector2(h, h));
+            ImGui.SameLine(0, 4);
+
+            if (ImGui.Selectable($"{kind,-10} {Mmss(r.StartTick),5}  {amount}##g{i}", active))
+            { pb.SeekTo(r.StartTick); _playing = false; }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(
+                    $"{kind} at {SimPlayback.FormatTime(r.StartTick)} - {SimPlayback.FormatTime(r.EndTick)}\n" +
+                    $"{amount}\nclick to jump here");
+        }
+    }
+
+    // The phantom player (GameSim.PlayerX/Y) maps to the buffer via the engine's own
+    // spotlight geometry: bufX = PlayerX + 79, bufY = PlayerY + 140.
+    private const int PlayerBufOX = 79, PlayerBufOY = 140;
+
+    /// <summary>
+    /// Player-position mode: a draggable marker at the phantom player. Dragging it feeds
+    /// GameSim.PlayerX/Y, so the parallax, light cone and enemy aim re-derive live; a
+    /// full rebuild on release makes the whole timeline coherent with the new position.
+    /// </summary>
+    private void HandlePlayerMarker(ImDrawListPtr dl, Vector2 imgPos, float scale,
+        Vector2 mouse, bool viewHovered, Vector2 viewPos, Vector2 viewSize)
+    {
+        if (!_playerSimMode || _pivotInvisible || _playback == null) return;
+
+        float texOX = _simExtendedView ? 0 : GameSim.OX + GameSim.ViewX;
+        float texOY = _simExtendedView ? 0 : GameSim.OY;
+        Vector2 ToScreen(float bx, float by) => imgPos + new Vector2(bx - texOX, by - texOY) * scale;
+
+        // When the playfield is presented upside-down (screen flip), the marker must sit
+        // on the flipped image: mirror its Y within the crop, and invert the drag the same
+        // way. Mirror() is its own inverse, so the glyph still tracks the cursor exactly.
+        bool flipped = _playback.Sim.ScreenFlipped;
+        float Mirror(float by) => 2f * GameSim.OY + GameSim.ViewH - 1 - by;
+        float MarkerBufY(int py) => flipped ? Mirror(py + PlayerBufOY) : py + PlayerBufOY;
+
+        Vector2 mk = ToScreen(_simPlayerX + PlayerBufOX, MarkerBufY(_simPlayerY));
+        bool over = viewHovered && Vector2.Distance(mouse, mk) <= 15f;
+
+        if (over && ImGui.IsMouseClicked(ImGuiMouseButton.Left)) _draggingPlayer = true;
+        if (_draggingPlayer)
+        {
+            if (ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            {
+                var mb = (mouse - imgPos) / scale + new Vector2(texOX, texOY);
+                float effY = flipped ? Mirror(mb.Y) : mb.Y;
+                int nx = Math.Clamp((int)MathF.Round(mb.X - PlayerBufOX), PlayerXMin, PlayerXMax);
+                int ny = Math.Clamp((int)MathF.Round(effY - PlayerBufOY), 0, 170);
+                if (nx != _simPlayerX || ny != _simPlayerY)
+                {
+                    _simPlayerX = nx; _simPlayerY = ny;
+                    _playback.Sim.PlayerX = nx; _playback.Sim.PlayerY = ny;
+                    _playback.RedrawCurrent();
+                    mk = ToScreen(nx + PlayerBufOX, MarkerBufY(ny));
+                }
+            }
+            else
+            {
+                _draggingPlayer = false;
+                BuildPlayback();   // make the entire timeline coherent with the new position
+            }
+        }
+
+        // A faint guide line at the player's X marks the parallax pivot.
+        dl.AddLine(new Vector2(mk.X, viewPos.Y), new Vector2(mk.X, viewPos.Y + viewSize.Y),
+            Gfx.Rgba(120, 220, 255, 45));
+        DrawPlayerGlyph(dl, mk, _draggingPlayer || over, flipped);
+    }
+
+    /// <summary>A reticle + ship glyph marking the draggable phantom player. The ship
+    /// points down when the playfield is presented flipped, matching the mirrored view.</summary>
+    private static void DrawPlayerGlyph(ImDrawListPtr dl, Vector2 c, bool hot, bool flipped)
+    {
+        float r = hot ? 11f : 9f;
+        float sy = flipped ? -1f : 1f;   // point the ship the same way the playfield reads
+        uint fill = hot ? Gfx.Rgba(150, 232, 255) : Gfx.Rgba(96, 202, 245);
+        uint edge = Gfx.Rgba(10, 20, 30, 235);
+        uint ring = Gfx.Rgba(150, 235, 255, (byte)(hot ? 240 : 175));
+        dl.AddCircle(c, r + 3f, ring, 0, hot ? 2f : 1.5f);
+        var p1 = new Vector2(c.X, c.Y - r * sy);
+        var p2 = new Vector2(c.X - r * 0.88f, c.Y + r * 0.78f * sy);
+        var p3 = new Vector2(c.X + r * 0.88f, c.Y + r * 0.78f * sy);
+        dl.AddTriangleFilled(p1, p2, p3, fill);
+        dl.AddTriangle(p1, p2, p3, edge, 1.5f);
+        dl.AddCircleFilled(c, 1.7f, edge);
+        dl.AddLine(new Vector2(c.X - r - 7, c.Y), new Vector2(c.X - r - 1, c.Y), ring);
+        dl.AddLine(new Vector2(c.X + r + 1, c.Y), new Vector2(c.X + r + 7, c.Y), ring);
+    }
+
+    // =====================================================================
     //  Playback canvas: locked in-game view + transport + timeline.
     // =====================================================================
     private void DrawPlaybackCanvas()
@@ -1020,10 +1388,10 @@ public sealed unsafe class App
                 scale = newScale;
             }
         }
-        if (viewActive &&
+        if (viewActive && !_draggingPlayer &&
             (ImGui.IsMouseDragging(ImGuiMouseButton.Left) || ImGui.IsMouseDragging(ImGuiMouseButton.Middle)))
             _playPan += io.MouseDelta;
-        if (viewHovered && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+        if (viewHovered && !_draggingPlayer && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
         { _playZoom = 0; _playPan = Vector2.Zero; scale = fit; }
 
         // keep at least a sliver of the frame inside the panel
@@ -1043,12 +1411,13 @@ public sealed unsafe class App
         {
             // the actual in-game viewport within the extended field
             var vp0 = imgPos + new Vector2((GameSim.OX + GameSim.ViewX) * scale, GameSim.OY * scale);
-            var vp1 = vp0 + new Vector2(GameSim.ViewW * scale, GameSim.ViewH * scale);
+            var vp1 = vp0 + new Vector2(PlayfieldW * scale, GameSim.ViewH * scale);
             dl.AddRect(vp0, vp1, Gfx.Rgba(255, 225, 120, 200), 0f, 0, 1.5f);
             dl.AddText(vp0 + new Vector2(4, 2), Gfx.Rgba(255, 225, 120, 170), "screen");
         }
         DrawPlaybackOverlay(dl, pb, imgPos, scale, vw, vh, mouse,
             viewHovered && !viewActive, pos, viewSize);
+        HandlePlayerMarker(dl, imgPos, scale, mouse, viewHovered, pos, viewSize);
         string loopOsd = "";
         var activeGate = pb.LoopRegions.FirstOrDefault(r =>
             pb.CurrentTick >= r.StartTick && pb.CurrentTick <= r.EndTick);
@@ -1077,60 +1446,86 @@ public sealed unsafe class App
         string osd = $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.Duration)}" +
             (_playing ? _playDirection > 0 ? $"   >> x{_playSpeed:0.##}" : $"   << x{_playSpeed:0.##}" : "   paused") +
             $"   zoom {scale * 100:0}%" + loopOsd;
-        dl.AddText(pos + new Vector2(8, 6), Gfx.Rgba(235, 235, 245), osd);
+        // A soft backdrop keeps the readout legible over bright terrain.
+        var osdAt = pos + new Vector2(8, 6);
+        var osdSz = ImGui.CalcTextSize(osd);
+        dl.AddRectFilled(osdAt - new Vector2(5, 3), osdAt + osdSz + new Vector2(6, 3),
+            Gfx.Rgba(12, 12, 16, 145), 4f);
+        dl.AddText(osdAt, Gfx.Rgba(238, 238, 246), osd);
         dl.PopClipRect();
 
+        // Floating controls HUD over the playfield: a real draggable/collapsible
+        // window, so it leaves the canvas layout cursor untouched.
+        DrawSimOverlay(pos, viewSize);
+
         // --- transport row ---
-        bool SmallBtn(string label, string tip)
+        float fh = ImGui.GetFrameHeight();
+        var bsz = new Vector2(MathF.Round(fh * 1.5f), fh);        // step / skip buttons
+        var psz = new Vector2(MathF.Round(fh * 2.1f), fh);        // hero play / pause
+
+        // A plain text button matched to the icon buttons' height.
+        bool TextBtn(string label, Vector2 size, string tip, float gap = 4f)
         {
-            bool hit = ImGui.Button(label);
+            bool hit = ImGui.Button(label, size);
             if (ImGui.IsItemHovered()) ImGui.SetTooltip(tip);
-            ImGui.SameLine(0, 4);
+            ImGui.SameLine(0, gap);
             return hit;
         }
 
-        if (SmallBtn("|<", "Jump to start")) { pb.SeekTo(1); _playing = false; }
-        if (SmallBtn("-1", "Step one tick back (Left)")) { pb.SeekTo(pb.CurrentTick - 1); _playing = false; }
+        bool fwd = _playing && _playDirection > 0;
         bool rewinding = _playing && _playDirection < 0;
-        if (SmallBtn(rewinding ? "||##rew" : "<<", rewinding ? "Pause" : "Play backwards"))
+
+        if (TransportBtn("##pbstart", Glyph.JumpStart, "Jump to start", bsz))
+        { pb.SeekTo(1); _playing = false; }
+        if (TransportBtn("##pbrewind", Glyph.Rewind, rewinding ? "Stop rewind" : "Play backwards",
+                bsz, active: rewinding))
         {
             if (rewinding) _playing = false;
             else { _playing = true; _playDirection = -1; _playAccum = 0; }
         }
-        bool fwd = _playing && _playDirection > 0;
-        if (SmallBtn(fwd ? "||" : ">", fwd ? "Pause (Space)" : "Play (Space)"))
+        if (TextBtn("-1", bsz, "Step one tick back (Left)"))
+        { pb.SeekTo(pb.CurrentTick - 1); _playing = false; }
+
+        if (TransportBtn("##pbplay", fwd ? Glyph.Pause : Glyph.Play,
+                fwd ? "Pause (Space)" : "Play (Space)", psz, primary: true))
         {
             if (fwd) _playing = false;
-            else
-            {
-                if (pb.AtEnd) pb.SeekTo(1);
-                _playing = true; _playDirection = 1; _playAccum = 0;
-            }
+            else { if (pb.AtEnd) pb.SeekTo(1); _playing = true; _playDirection = 1; _playAccum = 0; }
         }
-        if (SmallBtn(">>", "Fast-forward (cycles 2x/4x/8x; click > for normal speed)"))
+
+        if (TextBtn("+1", bsz, "Step one tick forward (Right)"))
+        { pb.SeekTo(pb.CurrentTick + 1); _playing = false; }
+        if (TransportBtn("##pbff", Glyph.FastFwd,
+                "Fast-forward (cycles 2x / 4x / 8x; Play resets to 1x)", bsz,
+                active: fwd && _playSpeed > 1f))
         {
             _playing = true; _playDirection = 1; _playAccum = 0;
             _playSpeed = _playSpeed switch { < 2f => 2f, < 4f => 4f, < 8f => 8f, _ => 1f };
         }
-        if (SmallBtn("+1", "Step one tick forward (Right)")) { pb.SeekTo(pb.CurrentTick + 1); _playing = false; }
-        if (SmallBtn(">|", "Jump to end")) { pb.SeekTo(pb.Duration); _playing = false; }
-        if (SmallBtn("Fit", "Reset zoom and pan (or double-click the view)\nwheel = zoom, drag = pan"))
+        if (TransportBtn("##pbend", Glyph.JumpEnd, "Jump to end", bsz, gap: 12f))
+        { pb.SeekTo(pb.Duration); _playing = false; }
+
+        if (TextBtn("Fit", new Vector2(MathF.Round(fh * 1.7f), fh),
+                "Reset zoom and pan (or double-click the view)\nwheel = zoom, drag = pan", 12f))
         { _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
 
-        ImGui.PushItemWidth(64);
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextDisabled("speed");
+        ImGui.SameLine(0, 6);
+        ImGui.SetNextItemWidth(64);
         int speedIdx = Array.IndexOf(SpeedSteps, _playSpeed);
         if (speedIdx < 0) speedIdx = 2;
         var speedNames = SpeedSteps.Select(s => $"x{s:0.##}").ToArray();
         if (ImGui.Combo("##speed", &speedIdx, speedNames, speedNames.Length))
             _playSpeed = SpeedSteps[speedIdx];
-        ImGui.PopItemWidth();
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Playback speed (game runs at 35 ticks/s)");
-        ImGui.SameLine(0, 10);
+
+        ImGui.SameLine(0, 14);
+        ImGui.AlignTextToFramePadding();
         string endTag = pb.LoopDetected
             ? $"  [{pb.LoopRegions.Count} loop/hold section{(pb.LoopRegions.Count == 1 ? "" : "s")} previewed]"
             : pb.EndedNaturally ? "" : "  [capped]";
-        ImGui.TextDisabled($"tick {pb.CurrentTick}/{pb.Duration}" +
-            endTag);
+        ImGui.TextDisabled($"tick {pb.CurrentTick}/{pb.Duration}{endTag}");
 
         DrawTimeline(pb);
     }
