@@ -5,3 +5,5 @@
 artifacts/
 imgui.ini
 *.user
+/tyrian2000data
+/tyrian2000source
