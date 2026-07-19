@@ -69,6 +69,7 @@ public sealed unsafe class App
     private bool _showTerrainSmoothies = true; // lava/water/ice/blur
     private bool _showSpotlight = true;       // light-cone presentation
     private bool _showScreenFlip = true;      // vertical-flip presentation
+    private bool _showBossBars = true;        // boss armor readout bars
     private readonly GameViewImage _gameView = new();
     private static readonly float[] SpeedSteps = { 0.25f, 0.5f, 1f, 2f, 4f, 8f };
     private static readonly string[] DifficultyNames =
@@ -104,6 +105,7 @@ public sealed unsafe class App
         _showTerrainSmoothies = settings.ShowSmoothies;
         _showSpotlight = settings.ShowSpotlight ?? settings.ShowSmoothies;
         _showScreenFlip = settings.ShowScreenFlip ?? settings.ShowSmoothies;
+        _showBossBars = settings.ShowBossBars;
         _levelsHeight = settings.LevelsHeight > 30 ? settings.LevelsHeight : 170f;
         _layersHeight = settings.LayersHeight > 30 ? settings.LayersHeight : 0f;  // 0 = fit to content
         ApplyLayerSettings(settings.Layers);
@@ -182,6 +184,7 @@ public sealed unsafe class App
         s.ShowSmoothies = _showTerrainSmoothies;
         s.ShowSpotlight = _showSpotlight;
         s.ShowScreenFlip = _showScreenFlip;
+        s.ShowBossBars = _showBossBars;
         s.LevelsHeight = _levelsHeight;
         s.LayersHeight = _layersHeight;
         s.HasView = _viewInitialized;
@@ -307,6 +310,7 @@ public sealed unsafe class App
                 ShowTerrainSmoothies = _showTerrainSmoothies,
                 ShowSpotlight = _showSpotlight,
                 ShowScreenFlip = _showScreenFlip,
+                ShowBossBars = _showBossBars,
             };
             _playback = new SimPlayback(sim, Math.Max(1, _simMaxMinutes) * 60 * 35);
             _playback.SeekTo(Math.Clamp(keepTick, 1, _playback.Duration));
@@ -615,6 +619,16 @@ public sealed unsafe class App
             }
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip("The event-driven upside-down playfield presentation.");
+
+            bool bossbars = _showBossBars;
+            if (ImGui.Checkbox("boss bars", &bossbars))
+            {
+                _showBossBars = bossbars;
+                _playback.Sim.ShowBossBars = bossbars;
+                _playback.RedrawCurrent();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("The boss/enemy armor readout bars drawn across the top of the screen.");
 
             var sim = _playback.Sim;
             ImGui.TextDisabled($"tick {_playback.CurrentTick}/{_playback.Duration}  loc {sim.CurLoc}  " +

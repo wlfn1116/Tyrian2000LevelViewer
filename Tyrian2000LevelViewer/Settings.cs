@@ -30,6 +30,7 @@ public sealed class AppSettings
     // Nullable so an older settings file can inherit its former broad smoothie toggle.
     public bool? ShowSpotlight { get; set; }
     public bool? ShowScreenFlip { get; set; }
+    public bool ShowBossBars { get; set; } = true;
 
     /// <summary>The palette gameplay always runs in: JE_loadPic(3) -> pcxpal[2] = 5.</summary>
     public const int GamePalette = 5;

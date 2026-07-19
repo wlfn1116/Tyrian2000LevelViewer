@@ -53,6 +53,7 @@ public sealed class GameSim
     public bool ShowTerrainSmoothies = true; // lava/water/ice/blur feedback filters
     public bool ShowSpotlight = true;       // JE_starShowVGA light cone
     public bool ShowScreenFlip = true;      // JE_starShowVGA vertical flip
+    public bool ShowBossBars = true;        // draw_boss_bar armor readouts
 
     // Layer-stack visibility, mirrored from the viewer's layer list. These gate blitting
     // only — scroll cursors, star positions and enemy logic all still run, so a hidden
@@ -1559,7 +1560,7 @@ public sealed class GameSim
             link[1] = 0;
         }
 
-        if (draw)
+        if (draw && ShowBossBars)
         {
             for (int bi = 0; bi < bars; bi++)
             {
