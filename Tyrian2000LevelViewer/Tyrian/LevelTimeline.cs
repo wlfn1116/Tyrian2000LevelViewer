@@ -243,9 +243,11 @@ public sealed class LevelTimeline
                     case 44:
                         filterActive = e.Dat > 0;
                         filterFade = e.Dat == 2;
-                        levelFilter = e.Dat2;
+                        // These are JE_shortint fields. Data byte 157 therefore means
+                        // -99 (brightness only), not hue 13.
+                        levelFilter = unchecked((sbyte)e.Dat2);
                         levelBrightness = e.Dat3;
-                        levelFilterNew = e.Dat4;
+                        levelFilterNew = unchecked((sbyte)e.Dat4);
                         levelBrightnessChg = e.Dat5;
                         filterFadeStart = e.Dat6 == 0;
                         var newFilter = new ScreenFilterState(
@@ -487,10 +489,10 @@ public sealed class LevelTimeline
             // advances the fade globals for the following frame.
             if (filterActive && filterFade)
             {
-                levelBrightness += levelBrightnessChg;
+                levelBrightness = unchecked((sbyte)(levelBrightness + levelBrightnessChg));
                 if ((filterFadeStart && levelBrightness < -14) || levelBrightness > 14)
                 {
-                    levelBrightnessChg = -levelBrightnessChg;
+                    levelBrightnessChg = unchecked((sbyte)-levelBrightnessChg);
                     filterFadeStart = false;
                     levelFilter = levelFilterNew;
                 }

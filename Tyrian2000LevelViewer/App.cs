@@ -52,6 +52,8 @@ public sealed unsafe class App
     // --- Playback (in-game simulation) ---
     private SimPlayback? _playback;
     private bool _playbackMode;
+    private readonly List<GameSim.EnemyView> _playEnemies = new();   // refilled per frame
+    private int _objCatMask = ~0;      // layer-list category visibility, for markers/hover
     private bool _playing;
     private int _playDirection = 1;          // 1 forward, -1 rewind
     private float _playSpeed = 1f;
@@ -62,6 +64,11 @@ public sealed unsafe class App
     private int _simMaxMinutes = 10;
     private float _playZoom;                 // 0 = fit to the panel automatically
     private Vector2 _playPan;                // manual pan offset, screen px
+    private bool _simExtendedView;           // show beyond the in-game screen
+    private bool _showScreenFilter = true;   // event-44 hue/brightness filter
+    private bool _showTerrainSmoothies = true; // lava/water/ice/blur
+    private bool _showSpotlight = true;       // light-cone presentation
+    private bool _showScreenFlip = true;      // vertical-flip presentation
     private readonly GameViewImage _gameView = new();
     private static readonly float[] SpeedSteps = { 0.25f, 0.5f, 1f, 2f, 4f, 8f };
     private static readonly string[] DifficultyNames =
@@ -92,6 +99,11 @@ public sealed unsafe class App
         _palette = Math.Max(0, settings.Palette);
         _objMode = Math.Clamp(settings.ObjMode, 0, 2);
         _gameLayerOrder = settings.GameLayerOrder;
+        _simExtendedView = settings.SimExtendedView;
+        _showScreenFilter = settings.ShowScreenFilter;
+        _showTerrainSmoothies = settings.ShowSmoothies;
+        _showSpotlight = settings.ShowSpotlight ?? settings.ShowSmoothies;
+        _showScreenFlip = settings.ShowScreenFlip ?? settings.ShowSmoothies;
         _levelsHeight = settings.LevelsHeight > 30 ? settings.LevelsHeight : 170f;
         _layersHeight = settings.LayersHeight > 30 ? settings.LayersHeight : 0f;  // 0 = fit to content
         ApplyLayerSettings(settings.Layers);
@@ -165,6 +177,11 @@ public sealed unsafe class App
         s.Palette = _palette;
         s.ObjMode = _objMode;
         s.GameLayerOrder = _gameLayerOrder;
+        s.SimExtendedView = _simExtendedView;
+        s.ShowScreenFilter = _showScreenFilter;
+        s.ShowSmoothies = _showTerrainSmoothies;
+        s.ShowSpotlight = _showSpotlight;
+        s.ShowScreenFlip = _showScreenFlip;
         s.LevelsHeight = _levelsHeight;
         s.LayersHeight = _layersHeight;
         s.HasView = _viewInitialized;
@@ -285,11 +302,18 @@ public sealed unsafe class App
                 Difficulty = _simDifficulty,
                 ScrollMult = _simScrollMult,
                 FireEnabled = _simFire,
+                ExtendedDraw = _simExtendedView,
+                ShowScreenFilter = _showScreenFilter,
+                ShowTerrainSmoothies = _showTerrainSmoothies,
+                ShowSpotlight = _showSpotlight,
+                ShowScreenFlip = _showScreenFlip,
             };
             _playback = new SimPlayback(sim, Math.Max(1, _simMaxMinutes) * 60 * 35);
             _playback.SeekTo(Math.Clamp(keepTick, 1, _playback.Duration));
             _status = $"Playback ready: {SimPlayback.FormatTime(_playback.Duration)} " +
-                (_playback.EndedNaturally ? "(level end)" : "(capped)") +
+                (_playback.EndedNaturally ? _playback.LoopDetected
+                        ? $"(level end; {_playback.LoopSummary})" : "(level end)"
+                    : _playback.LoopDetected ? $"({_playback.LoopSummary})" : "(capped)") +
                 $", built in {_playback.PrecomputeMs} ms";
         }
         catch (Exception ex)
@@ -301,9 +325,48 @@ public sealed unsafe class App
     }
 
     /// <summary>Advance/rewind the simulation with wall-clock pacing, then upload the frame.</summary>
+    /// <summary>
+    /// Mirror the layer stack and the object display mode onto the running simulation.
+    /// These are draw-only flags, so a change just needs the current frame redrawn — the
+    /// simulation itself is untouched and scrubbing stays exact. Per-layer opacity has no
+    /// equivalent on the sim's 8-bit palette surface, so alpha 0 reads as hidden and any
+    /// other value as visible.
+    /// </summary>
+    private void SyncPlaybackVisibility()
+    {
+        var sim = _playback!.Sim;
+        bool bg1 = true, bg2 = true, bg3 = true, star = true;
+        int mask = 0;
+        foreach (var l in _layers)
+        {
+            bool on = l.Visible && l.Alpha > 0;
+            switch (l.Kind)
+            {
+                case LayerKind.Background:
+                    if (l.Slot == 0) bg1 = on; else if (l.Slot == 1) bg2 = on; else bg3 = on;
+                    break;
+                case LayerKind.Starfield: star = on; break;
+                default: if (on) mask |= 1 << l.Slot; break;
+            }
+        }
+        _objCatMask = mask;
+        // Markers replaces the sprites with dots (as in the map view), Off hides both, so
+        // in either case the simulation stops drawing them and the overlay takes over.
+        if (_objMode != 0) mask = 0;
+
+        if (sim.ShowBg1 == bg1 && sim.ShowBg2 == bg2 && sim.ShowBg3 == bg3 &&
+            sim.ShowStarfield == star && sim.ObjectCategoryMask == mask)
+            return;
+
+        sim.ShowBg1 = bg1; sim.ShowBg2 = bg2; sim.ShowBg3 = bg3;
+        sim.ShowStarfield = star; sim.ObjectCategoryMask = mask;
+        _playback.RedrawCurrent();
+    }
+
     private void UpdatePlayback()
     {
         if (_playback == null) return;
+        SyncPlaybackVisibility();
         if (_playing)
         {
             _playAccum += ImGui.GetIO().DeltaTime * (float)GameSim.TicksPerSecond * _playSpeed;
@@ -325,7 +388,13 @@ public sealed unsafe class App
             }
         }
         var pal = _gd!.Palettes.Get(_palette);
-        _gameView.Update(_renderer, _playback.Sim.Screen, pal);
+        _playback.Sim.PreparePresent();
+        if (_simExtendedView)
+            _gameView.Update(_renderer, _playback.Sim.PresentScreen, pal,
+                0, 0, GameSim.BufW, GameSim.BufH);
+        else
+            _gameView.Update(_renderer, _playback.Sim.PresentScreen, pal,
+                GameSim.OX + GameSim.ViewX, GameSim.OY, GameSim.ViewW, GameSim.ViewH);
     }
 
     public void Render()
@@ -444,7 +513,9 @@ public sealed unsafe class App
         }
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Order each continuous section the way the level draws it in-game\n(background2over / background3over / topEnemyOver events).\nDragging a layer switches back to manual order.");
-        ImGui.TextDisabled("drag a name or use arrows · top = front");
+        ImGui.TextDisabled(_playbackMode
+            ? "playback: visibility applies · order/opacity are the engine's"
+            : "drag a name or use arrows · top = front");
         if (_layersHeight <= 30)   // first run: size the list to fit every row
             _layersHeight = _layers.Count * (ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.Y)
                 + ImGui.GetStyle().WindowPadding.Y * 2f + 2f;
@@ -455,6 +526,8 @@ public sealed unsafe class App
         ImGui.SeparatorText("Objects (enemies / items)");
         int mode = _objMode;
         if (ImGui.Combo("display", &mode, new[] { "Sprites", "Markers", "Off" }, 3)) { _objMode = mode; _composeDirty = true; }
+        if (ImGui.IsItemHovered() && _playbackMode)
+            ImGui.SetTooltip("Markers: category dots instead of sprites, live from the simulation.\nOff hides both. Hovering the game view reports whatever is under the\ncursor in any mode.");
 
         // --- Playback (in-game simulation) ---
         ImGui.SeparatorText("Playback");
@@ -492,12 +565,65 @@ public sealed unsafe class App
             ImGui.PopItemWidth();
             ImGui.PopItemWidth();
 
+            // view-only options: instant, no rebuild
+            bool extv = _simExtendedView;
+            if (ImGui.Checkbox("extended view", &extv))
+            {
+                _simExtendedView = extv;
+                _playback.Sim.ExtendedDraw = extv;
+                _playback.RedrawCurrent();
+                _playZoom = 0;
+                _playPan = Vector2.Zero;
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Zoom out beyond the in-game screen: full map width plus\nenemies/terrain before they scroll in. The yellow rectangle\nmarks what the player actually sees.");
+
+            bool sm = _showTerrainSmoothies;
+            if (ImGui.Checkbox("terrain smoothies", &sm))
+            {
+                _showTerrainSmoothies = sm;
+                _playback.Sim.ShowTerrainSmoothies = sm;
+                _playback.RedrawCurrent();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Lava, water, iced-blur, and blur feedback effects.");
+            ImGui.SameLine();
+            bool sf = _showScreenFilter;
+            if (ImGui.Checkbox("color / fades", &sf))
+            {
+                _showScreenFilter = sf;
+                _playback.Sim.ShowScreenFilter = sf;
+                _playback.RedrawCurrent();
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Full-screen event-44 color, darken, lighten, and fade effects.");
+
+            bool spot = _showSpotlight;
+            if (ImGui.Checkbox("spotlight", &spot))
+            {
+                _showSpotlight = spot;
+                _playback.Sim.ShowSpotlight = spot;
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("The light-cone presentation only; terrain smoothies stay unchanged.");
+            ImGui.SameLine();
+            bool flip = _showScreenFlip;
+            if (ImGui.Checkbox("screen flip", &flip))
+            {
+                _showScreenFlip = flip;
+                _playback.Sim.ShowScreenFlip = flip;
+            }
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("The event-driven upside-down playfield presentation.");
+
             var sim = _playback.Sim;
             ImGui.TextDisabled($"tick {_playback.CurrentTick}/{_playback.Duration}  loc {sim.CurLoc}  " +
                 $"enemies {sim.EnemyOnScreen}");
             var (b1, b2, b3) = sim.BackMoves;
             ImGui.TextDisabled($"scroll {b1}/{b2}/{b3}  " +
-                (_playback.EndedNaturally ? "ends naturally" : "capped (no natural end)"));
+                (_playback.EndedNaturally ? _playback.LoopDetected
+                        ? $"ends naturally; {_playback.LoopSummary}" : "ends naturally"
+                    : _playback.LoopDetected ? _playback.LoopSummary : "capped (no natural end)"));
         }
 
         // --- Palette ---
@@ -849,7 +975,9 @@ public sealed unsafe class App
         var dl = ImGui.GetWindowDrawList();
 
         // --- the locked game view (wheel = zoom, drag = pan, double-click = fit) ---
-        float fit = MathF.Min(viewSize.X / GameViewImage.W, viewSize.Y / GameViewImage.H);
+        int vw = _gameView.W, vh = _gameView.H;
+        if (vw <= 0 || vh <= 0) return;
+        float fit = MathF.Min(viewSize.X / vw, viewSize.Y / vh);
         if (fit >= 1f) fit = MathF.Floor(fit);   // pixel-perfect integer fit
         float scale = _playZoom > 0 ? _playZoom : fit;
 
@@ -861,8 +989,8 @@ public sealed unsafe class App
         var mouse = ImGui.GetMousePos();
 
         Vector2 CenterOff(float s) => new(
-            MathF.Floor((viewSize.X - GameViewImage.W * s) * 0.5f),
-            MathF.Floor((viewSize.Y - GameViewImage.H * s) * 0.5f));
+            MathF.Floor((viewSize.X - vw * s) * 0.5f),
+            MathF.Floor((viewSize.Y - vh * s) * 0.5f));
         var imgPos = pos + CenterOff(scale) + _playPan;
 
         if (viewHovered && io.MouseWheel != 0)
@@ -885,7 +1013,7 @@ public sealed unsafe class App
         { _playZoom = 0; _playPan = Vector2.Zero; scale = fit; }
 
         // keep at least a sliver of the frame inside the panel
-        var imgSize = new Vector2(GameViewImage.W, GameViewImage.H) * scale;
+        var imgSize = new Vector2(vw, vh) * scale;
         var cOff = CenterOff(scale);
         const float keep = 40f;
         _playPan.X = Math.Clamp(_playPan.X, keep - imgSize.X - cOff.X, viewSize.X - keep - cOff.X);
@@ -897,9 +1025,44 @@ public sealed unsafe class App
         _gameView.Draw(dl, imgPos, scale);
         dl.AddRect(imgPos - new Vector2(1, 1), imgPos + imgSize + new Vector2(1, 1),
             Gfx.Rgba(80, 80, 95));
+        if (_simExtendedView)
+        {
+            // the actual in-game viewport within the extended field
+            var vp0 = imgPos + new Vector2((GameSim.OX + GameSim.ViewX) * scale, GameSim.OY * scale);
+            var vp1 = vp0 + new Vector2(GameSim.ViewW * scale, GameSim.ViewH * scale);
+            dl.AddRect(vp0, vp1, Gfx.Rgba(255, 225, 120, 200), 0f, 0, 1.5f);
+            dl.AddText(vp0 + new Vector2(4, 2), Gfx.Rgba(255, 225, 120, 170), "screen");
+        }
+        DrawPlaybackOverlay(dl, pb, imgPos, scale, vw, vh, mouse,
+            viewHovered && !viewActive, pos, viewSize);
+        string loopOsd = "";
+        var activeGate = pb.LoopRegions.FirstOrDefault(r =>
+            pb.CurrentTick >= r.StartTick && pb.CurrentTick <= r.EndTick);
+        if (activeGate != null)
+        {
+            if (activeGate.Kind == SimPlayback.HoldLoopKind.ScriptedLoop)
+            {
+                int cycle = 1;
+                while (cycle <= activeGate.CycleEnds.Length &&
+                       pb.CurrentTick > activeGate.CycleEnds[cycle - 1])
+                    cycle++;
+                int cycles = activeGate.CycleEnds.Length;
+                loopOsd = $"   [enemy gate: cycle {Math.Min(cycle, cycles)}/{cycles}; repeats until destroyed]";
+            }
+            else if (activeGate.Kind == SimPlayback.HoldLoopKind.RouteLoop)
+            {
+                int cycle = 1;
+                while (cycle <= activeGate.CycleEnds.Length &&
+                       pb.CurrentTick > activeGate.CycleEnds[cycle - 1])
+                    cycle++;
+                int cycles = activeGate.CycleEnds.Length;
+                loopOsd = $"   [route loop: cycle {Math.Min(cycle, cycles)}/{cycles}]";
+            }
+            else loopOsd = "   [enemy gate: holds until destroyed]";
+        }
         string osd = $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.Duration)}" +
             (_playing ? _playDirection > 0 ? $"   >> x{_playSpeed:0.##}" : $"   << x{_playSpeed:0.##}" : "   paused") +
-            $"   zoom {scale * 100:0}%";
+            $"   zoom {scale * 100:0}%" + loopOsd;
         dl.AddText(pos + new Vector2(8, 6), Gfx.Rgba(235, 235, 245), osd);
         dl.PopClipRect();
 
@@ -949,8 +1112,11 @@ public sealed unsafe class App
         ImGui.PopItemWidth();
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Playback speed (game runs at 35 ticks/s)");
         ImGui.SameLine(0, 10);
+        string endTag = pb.LoopDetected
+            ? $"  [{pb.LoopRegions.Count} loop/hold section{(pb.LoopRegions.Count == 1 ? "" : "s")} previewed]"
+            : pb.EndedNaturally ? "" : "  [capped]";
         ImGui.TextDisabled($"tick {pb.CurrentTick}/{pb.Duration}" +
-            (pb.EndedNaturally ? "" : "  [capped]"));
+            endTag);
 
         DrawTimeline(pb);
     }
@@ -993,15 +1159,51 @@ public sealed unsafe class App
             }
         }
 
+        // Enemy-gated regions are embedded in the complete route. Each hatch stops at
+        // the simulated defeat point; the authored post-boss level continues after it.
+        float TickX(int t)
+        {
+            t = Math.Clamp(t, 1, pb.Duration);
+            return pos.X + (pb.Duration <= 1 ? 0 : (t - 1) / (float)(pb.Duration - 1)) * w;
+        }
+        foreach (var region in pb.LoopRegions)
+        {
+            float lx = TickX(region.StartTick);
+            float rx = TickX(region.EndTick);
+            dl.AddRectFilled(new Vector2(lx, pos.Y), new Vector2(rx, pos.Y + h),
+                Gfx.Rgba(255, 150, 40, 34));
+            for (float sx = lx; sx < rx; sx += 9f)   // diagonal hatching
+                dl.AddLine(new Vector2(sx, pos.Y + h - 1),
+                    new Vector2(Math.Min(sx + 6f, rx), pos.Y + 1),
+                    Gfx.Rgba(255, 150, 40, 70));
+            dl.AddLine(new Vector2(lx, pos.Y), new Vector2(lx, pos.Y + h), Gfx.Rgba(255, 150, 40, 200));
+            dl.AddLine(new Vector2(rx, pos.Y), new Vector2(rx, pos.Y + h), Gfx.Rgba(255, 150, 40, 200));
+            foreach (int cycleEnd in region.CycleEnds)
+            {
+                float cx = TickX(cycleEnd);
+                dl.AddLine(new Vector2(cx, pos.Y), new Vector2(cx, pos.Y + h),
+                    Gfx.Rgba(255, 205, 120, 170), 1.5f);
+            }
+            if (rx - lx >= 52)
+            {
+                string loopLabel = region.Kind == SimPlayback.HoldLoopKind.ScriptedLoop
+                    ? $"gate x{region.CycleEnds.Length}"
+                    : region.Kind == SimPlayback.HoldLoopKind.RouteLoop
+                        ? $"route x{region.CycleEnds.Length}" : "enemy hold";
+                dl.AddText(new Vector2(lx + 4, pos.Y + h - 14),
+                    Gfx.Rgba(255, 190, 90, 230), loopLabel);
+            }
+        }
+
         // progress fill
         float frac = pb.Duration <= 1 ? 0f : (pb.CurrentTick - 1) / (float)(pb.Duration - 1);
         dl.AddRectFilled(pos, new Vector2(pos.X + w * frac, pos.Y + h), Gfx.Rgba(90, 130, 200, 60));
 
         // event markers (top half ticks, one class per colour)
-        foreach (var (tick, type) in pb.Events)
+        foreach (var e in pb.Events)
         {
             uint col;
-            switch (type)
+            switch (e.Type)
             {
                 case 2 or 3 or 30: col = Gfx.Rgba(80, 210, 230); break;      // scroll speed
                 case 4 or 83: col = Gfx.Rgba(255, 90, 90); break;            // map stop
@@ -1010,7 +1212,7 @@ public sealed unsafe class App
                 case 79: col = Gfx.Rgba(230, 90, 220); break;                // boss bar
                 default: continue;
             }
-            float ex = pos.X + (pb.Duration <= 1 ? 0 : (tick - 1) / (float)(pb.Duration - 1)) * w;
+            float ex = TickX(e.Tick);
             dl.AddLine(new Vector2(ex, pos.Y + 1), new Vector2(ex, pos.Y + 9), col);
         }
 
@@ -1022,8 +1224,17 @@ public sealed unsafe class App
         if (hovered || active)
         {
             int t = 1 + (int)MathF.Round(mouseFrac * (pb.Duration - 1));
+            var hoverGate = pb.LoopRegions.FirstOrDefault(r => t >= r.StartTick && t <= r.EndTick);
+            string loopNote = hoverGate != null
+                ? hoverGate.Kind == SimPlayback.HoldLoopKind.ScriptedLoop
+                    ? $"\nhatched = enemy-gated script: repeats until the boss/linked enemies die;\n{hoverGate.CycleEnds.Length} cycles are retained, separated by bright lines"
+                    : hoverGate.Kind == SimPlayback.HoldLoopKind.RouteLoop
+                        ? $"\nhatched = conditional route loop; {hoverGate.CycleEnds.Length} cycles are retained, then playback continues"
+                        : "\nhatched = enemy-gated hold: gameplay waits until the boss/linked enemies die;\n20 seconds are retained for inspection"
+                : "";
             ImGui.SetTooltip($"{SimPlayback.FormatTime(t)}  (tick {t})\n" +
-                "cyan = scroll speed  red = map stop  orange = jump/flow\nwhite = level end  magenta = boss bar");
+                "cyan = scroll speed  red = map stop  orange = jump/flow\nwhite = level end  magenta = boss bar" +
+                loopNote);
         }
     }
 
@@ -1104,6 +1315,94 @@ public sealed unsafe class App
                 ObjectPlacer.CategoryColor(hm.Cat));
             ShowObjectTooltip(hm);
         }
+    }
+
+    /// <summary>
+    /// Markers and the hover inspector over the simulated frame. The sim only hands back
+    /// what the frame actually drew, so both agree with the picture: a category switched
+    /// off in the layer list is neither marked nor picked, and the tile readout follows
+    /// the live scroll cursors.
+    /// </summary>
+    private void DrawPlaybackOverlay(ImDrawListPtr dl, SimPlayback pb, Vector2 imgPos,
+        float scale, int vw, int vh, Vector2 mouse, bool hovered,
+        Vector2 viewPos, Vector2 viewSize)
+    {
+        if (!hovered) _hoverInfo = "";
+        if (_objMode == 2 && !hovered) return;
+
+        // The texture is the whole buffer in extended view, else the cropped playfield.
+        float texOX = _simExtendedView ? 0 : GameSim.OX + GameSim.ViewX;
+        float texOY = _simExtendedView ? 0 : GameSim.OY;
+        Vector2 ToScreen(float bx, float by) =>
+            imgPos + new Vector2(bx - texOX, by - texOY) * scale;
+        bool InView(float bx, float by) =>
+            bx >= texOX && by >= texOY && bx < texOX + vw && by < texOY + vh;
+
+        pb.Sim.CollectEnemies(_playEnemies, _objCatMask);
+
+        var m = (mouse - imgPos) / scale + new Vector2(texOX, texOY);
+        bool canPick = hovered && _objMode != 2;
+        float r = Math.Clamp(3.5f * scale, 3f, 9f);
+        GameSim.EnemyView? pick = null;
+        for (int i = _playEnemies.Count - 1; i >= 0; i--)   // front-most band first
+        {
+            var e = _playEnemies[i];
+            if (!InView(e.CenterX, e.CenterY)) continue;
+            if (canPick && pick == null &&
+                Math.Abs(m.X - e.CenterX) <= e.HalfW && Math.Abs(m.Y - e.CenterY) <= e.HalfH)
+                pick = e;
+            if (_objMode != 1) continue;
+            var p = ToScreen(e.CenterX, e.CenterY);
+            uint col = ObjectPlacer.CategoryColor(e.Category);
+            dl.AddCircleFilled(p, r, col);
+            dl.AddCircle(p, r, Gfx.Rgba(0, 0, 0, 180));
+            if (e.Size == 1)   // 2x2 occupies four cells: ring it so the footprint reads
+                dl.AddCircle(p, r + 3f, (col & 0x00FFFFFFu) | (110u << 24));
+        }
+
+        if (!hovered) return;
+        if (pick is { } hit)
+        {
+            // Same affordance as the map view's sprite hover: the sprite cell outlined in
+            // its category colour (12x14 per blit, 24x28 for a 2x2).
+            var one = new Vector2(1, 1);
+            dl.AddRect(ToScreen(hit.CenterX - hit.HalfW, hit.CenterY - hit.HalfH) - one,
+                       ToScreen(hit.CenterX + hit.HalfW, hit.CenterY + hit.HalfH) + one,
+                       ObjectPlacer.CategoryColor(hit.Category));
+            ShowEnemyTooltip(hit);
+        }
+
+        int bx = (int)MathF.Floor(m.X), by = (int)MathF.Floor(m.Y);
+        if (!InView(bx, by)) { _hoverInfo = ""; return; }
+        string where = $"screen {bx - GameSim.OX},{by - GameSim.OY}";
+        _hoverInfo = pb.Sim.TryPickTile(bx, by, out var t)
+            ? $"{where}   BG{t.Layer + 1} col {t.Col} row {t.Row}  cell={t.Cell} shapeId={t.ShapeId}"
+            : $"{where}   (no background tile)";
+        // The controls panel's Status line is usually scrolled away in playback, so put
+        // the readout where the cursor already is.
+        dl.AddText(new Vector2(viewPos.X + 8, viewPos.Y + viewSize.Y - 18),
+            Gfx.Rgba(190, 200, 215), _hoverInfo);
+    }
+
+    private static void ShowEnemyTooltip(in GameSim.EnemyView e)
+    {
+        ImGui.BeginTooltip();
+        ImGui.Text(ObjectPlacer.CategoryName(e.Category));
+        ImGui.Text($"enemy id: {e.EnemyId}    slot {e.Slot} (band {e.Band})");
+        ImGui.Text(e.ScoreItem || e.ArmorLeft == 255 && e.Value != 0
+            ? $"pickup    value {e.Value}"
+            : $"armor: {e.ArmorLeft}    value {e.Value}");
+        ImGui.Text($"pos {e.ScreenX},{e.ScreenY}    vel {e.Xc},{e.Yc}" +
+            (e.XAccel != 0 || e.YAccel != 0 ? $"    accel {e.XAccel},{e.YAccel}" : ""));
+        ImGui.Text($"sprite: {e.SpriteIndex} (bank {e.SheetId})   " +
+            (e.Size == 1 ? "2x2" : "1x1") + $"   frame {e.AnimFrame}/{e.AnimMax}");
+        if (e.LinkNum != 0) ImGui.Text($"link: {e.LinkNum}");
+        if (e.Tur0 != 0 || e.Tur1 != 0 || e.Tur2 != 0)
+            ImGui.Text($"turrets: {e.Tur0}/{e.Tur1}/{e.Tur2}");
+        if (e.LaunchType != 0) ImGui.Text($"launches {e.LaunchType} every {e.LaunchFreq}");
+        if (e.Iced != 0) ImGui.Text($"iced: {e.Iced}");
+        if (!e.OnScreen) ImGui.TextDisabled("(outside the in-game screen)");
+        ImGui.EndTooltip();
     }
 
     private static void ShowObjectTooltip(in PlacedObject o)

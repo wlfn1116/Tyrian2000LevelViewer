@@ -22,6 +22,12 @@
   Play / pause / rewind / fast-forward, tick stepping, a scrubbable timeline
   with event markers and an enemy-density strip, plus what-if difficulty and
   scroll-speed settings
+- Extended playback view for zooming out beyond the player's 264 x 184 viewport
+- Event-44 color/darken/light fades and every gameplay smoothie effect, with
+  separate terrain-smoothie, color/fade, spotlight, and screen-flip toggles
+- Full-route playback timelines: boss loops retain two marked cycles, stationary
+  holds retain a hatched inspection window, and playback then continues through the
+  authored post-boss section instead of treating the gate as the end of the level
 
 ![Starfield and level objects](docs/starfield.png)
 
@@ -69,6 +75,8 @@ Output is written to `artifacts/`.
 | Scrub playback | Click or drag the timeline bar |
 | Rewind / fast-forward | **<<** / **>>** buttons, speed selector (x0.25–x8) |
 | Zoom / pan playback | Mouse wheel / drag; **Fit** button or double-click resets |
+| See beyond the game viewport | Enable **extended view** in playback mode |
+| Toggle screen effects | Use the **terrain smoothies**, **color / fades**, **spotlight**, and **screen flip** playback checkboxes |
 
 ## Command line
 

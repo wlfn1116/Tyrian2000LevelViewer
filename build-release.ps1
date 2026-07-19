@@ -32,7 +32,10 @@ dotnet publish $project --configuration Release --runtime win-x64 `
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE." }
 
 Copy-Item -LiteralPath (Join-Path $workspace "README.md") -Destination $publish
-Copy-Item -LiteralPath (Join-Path $workspace "docs") -Destination $publish -Recurse
+$docs = Join-Path $workspace "docs"
+if (Test-Path -LiteralPath $docs) {
+    Copy-Item -LiteralPath $docs -Destination $publish -Recurse
+}
 New-Item -ItemType Directory -Path $release | Out-Null
 Compress-Archive -Path (Join-Path $publish "*") -DestinationPath $archive -CompressionLevel Optimal
 

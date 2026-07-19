@@ -107,7 +107,24 @@ internal static unsafe class Program
         int pi = Array.IndexOf(args, "--playback");
         int cliPlaybackTick = pi >= 0
             ? (pi + 1 < args.Length && int.TryParse(args[pi + 1], out int pt) ? pt : 1) : -1;
+        if (Array.IndexOf(args, "--ext") >= 0) settings.SimExtendedView = true;
+        bool noSmoothies = Array.IndexOf(args, "--no-smoothies") >= 0;
+        if (Array.IndexOf(args, "--no-filters") >= 0 ||
+            Array.IndexOf(args, "--no-color-fades") >= 0) settings.ShowScreenFilter = false;
+        if (noSmoothies || Array.IndexOf(args, "--no-terrain-smoothies") >= 0)
+            settings.ShowSmoothies = false;
+        if (noSmoothies || Array.IndexOf(args, "--no-spotlight") >= 0)
+            settings.ShowSpotlight = false;
+        if (noSmoothies || Array.IndexOf(args, "--no-screen-flip") >= 0)
+            settings.ShowScreenFlip = false;
         var app = new App(renderer, settings, cliEp, cliLevel, window, cliPlaybackTick);
+
+        int mi = Array.IndexOf(args, "--mouse");
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        System.Numerics.Vector2? fakeMouse = mi >= 0 && mi + 2 < args.Length
+            ? new System.Numerics.Vector2(
+                float.Parse(args[mi + 1], inv), float.Parse(args[mi + 2], inv))
+            : null;
 
         bool running = true;
         int frame = 0;
@@ -123,6 +140,10 @@ internal static unsafe class Program
 
             ImSdl.ImGuiImplSDL2.SDLRenderer2NewFrame();
             ImSdl.ImGuiImplSDL2.NewFrame();
+            // "--mouse X Y": park the cursor at a fixed point so --uishot can capture
+            // hover-only UI (markers tooltip, hover readout) without a real mouse.
+            // queued last, so it wins over the backend's own position event
+            if (fakeMouse.HasValue) io.AddMousePosEvent(fakeMouse.Value.X, fakeMouse.Value.Y);
             ImGui.NewFrame();
 
             app.Render();
@@ -442,13 +463,15 @@ internal static unsafe class Program
         int si = Array.IndexOf(args, "--simtest");
         int onlyEp = si + 1 < args.Length && int.TryParse(args[si + 1], out int e) ? e : -1;
         int onlyLevel = si + 2 < args.Length && int.TryParse(args[si + 2], out int l) ? l : -1;
+        bool trace = Array.IndexOf(args, "--trace") >= 0;
 
         static ulong Hash(byte[] screen)
         {
             ulong h = 14695981039346656037UL;
             for (int y = 0; y < T2LV.Tyrian.GameSim.ViewH; y++)
             {
-                int row = y * T2LV.Tyrian.GameSim.Pitch + T2LV.Tyrian.GameSim.ViewX;
+                int row = (y + T2LV.Tyrian.GameSim.OY) * T2LV.Tyrian.GameSim.BufW
+                    + T2LV.Tyrian.GameSim.OX + T2LV.Tyrian.GameSim.ViewX;
                 for (int x = 0; x < T2LV.Tyrian.GameSim.ViewW; x++)
                     h = (h ^ screen[row + x]) * 1099511628211UL;
             }
@@ -493,15 +516,70 @@ internal static unsafe class Program
                 bool ok = h1 == h2 && h2 == h3;
                 if (!ok) failed = true;
 
+                if (trace)
+                {
+                    foreach (var x in pb.Events.Where(x => x.Type is 11 or 38 or 44 or 54 or 57 or 64 or 67 or 70 or 76)
+                                 .TakeLast(120))
+                    {
+                        var raw = level.Events[x.Index];
+                        Console.WriteLine($"  t{x.Tick,5} i{x.Index,4} at{raw.Time,5} type{x.Type,2} " +
+                            $"dat {raw.Dat,6},{raw.Dat2,6},{raw.Dat3,4},{raw.Dat4,4} " +
+                            (x.Backward ? "back" : ""));
+                    }
+                    pb.SeekTo(pb.Duration);
+                    var moves = sim.BackMoves;
+                    Console.WriteLine($"  END loc={sim.CurLoc} enemies={sim.EnemyOnScreen} " +
+                        $"scroll={moves.b1}/{moves.b2}/{moves.b3}");
+                }
+
+                string previewText = pb.LoopRegions.Count == 0 ? "" :
+                    $"previews {pb.LoopRegions.Count}: " + string.Join(";", pb.LoopRegions.Select(r =>
+                        $"{r.Kind}@{r.StartTick}->{r.EndTick}")) + "  ";
                 Console.WriteLine($"ep{ep.Number} #{item.FileNum:00} {item.Name,-10} " +
                     $"{T2LV.Tyrian.SimPlayback.FormatTime(pb.Duration),7} " +
-                    $"({pb.Duration,5} ticks) {(pb.EndedNaturally ? "end " : "cap ")}" +
+                    $"({pb.Duration,5} ticks) " +
+                    (pb.EndedNaturally ? "end  " :
+                        pb.LoopRegions.Any(r => r.Kind != T2LV.Tyrian.SimPlayback.HoldLoopKind.EnemyHold)
+                            ? "loop " : pb.LoopDetected ? "hold " : "cap  ") +
                     $"build {pb.PrecomputeMs,4} ms  events {pb.Events.Count,4}  " +
+                    previewText +
                     (ok ? "determinism OK" : $"DETERMINISM MISMATCH {h1:x} {h2:x} {h3:x}"));
             }
         }
         Console.WriteLine($"{count} levels simulated; {(failed ? "FAILURES present" : "all OK")}");
         return failed ? 1 : 0;
+    }
+
+    /// <summary>
+    /// "--hide bg1,bg2,bg3,star,air,ground,fg,powerup,money,cube,decor,objects": the same
+    /// draw-only layer visibility the GUI's layer list drives, so playback rendering with
+    /// layers switched off is reproducible from the command line.
+    /// </summary>
+    static void ApplyHideList(T2LV.Tyrian.GameSim sim, string[] args)
+    {
+        int hi = Array.IndexOf(args, "--hide");
+        if (hi < 0 || hi + 1 >= args.Length) return;
+        foreach (string raw in args[hi + 1].Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string name = raw.Trim().ToLowerInvariant();
+            void Drop(T2LV.Tyrian.ObjCategory c) => sim.ObjectCategoryMask &= ~(1 << (int)c);
+            switch (name)
+            {
+                case "bg1": sim.ShowBg1 = false; break;
+                case "bg2": sim.ShowBg2 = false; break;
+                case "bg3": sim.ShowBg3 = false; break;
+                case "star": sim.ShowStarfield = false; break;
+                case "objects": sim.ObjectCategoryMask = 0; break;
+                case "air": Drop(T2LV.Tyrian.ObjCategory.EnemyAir); break;
+                case "ground": Drop(T2LV.Tyrian.ObjCategory.EnemyGround); break;
+                case "fg": Drop(T2LV.Tyrian.ObjCategory.EnemyForeground); break;
+                case "powerup": Drop(T2LV.Tyrian.ObjCategory.Powerup); break;
+                case "money": Drop(T2LV.Tyrian.ObjCategory.Money); break;
+                case "cube": Drop(T2LV.Tyrian.ObjCategory.Datacube); break;
+                case "decor": Drop(T2LV.Tyrian.ObjCategory.Decor); break;
+                default: Console.Error.WriteLine($"--hide: unknown layer '{name}'"); break;
+            }
+        }
     }
 
     /// <summary>"--simshot ep level tick[,tick...] out_prefix": save playback frames as PNGs.</summary>
@@ -522,19 +600,34 @@ internal static unsafe class Program
         var level = gd.LoadLevel(epi, lvl);
         var shapes = gd.GetShapeTable(level.ShapeChar);
         var sim = new T2LV.Tyrian.GameSim(gd, epi, level, shapes);
+        bool noSmoothies = Array.IndexOf(args, "--no-smoothies") >= 0;
+        sim.ShowScreenFilter = Array.IndexOf(args, "--no-filters") < 0 &&
+                               Array.IndexOf(args, "--no-color-fades") < 0;
+        sim.ShowTerrainSmoothies = !noSmoothies &&
+                                    Array.IndexOf(args, "--no-terrain-smoothies") < 0;
+        sim.ShowSpotlight = !noSmoothies && Array.IndexOf(args, "--no-spotlight") < 0;
+        sim.ShowScreenFlip = !noSmoothies && Array.IndexOf(args, "--no-screen-flip") < 0;
+        ApplyHideList(sim, args);
         var pb = new T2LV.Tyrian.SimPlayback(sim, 21000);
         uint[] pal = gd.Palettes.Get(AppSettings.GamePalette);
 
-        const int W = T2LV.Tyrian.GameSim.ViewW, H = T2LV.Tyrian.GameSim.ViewH;
+        bool ext = Array.IndexOf(args, "--ext") >= 0;
+        sim.ExtendedDraw = ext;
+        int W = ext ? T2LV.Tyrian.GameSim.BufW : T2LV.Tyrian.GameSim.ViewW;
+        int H = ext ? T2LV.Tyrian.GameSim.BufH : T2LV.Tyrian.GameSim.ViewH;
+        int cx = ext ? 0 : T2LV.Tyrian.GameSim.OX + T2LV.Tyrian.GameSim.ViewX;
+        int cy = ext ? 0 : T2LV.Tyrian.GameSim.OY;
         var rgba = new uint[W * H];
         foreach (int t in ticks)
         {
             pb.SeekTo(t);
+            if (ext) pb.RedrawCurrent();
+            sim.PreparePresent();
             for (int y = 0; y < H; y++)
             {
-                int src = y * T2LV.Tyrian.GameSim.Pitch + T2LV.Tyrian.GameSim.ViewX;
+                int src = (cy + y) * T2LV.Tyrian.GameSim.BufW + cx;
                 for (int x = 0; x < W; x++)
-                    rgba[y * W + x] = pal[sim.Screen[src + x]] | 0xFF000000u;
+                    rgba[y * W + x] = pal[sim.PresentScreen[src + x]] | 0xFF000000u;
             }
             string path = $"{prefix}_ep{ep}_{lvl:00}_t{pb.CurrentTick}.png";
             Util.Png.WriteRgba(path, W, H, rgba);

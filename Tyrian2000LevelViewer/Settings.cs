@@ -24,6 +24,12 @@ public sealed class AppSettings
     public int ScrollMode { get; set; }
     public bool UniformTextureScale { get; set; }
     public bool GameLayerOrder { get; set; } = true;   // auto-apply the level's in-game layer order
+    public bool SimExtendedView { get; set; }
+    public bool ShowScreenFilter { get; set; } = true;
+    public bool ShowSmoothies { get; set; } = true; // retained JSON name: terrain smoothies
+    // Nullable so an older settings file can inherit its former broad smoothie toggle.
+    public bool? ShowSpotlight { get; set; }
+    public bool? ShowScreenFlip { get; set; }
 
     /// <summary>The palette gameplay always runs in: JE_loadPic(3) -> pcxpal[2] = 5.</summary>
     public const int GamePalette = 5;

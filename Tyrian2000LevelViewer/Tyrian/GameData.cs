@@ -161,6 +161,10 @@ public sealed class GameData
         }
         AddProbe(Environment.CurrentDirectory);
         AddProbe(AppContext.BaseDirectory);
+        candidates.Add(Path.Combine(Environment.CurrentDirectory, "tyrian2000data"));
+        candidates.Add(Path.Combine(Environment.CurrentDirectory, "data"));
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "tyrian2000data"));
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "data"));
 
         foreach (var c in candidates)
             if (File.Exists(Path.Combine(c, "tyrian1.lvl")) && File.Exists(Path.Combine(c, "palette.dat")))

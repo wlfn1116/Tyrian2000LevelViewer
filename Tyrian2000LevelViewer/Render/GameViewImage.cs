@@ -6,25 +6,35 @@ using SdlNs = Hexa.NET.SDL2;
 namespace T2LV.Render;
 
 /// <summary>
-/// The playback frame: the simulator's 264x184 playfield crop converted through the
-/// palette into a single small SDL texture, re-uploaded whenever the frame changes.
+/// The playback frame: a crop of the simulator's indexed buffer (the 264x184 playfield,
+/// or the whole extended buffer) converted through the palette into one small SDL
+/// texture, re-uploaded whenever the frame changes.
 /// </summary>
 public sealed unsafe class GameViewImage : IDisposable
 {
-    public const int W = GameSim.ViewW, H = GameSim.ViewH;
+    public int W { get; private set; }
+    public int H { get; private set; }
 
-    private readonly uint[] _rgba = new uint[W * H];
+    private uint[] _rgba = Array.Empty<uint>();
     private SdlNs.SDLTexturePtr _tex;
     private bool _created;
 
-    /// <summary>Convert the sim's indexed screen (playfield crop) and upload.</summary>
-    public void Update(SdlNs.SDLRendererPtr renderer, byte[] screen, uint[] palette)
+    /// <summary>Convert a crop of the sim's indexed buffer and upload.</summary>
+    public void Update(SdlNs.SDLRendererPtr renderer, byte[] screen, uint[] palette,
+        int x0, int y0, int w, int h)
     {
-        for (int y = 0; y < H; y++)
+        if (w != W || h != H)
         {
-            int src = y * GameSim.Pitch + GameSim.ViewX;
-            int dst = y * W;
-            for (int x = 0; x < W; x++)
+            if (_created) { SdlNs.SDL.DestroyTexture(_tex); _created = false; }
+            W = w; H = h;
+            _rgba = new uint[w * h];
+        }
+
+        for (int y = 0; y < h; y++)
+        {
+            int src = (y0 + y) * GameSim.BufW + x0;
+            int dst = y * w;
+            for (int x = 0; x < w; x++)
                 _rgba[dst + x] = palette[screen[src + x]] | 0xFF000000u;
         }
 

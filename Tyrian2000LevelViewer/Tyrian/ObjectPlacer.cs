@@ -446,7 +446,7 @@ public static class ObjectPlacer
         }
     }
 
-    private static ObjCategory Classify(byte armor, short value, int band)
+    internal static ObjCategory Classify(byte armor, short value, int band)
     {
         // No armour => not a shootable enemy: pickups (by score value) or pure decoration.
         if (armor == 0)

@@ -17,9 +17,18 @@ namespace T2LV.Tyrian;
 /// </summary>
 public sealed class GameSim
 {
-    public const int ScreenW = 320, ScreenH = 200, Pitch = 320;
-    public const int ViewX = 24, ViewW = 264, ViewH = 184;   // playfield crop (JE_starShowVGA)
+    public const int ScreenW = 320, ScreenH = 200, Pitch = 320;   // vanilla engine surface
+    public const int ViewX = 24, ViewW = 264, ViewH = 184;        // playfield crop (JE_starShowVGA)
+    // Extended render buffer: the vanilla surface plus margins so the view can zoom out
+    // and show terrain/enemies before they reach the screen. Vanilla (x, y) lives at
+    // buffer (x + OX, y + OY).
+    public const int OX = 72, OY = 128;
+    public const int BufW = 320 + OX + 72, BufH = 200 + OY + 32;  // 464 x 360
     public const double TicksPerSecond = 35.0;
+    /// <summary>How many repetitions of a player-gated (boss) loop the preview keeps
+    /// before it continues as though the gate was cleared. The loop body still plays
+    /// once on the way in, so the retained region spans this many marked cycles.</summary>
+    public const int PreviewLoopCycles = 2;
 
     // --- static level data (not part of snapshots) ---
     private readonly Level _lv;
@@ -34,8 +43,26 @@ public sealed class GameSim
     public int Difficulty = 2;          // 0 wimp .. 10; 2 = normal
     public float ScrollMult = 1f;       // terrain speed what-if multiplier
     public bool FireEnabled = true;     // simulate enemy turrets
+    public bool PreviewEnemyGates = true; // keep PreviewLoopCycles boss loops, then continue as if defeated
     public int PlayerX = 100, PlayerY = 180;   // phantom player (aim/chase target)
     public uint RngSeed = 5489;
+
+    // --- view options (draw-only; safe to change without a rebuild + redraw) ---
+    public bool ExtendedDraw;           // render beyond the vanilla screen bounds
+    public bool ShowScreenFilter = true;   // event-44 hue/brightness filter
+    public bool ShowTerrainSmoothies = true; // lava/water/ice/blur feedback filters
+    public bool ShowSpotlight = true;       // JE_starShowVGA light cone
+    public bool ShowScreenFlip = true;      // JE_starShowVGA vertical flip
+
+    // Layer-stack visibility, mirrored from the viewer's layer list. These gate blitting
+    // only — scroll cursors, star positions and enemy logic all still run, so a hidden
+    // layer cannot desync the simulation and scrubbing stays exact.
+    public bool ShowBg1 = true, ShowBg2 = true, ShowBg3 = true, ShowStarfield = true;
+    /// <summary>Bit per <see cref="ObjCategory"/>; cleared bits hide that category.</summary>
+    public int ObjectCategoryMask = ~0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool CategoryVisible(byte cat) => (ObjectCategoryMask & (1 << cat)) != 0;
 
     // --- mutable state ---
     private readonly MtRand _rng = new();
@@ -49,16 +76,149 @@ public sealed class GameSim
     private Star[] _stars = new Star[100];
     private S _s;                                       // all scalar state (value copy = snapshot)
     private int _dat0Egr0, _dat0Armor;                  // events 49-52 mutate enemyDat[0]
+    private ushort[] _gateLoopVisits = Array.Empty<ushort>();
+    // [eventIndex * PreviewLoopCycles + n] = tick the n-th cycle of that gate ended on.
+    private int[] _gateLoopTicks = Array.Empty<int>();
+    private int _releaseGateEvent = -1;
 
-    public byte[] Screen = new byte[Pitch * ScreenH];
+    // game_screen: persistent across frames (smoothie filters feed back into it),
+    // _screenB: VGAScreen2, the draw target while smoothies are active this frame.
+    public byte[] Screen = new byte[BufW * BufH];
+    private byte[] _screenB = new byte[BufW * BufH];
+    private byte[] _tgt;                                // current draw target (VGAScreen)
+    /// <summary>The frame after JE_starShowVGA presentation (flip / spotlight).</summary>
+    public byte[] PresentScreen = new byte[BufW * BufH];
 
     public bool Finished => _s.finished;
     public int CurLoc => _s.curLoc;
     public int EnemyOnScreen => _s.enemyOnScreen;
     public (int b1, int b2, int b3) BackMoves => (_s.backMove, _s.backMove2, _s.backMove3);
-    /// <summary>Set during a pre-run to record executed events (tick, type).</summary>
-    public List<(int Tick, byte Type)>? EventLog;
+    public readonly record struct EventExec(int Tick, byte Type, int Index, bool Backward);
+    public enum PreviewKind { EnemyLoop, EnemyHold, RouteLoop }
+    public readonly record struct GatePreview(
+        int StartTick, int EndTick, int[] CycleEnds, PreviewKind Kind, int EventIndex);
+    /// <summary>Set during a pre-run to record executed events.</summary>
+    public List<EventExec>? EventLog;
+    /// <summary>Set during a pre-run to record finite previews of player-gated sections.</summary>
+    public List<GatePreview>? GatePreviewLog;
     public int LogTick;
+
+    // =====================================================================
+    //  Live inspection: what the current frame actually contains, in buffer
+    //  coordinates, so the viewer can put markers and hover readouts over it.
+    // =====================================================================
+
+    /// <summary>One live enemy/pickup as of the frame just drawn. Positions are buffer
+    /// coordinates (vanilla + OX/OY); the sprite cell is 12x14 per blit, 24x28 for 2x2.</summary>
+    public readonly record struct EnemyView(
+        int Slot, int Band, ObjCategory Category, int EnemyId,
+        int CenterX, int CenterY, int HalfW, int HalfH,
+        int ScreenX, int ScreenY, int SpriteIndex, int SheetId, int Size,
+        int ArmorLeft, int Value, int LinkNum, bool ScoreItem, bool OnScreen,
+        int Xc, int Yc, int XAccel, int YAccel, int AnimFrame, int AnimMax,
+        int LaunchType, int LaunchFreq, int Tur0, int Tur1, int Tur2, int Iced);
+
+    private static int BandForSlot(int slot) =>
+        slot < 25 ? 0 : slot < 50 ? 25 : slot < 75 ? 50 : 75;
+
+    private static int BandDrawRank(int band) => band switch { 25 => 0, 75 => 1, 0 => 2, _ => 3 };
+
+    /// <summary>
+    /// Every live enemy in the current frame, front-most band last so the viewer can
+    /// hit-test in reverse and pick what visually sits on top. <paramref name="categoryMask"/>
+    /// is the layer list's own visibility (bit per <see cref="ObjCategory"/>) — deliberately
+    /// separate from <see cref="ObjectCategoryMask"/>, which only gates sprite blitting, so
+    /// markers can stand in for sprites the simulation was told not to draw.
+    /// </summary>
+    public void CollectEnemies(List<EnemyView> into, int categoryMask = ~0)
+    {
+        into.Clear();
+        for (int i = 0; i < _enemy.Length; i++)
+        {
+            if (_avail[i] == 1) continue;
+            ref var e = ref _enemy[i];
+            if ((categoryMask & (1 << e.objCat)) == 0) continue;
+            int cyc = Math.Clamp(e.enemycycle - 1, 0, 19);
+            if (e.egr[cyc] == 999) continue;           // the engine frees these on sight
+            int sx = e.ex + e.mapoffset;
+            bool onScreen = sx > -29 && sx < 300;
+            if (!onScreen && !ExtendedDraw) continue;   // not drawn this frame
+
+            bool big = e.size == 1;
+            into.Add(new EnemyView(
+                Slot: i, Band: BandForSlot(i), Category: (ObjCategory)e.objCat,
+                EnemyId: e.enemytype,
+                CenterX: sx + 6 + OX, CenterY: e.ey + 7 + OY,
+                HalfW: big ? 12 : 6, HalfH: big ? 14 : 7,
+                ScreenX: sx, ScreenY: e.ey,
+                SpriteIndex: e.egr[cyc], SheetId: SheetIdAt(e.sheetSlot), Size: e.size,
+                ArmorLeft: e.armorleft, Value: e.evalue, LinkNum: e.linknum,
+                ScoreItem: e.scoreitem, OnScreen: onScreen,
+                Xc: e.exc, Yc: e.eyc, XAccel: e.xaccel, YAccel: e.yaccel,
+                AnimFrame: e.enemycycle, AnimMax: e.ani,
+                LaunchType: e.launchtype, LaunchFreq: e.launchfreq,
+                Tur0: e.tur[0], Tur1: e.tur[1], Tur2: e.tur[2], Iced: e.iced));
+        }
+        // The tick draws the bands ground, ground2, sky, top (DrawEnemy 50/100/25/75, i.e.
+        // slot groups 25/75/0/50), so sorting by that rank leaves the front-most last.
+        into.Sort((a, b) => BandDrawRank(a.Band).CompareTo(BandDrawRank(b.Band)));
+    }
+
+    /// <summary>A background cell under a point, resolved through the live scroll cursors.</summary>
+    public readonly record struct TileHit(int Layer, int Row, int Col, int Cell, int ShapeId);
+
+    /// <summary>
+    /// Background layers front-to-back as this frame draws them: bg2 and bg3 move around
+    /// the stack with background2over / background3over (tyrian2.c gameplay loop, the same
+    /// order LayerStack.GameOrder reproduces). A value outside each one's handled range
+    /// means the layer isn't drawn at all, so it isn't probed either.
+    /// </summary>
+    private int[] BgProbeOrder()
+    {
+        var backToFront = new List<int> { 0 };
+        if (_s.background2over is 0 or 3) backToFront.Add(1);
+        if (_s.background2over == 1) backToFront.Add(1);
+        if (_s.background3over == 2) backToFront.Add(2);
+        if (_s.background3over == 0) backToFront.Add(2);
+        if (_s.background3over == 1) backToFront.Add(2);
+        if (_s.background2over == 2) backToFront.Add(1);
+        backToFront.Reverse();
+        return backToFront.ToArray();
+    }
+
+    /// <summary>
+    /// The frontmost visible background tile under a buffer-space point, reversing the
+    /// <see cref="DrawBgLayer"/> walk (same flat indexing, so it agrees with what is drawn
+    /// even where a band wraps into the next map row).
+    /// </summary>
+    public bool TryPickTile(int bufX, int bufY, out TileHit hit)
+    {
+        foreach (int layer in BgProbeOrder())
+        {
+            bool visible = layer == 0 ? ShowBg1 : layer == 1 ? ShowBg2 : ShowBg3;
+            if (!visible) continue;
+            (int posIdx, int bp, int xPos, int backPos) = layer switch
+            {
+                0 => (_s.mapYPos, _s.mapXbp, _s.mapXPos, _s.backPos),
+                1 => (_s.mapY2Pos, _s.mapX2bp, _s.mapX2Pos, _s.backPos2),
+                _ => (_s.mapY3Pos, _s.mapX3bp, _s.mapX3Pos, _s.backPos3),
+            };
+            int cols = layer == 2 ? 15 : 14;
+            var map = _map[layer];
+
+            int i = FloorDiv(bufY - OY - backPos, 28);
+            int t = FloorDiv(bufX - OX - xPos, 24);
+            int idx = posIdx + bp - 12 + (i + 1) * cols + t;
+            if ((uint)idx >= (uint)map.Length || map[idx] == null) continue;
+
+            int row = FloorDiv(idx, cols);
+            hit = new TileHit(layer, row, idx - row * cols,
+                _lv.CellsFor(layer)[idx], _lv.ResolveShapeId(layer, _lv.CellsFor(layer)[idx]));
+            return true;
+        }
+        hit = default;
+        return false;
+    }
 
     internal struct Enemy
     {
@@ -85,6 +245,7 @@ public sealed class GameSim
         public int enemydie;
         public bool enemyground, scoreitem, special, setto, edamaged;
         public int explonum, mapoffset, flagnum, iced;
+        public byte objCat;           // ObjCategory, for the viewer's per-category toggles
         public int xminbounce, xmaxbounce, yminbounce, ymaxbounce;
     }
 
@@ -121,11 +282,13 @@ public sealed class GameSim
         public bool filterActive, filterFade, filterFadeStart;
         public int levelFilter, levelFilterNew, levelBrightness, levelBrightnessChg;
         public int superEnemy254Jump;
+        public int previewLastEventTick;
         public Bool10 globalFlags;
         public Byte10 newPL;
         public Byte9 smoothies, smoothieData;
         public bool levelTimer;
         public int levelTimerCountdown, levelTimerJumpTo;
+        public bool previewGateTimerPause;
         public bool randomExplosions, readyToEndLevel, endLevel, finished;
         public int difficultyLevel;
         public int starfieldSpeed;
@@ -151,6 +314,8 @@ public sealed class GameSim
         internal Star[] stars = Array.Empty<Star>();
         internal S s;
         internal int dat0Egr0, dat0Armor;
+        internal ushort[] gateLoopVisits = Array.Empty<ushort>();
+        internal int releaseGateEvent;
         internal (uint[] X, int P0, int P1, int Pm) rng;
         public int Tick;
     }
@@ -168,6 +333,8 @@ public sealed class GameSim
         s = _s,
         dat0Egr0 = _dat0Egr0,
         dat0Armor = _dat0Armor,
+        gateLoopVisits = (ushort[])_gateLoopVisits.Clone(),
+        releaseGateEvent = _releaseGateEvent,
         rng = _rng.Snapshot(),
         Tick = _s.tickCount,
     };
@@ -185,6 +352,8 @@ public sealed class GameSim
         _s = sn.s;
         _dat0Egr0 = sn.dat0Egr0;
         _dat0Armor = sn.dat0Armor;
+        _gateLoopVisits = (ushort[])sn.gateLoopVisits.Clone();
+        _releaseGateEvent = sn.releaseGateEvent;
         _rng.Restore(sn.rng);
     }
 
@@ -197,6 +366,7 @@ public sealed class GameSim
         _ed = gd.GetEnemyData(ep);
         _wd = gd.GetWeapons(ep);
         _explosionSheet = gd.GetNewshChar('6');
+        _tgt = Screen;
 
         for (int layer = 0; layer < 3; layer++)
         {
@@ -230,12 +400,16 @@ public sealed class GameSim
         Array.Fill(_shotAvail, (byte)1);
         _expl = new Expl[200];
         _repExpl = new RepExpl[20];
+        _gateLoopVisits = new ushort[_maxEvent + 1];
+        _gateLoopTicks = new int[(_maxEvent + 1) * PreviewLoopCycles];
+        _releaseGateEvent = -1;
 
         var d0 = _ed.Get(0);
         _dat0Egr0 = d0.EGraphic != null ? d0.EGraphic[0] : 0;
         _dat0Armor = d0.Armor;
 
         _s = default;
+        _s.globalFlags = new Bool10();
         _s.mapY = 300 - 8; _s.mapY2 = 600 - 8; _s.mapY3 = 600 - 8;
         _s.mapYPos = _s.mapY * 14 - 1;
         _s.mapY2Pos = _s.mapY2 * 14 - 1;
@@ -243,7 +417,8 @@ public sealed class GameSim
         _s.map1YDelay = 1; _s.map1YDelayMax = 1; _s.map2YDelay = 1; _s.map2YDelayMax = 1;
         _s.backPos = 0; _s.backPos2 = 0; _s.backPos3 = 0;
         _s.starfieldSpeed = 1;
-        _s.eventLoc = 1; _s.curLoc = 0;
+        _s.eventLoc = 1;
+        _s.curLoc = HasStartupRouteBootstrap() ? 1 : 0;
         _s.backMove = 1; _s.backMove2 = 2; _s.backMove3 = 3; _s.explodeMove = 2;
         _s.enemiesActive = true;
         _s.stopBackgrounds = false; _s.stopBackgroundNum = 0;
@@ -274,13 +449,38 @@ public sealed class GameSim
         ComputeParallax();
         _s.oldMapXOfs = _s.mapXOfs;
         _s.oldMapX3Ofs = _s.mapX3Ofs;
+        ClearScreens();
+    }
+
+    /// <summary>Blank all pixel buffers (they are not part of snapshots; a seek clears
+    /// them, then draws a few warm-up ticks so feedback filters settle).</summary>
+    public void ClearScreens()
+    {
         Array.Clear(Screen);
+        Array.Clear(_screenB);
+        Array.Clear(PresentScreen);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static sbyte S8(int v) => unchecked((sbyte)v);
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte B8(int v) => unchecked((byte)v);
+
+    /// <summary>
+    /// Arcade-style maps can use location 1 only to jump into a 60000-series
+    /// route/setup table. The game hides that bootstrap frame behind its opening
+    /// fade, but the viewer exposes it when color effects are disabled or the field
+    /// is zoomed out. Start those maps at location 1 so the map is re-anchored before
+    /// the first inspectable frame.
+    /// </summary>
+    private bool HasStartupRouteBootstrap()
+    {
+        for (int i = 0; i < _maxEvent && _ev[i].Time <= 1; i++)
+            if (_ev[i].Time == 1 && _ev[i].Type == 54 &&
+                unchecked((ushort)_ev[i].Dat) >= 60000)
+                return true;
+        return false;
+    }
 
     private EnemyDat DatFor(int id)
     {
@@ -352,7 +552,6 @@ public sealed class GameSim
 
         _s.oldMapX3Ofs = _s.mapX3Ofs;
         _s.oldMapXOfs = _s.mapXOfs;
-        ComputeParallax();
 
         _s.enemyOnScreen = 0;
 
@@ -364,6 +563,20 @@ public sealed class GameSim
             if (_s.finished) return;
             if (++guard > 20000) { _s.finished = true; return; }   // runaway loop safety
         }
+
+        // Events run before the engine's player/parallax update. In particular,
+        // SQUADRON sets background3x1 at time zero; calculating before events makes
+        // that layer use the normal BG3 anchor for one frame, then snap 42 px left.
+        // The viewer has a fixed phantom player, so calculate from the just-authored
+        // mode before drawing the frame and never expose that hidden startup state.
+        ComputeParallax();
+
+        // JE_checkSmoothies: while smoothies are active, drawing goes to VGAScreen2
+        // and each filter pass composites it into the persistent game_screen.
+        bool anySmoothies = draw && ShowTerrainSmoothies &&
+            (_s.smoothies[0] != 0 || _s.smoothies[1] != 0 || _s.smoothies[2] != 0 ||
+             _s.smoothies[3] != 0 || _s.smoothies[4] != 0);
+        _tgt = anySmoothies ? _screenB : Screen;
 
         // --- BACKGROUND 1 ---
         if (_s.forceEvents && _s.backMove == 0) _s.curLoc++;
@@ -391,9 +604,18 @@ public sealed class GameSim
 
         if (_s.starActive) UpdateAndDrawStarfield(draw);
 
+        // iced blur, early slot (smoothies[5-1])
+        if (anySmoothies && _s.smoothies[4] != 0) ApplySmoothie(SmoothieKind.IcedBlur);
+
         // --- BACKGROUND 2 (early positions; over==3 never blends) ---
         if (_s.background2over == 3) DrawBackground2(draw, allowBlend: false);
         if (_s.background2over == 0) DrawBackground2(draw);
+
+        // lava (early variant) and water run before the ground bands
+        if (anySmoothies && _s.smoothies[0] != 0 && _s.smoothieData[0] == 0)
+            ApplySmoothie(SmoothieKind.Lava);
+        if (anySmoothies && _s.smoothies[1] != 0)
+            ApplySmoothie(SmoothieKind.Water);
 
         // --- Ground enemies ---
         int lastEnemyOnScreen = _s.enemyOnScreen;
@@ -401,6 +623,10 @@ public sealed class GameSim
         DrawEnemy(100, _s.mapXOfs, effBack, draw);
         if (_s.enemyOnScreen == 0 || _s.enemyOnScreen == lastEnemyOnScreen)
             if (_s.stopBackgroundNum == 1) _s.stopBackgroundNum = 9;
+
+        // lava, late variant (smoothie_data[0] > 0)
+        if (anySmoothies && _s.smoothies[0] != 0 && _s.smoothieData[0] > 0)
+            ApplySmoothie(SmoothieKind.Lava);
 
         if (_s.background2over == 1) DrawBackground2(draw);
         if (_s.background3over == 2) eff3 = DrawBackground3(draw);
@@ -411,6 +637,10 @@ public sealed class GameSim
             int tw = _lv.LevelEnemy[_rng.Next() % (uint)_lv.LevelEnemy.Length];
             NewEnemy(0, tw, 0);
         }
+
+        // iced blur / blur slots run after the random spawn, before the sky band
+        if (anySmoothies && _s.smoothies[2] != 0) ApplySmoothie(SmoothieKind.IcedBlur);
+        if (anySmoothies && _s.smoothies[3] != 0) ApplySmoothie(SmoothieKind.Blur);
 
         // --- Sky enemies (under bg3) ---
         if (!_s.skyEnemyOverAll)
@@ -460,7 +690,7 @@ public sealed class GameSim
         }
 
         // --- Level timer ---
-        if (_s.levelTimer && _s.levelTimerCountdown > 0)
+        if (_s.levelTimer && !_s.previewGateTimerPause && _s.levelTimerCountdown > 0)
         {
             _s.levelTimerCountdown--;
             if (_s.levelTimerCountdown == 0) EventJump((ushort)_s.levelTimerJumpTo);
@@ -472,6 +702,8 @@ public sealed class GameSim
         UpdateBossBars(draw);
 
         // --- Map-stop release / level end ---
+        PreviewQuietEnemyHold();
+
         if (_s.stopBackgroundNum == 9 && _s.backMove == 0 && !_s.enemyStillExploding)
         {
             _s.backMove = 1; _s.backMove2 = 2; _s.backMove3 = 3; _s.explodeMove = 2;
@@ -499,55 +731,76 @@ public sealed class GameSim
     // =====================================================================
     //  Backgrounds (backgrnd.c)
     // =====================================================================
-    private void BlitBgRow(int x, int y, int layer, int flatIdx, int cols)
-    {
-        var map = _map[layer];
-        for (int tile = 0; tile < 12; tile++)
-        {
-            int mi = flatIdx + tile;
-            byte[]? data = (uint)mi < (uint)map.Length ? map[mi] : null;
-            int bx = x + tile * 24;
-            if (data == null) continue;
-            for (int ty = 0; ty < 28; ty++)
-            {
-                int dy = y + ty;
-                if ((uint)dy >= ScreenH) continue;
-                int src = ty * 24;
-                int dst = dy * Pitch + bx;
-                for (int tx = 0; tx < 24; tx++)
-                {
-                    byte v = data[src + tx];
-                    int dxp = bx + tx;
-                    if (v != 0 && (uint)dxp < Pitch)
-                        Screen[dst + tx] = v;
-                }
-            }
-        }
-    }
+    /// <summary>Floor division (the tile window may sit at a negative flat index).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int FloorDiv(int a, int b) => a >= 0 ? a / b : -(((-a) + b - 1) / b);
 
-    private void BlitBgRowBlend(int x, int y, int layer, int flatIdx, int cols)
+    /// <summary>
+    /// One layer pass. The engine draws 12 tile columns x 8 rows; the extended view
+    /// widens the range to the full authored map width plus off-screen rows above and
+    /// below — same tiles, same registration, just more of them.
+    ///
+    /// The 12 on-screen columns follow backgrnd.c literally: mapY*Pos is a *flat* pointer
+    /// into the `JE_byte *mainmap[rows][cols]` tile-pointer array (tyrian2.c:787), the
+    /// band cursor steps one map width per row (`map += 14/15`) and the tile loop reads
+    /// `map[0..11]` with no column bound (backgrnd.c:63-105, 149-253). A window that
+    /// starts late in a row therefore runs straight on into the next row's leading
+    /// columns, and levels depend on it: SQUADRON (ep4 #18) re-seats BG1/BG2 with event
+    /// 77 dat=8000 -> flat index 4000, i.e. 10 columns into row 285, so its whole
+    /// backdrop comes from the wrapped-around tiles. Clipping each band to its own row
+    /// left only the two columns before the wrap, i.e. a blue strip pinned to the left
+    /// edge instead of a full-screen starfield backdrop.
+    ///
+    /// The extended margins are a viewer-only invention (the engine never draws them), so
+    /// they stay row-bounded: a margin tile is drawn only while it is still in the same
+    /// map row as the on-screen column it extends. That shows the authored columns just
+    /// outside the 288px window without spilling neighbouring rows across the margin.
+    /// </summary>
+    private void DrawBgLayer(int layer, int posIdx, int bp, int xPos, int backPos, bool blend)
     {
         var map = _map[layer];
-        for (int tile = 0; tile < 12; tile++)
+        int cols = layer == 2 ? 15 : 14;
+        int start = posIdx + bp - 12;
+
+        int iMin = ExtendedDraw ? -6 : -1;
+        int iMax = ExtendedDraw ? 7 : 6;
+        int tMin = ExtendedDraw ? -4 : 0;
+        int tMax = ExtendedDraw ? 16 : 11;
+
+        var tgt = _tgt;
+        for (int i = iMin; i <= iMax; i++)
         {
-            int mi = flatIdx + tile;
-            byte[]? data = (uint)mi < (uint)map.Length ? map[mi] : null;
-            int bx = x + tile * 24;
-            if (data == null) continue;
-            for (int ty = 0; ty < 28; ty++)
+            int rowBase = start + (i + 1) * cols;
+            int leftRow = FloorDiv(rowBase, cols);          // map row of on-screen column 0
+            int rightRow = FloorDiv(rowBase + 11, cols);    // map row of on-screen column 11
+            int y = i * 28 + backPos;
+            for (int t = tMin; t <= tMax; t++)
             {
-                int dy = y + ty;
-                if ((uint)dy >= ScreenH) continue;
-                int src = ty * 24;
-                int dst = dy * Pitch + bx;
-                for (int tx = 0; tx < 24; tx++)
+                int idx = rowBase + t;
+                if (t < 0 && FloorDiv(idx, cols) != leftRow) continue;
+                if (t > 11 && FloorDiv(idx, cols) != rightRow) continue;
+                if ((uint)idx >= (uint)map.Length) continue;
+                byte[]? data = map[idx];
+                if (data == null) continue;
+                int bx = xPos + t * 24;
+                for (int ty = 0; ty < 28; ty++)
                 {
-                    byte v = data[src + tx];
-                    int dxp = bx + tx;
-                    if (v != 0 && (uint)dxp < Pitch)
+                    int dy = y + ty + OY;
+                    if ((uint)dy >= BufH) continue;
+                    int src = ty * 24;
+                    int dstRow = dy * BufW;
+                    for (int tx = 0; tx < 24; tx++)
                     {
-                        byte d = Screen[dst + tx];
-                        Screen[dst + tx] = (byte)((v & 0xF0) | (((d & 0x0F) + (v & 0x0F)) / 2));
+                        byte v = data[src + tx];
+                        if (v == 0) continue;
+                        int dx = bx + tx + OX;
+                        if ((uint)dx >= BufW) continue;
+                        if (blend)
+                        {
+                            byte d = tgt[dstRow + dx];
+                            tgt[dstRow + dx] = (byte)((v & 0xF0) | (((d & 0x0F) + (v & 0x0F)) / 2));
+                        }
+                        else tgt[dstRow + dx] = v;
                     }
                 }
             }
@@ -556,13 +809,9 @@ public sealed class GameSim
 
     private void DrawBackground1()
     {
-        Array.Clear(Screen);
-        int idx = _s.mapYPos + _s.mapXbp - 12;
-        for (int i = -1; i < 7; i++)
-        {
-            BlitBgRow(_s.mapXPos, i * 28 + _s.backPos, 0, idx, 14);
-            idx += 14;
-        }
+        Array.Clear(_tgt);   // SDL_FillRect: the frame always starts blank
+        if (ShowBg1)
+            DrawBgLayer(0, _s.mapYPos, _s.mapXbp, _s.mapXPos, _s.backPos, blend: false);
     }
 
     private void DrawBackground2(bool draw, bool allowBlend = true)
@@ -571,16 +820,8 @@ public sealed class GameSim
             _s.backMove2 = _s.map2YDelay == 1 ? 1 : 0;
 
         bool blend = allowBlend && !_s.background2notTransparent;   // wild detail default
-        if (draw)
-        {
-            int idx = _s.mapY2Pos + _s.mapX2bp - 12;
-            for (int i = -1; i < 7; i++)
-            {
-                if (blend) BlitBgRowBlend(_s.mapX2Pos, i * 28 + _s.backPos2, 1, idx, 14);
-                else BlitBgRow(_s.mapX2Pos, i * 28 + _s.backPos2, 1, idx, 14);
-                idx += 14;
-            }
-        }
+        if (draw && ShowBg2)
+            DrawBgLayer(1, _s.mapY2Pos, _s.mapX2bp, _s.mapX2Pos, _s.backPos2, blend);
 
         if (--_s.map2YDelay == 0)
         {
@@ -606,36 +847,154 @@ public sealed class GameSim
             _s.mapY3--;
             _s.mapY3Pos -= 15;
         }
-        if (draw)
+        if (draw && ShowBg3)
+            DrawBgLayer(2, _s.mapY3Pos, _s.mapX3bp, _s.mapX3Pos, _s.backPos3, blend: false);
+        return m;
+    }
+
+    // =====================================================================
+    //  Smoothie filters (backgrnd.c) — composite the draw target into the
+    //  persistent game_screen; lava/water read the previous frame (feedback).
+    // =====================================================================
+    private enum SmoothieKind { Lava, Water, IcedBlur, Blur }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int VIdx(int p) => (p / 320 + OY) * BufW + p % 320 + OX;   // vanilla-linear -> buffer
+
+    private void ApplySmoothie(SmoothieKind kind)
+    {
+        byte[] src = _tgt;
+        byte[] dst = Screen;
+        if (!ReferenceEquals(src, dst))
         {
-            int idx = _s.mapY3Pos + _s.mapX3bp - 12;
-            for (int i = -1; i < 7; i++)
+            CopyMargins(src, dst);   // margins bypass the filters (they cover the vanilla area)
+            int filteredRows = kind is SmoothieKind.Lava or SmoothieKind.Water ? 185 : 184;
+            CopyVanillaTail(src, dst, filteredRows);
+        }
+
+        switch (kind)
+        {
+            case SmoothieKind.Lava:
             {
-                BlitBgRow(_s.mapX3Pos, i * 28 + _s.backPos3, 2, idx, 15);
-                idx += 15;
+                int w = 320 * 185 - 1;
+                int p = 320 * 185;
+                for (int y = 185 - 1; y >= 0; y--)
+                {
+                    for (int x = 320 - 1; x >= 0; x -= 8)
+                    {
+                        int waver = Math.Abs(((w >> 9) & 0x0F) - 8) - 1;
+                        w -= 8;
+                        for (int xi = 8 - 1; xi >= 0; xi--)
+                        {
+                            p--;
+                            int value = 0;
+                            if (p + waver >= 0)
+                                value += (src[VIdx(p + waver)] & 0x0F) * 2;
+                            value += dst[VIdx(p + waver + 320)] & 0x0F;
+                            if (p + waver - 320 >= 0)
+                                value += dst[VIdx(p + waver - 320)] & 0x0F;
+                            dst[VIdx(p)] = (byte)((value / 4) | 0x70);
+                        }
+                    }
+                }
+                break;
+            }
+            case SmoothieKind.Water:
+            {
+                byte hue = (byte)(_s.smoothieData[1] << 4);
+                int w = 320 * 185 - 1;
+                int p = 320 * 185;
+                for (int y = 185 - 1; y >= 0; y--)
+                {
+                    for (int x = 320 - 1; x >= 0; x -= 8)
+                    {
+                        int waver = Math.Abs(((w >> 10) & 0x07) - 4) - 1;
+                        w -= 8;
+                        for (int xi = 8 - 1; xi >= 0; xi--)
+                        {
+                            p--;
+                            byte s = src[VIdx(p)];
+                            if ((s & 0x30) == 0)
+                                dst[VIdx(p)] = s;
+                            else
+                            {
+                                int value = (s & 0x0F) + (dst[VIdx(p + waver + 320)] & 0x0F);
+                                dst[VIdx(p)] = (byte)((value / 2) | hue);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            case SmoothieKind.IcedBlur:
+            case SmoothieKind.Blur:
+            {
+                bool iced = kind == SmoothieKind.IcedBlur;
+                for (int y = 0; y < 184; y++)
+                {
+                    int row = (y + OY) * BufW + OX;
+                    for (int x = 0; x < 320; x++)
+                    {
+                        byte s = src[row + x];
+                        byte d = dst[row + x];
+                        int value = (s & 0x0F) + (d & 0x0F);
+                        dst[row + x] = (byte)((value / 2) | (iced ? 0x80 : s & 0xF0));
+                    }
+                }
+                break;
             }
         }
-        return m;
+        _tgt = Screen;   // VGAScreen = game_screen; later draws land on the filtered image
+    }
+
+    /// <summary>Copy everything outside the vanilla 320x200 area from src to dst so the
+    /// extended margins stay in sync when a filter switches the draw target.</summary>
+    private static void CopyMargins(byte[] src, byte[] dst)
+    {
+        for (int y = 0; y < BufH; y++)
+        {
+            int row = y * BufW;
+            if (y < OY || y >= OY + 200)
+            {
+                Array.Copy(src, row, dst, row, BufW);
+                continue;
+            }
+            Array.Copy(src, row, dst, row, OX);
+            Array.Copy(src, row + OX + 320, dst, row + OX + 320, BufW - OX - 320);
+        }
+    }
+
+    /// <summary>The original filters stop at the displayed scanlines. Preserve the
+    /// otherwise invisible vanilla tail so it remains useful in extended view.</summary>
+    private static void CopyVanillaTail(byte[] src, byte[] dst, int firstRow)
+    {
+        for (int y = firstRow; y < ScreenH; y++)
+        {
+            int row = (y + OY) * BufW + OX;
+            Array.Copy(src, row, dst, row, ScreenW);
+        }
     }
 
     private void UpdateAndDrawStarfield(bool draw)
     {
+        var tgt = _tgt;
         for (int i = _stars.Length - 1; i >= 0; i--)
         {
             ref var st = ref _stars[i];
             st.position = (ushort)(st.position + (st.speed + _s.starfieldSpeed) * Pitch);
-            if (!draw) continue;
+            if (!draw || !ShowStarfield) continue;
             int pos = st.position;
             if (pos < 177 * Pitch)
             {
-                if (Screen[pos] == 0) Screen[pos] = st.color;
+                int b = VIdx(pos);
+                if (tgt[b] == 0) tgt[b] = st.color;
                 if (st.color - 4 >= 0x90)
                 {
                     byte halo = (byte)(st.color - 4);
-                    if (Screen[pos + 1] == 0) Screen[pos + 1] = halo;
-                    if (pos > 0 && Screen[pos - 1] == 0) Screen[pos - 1] = halo;
-                    if (Screen[pos + Pitch] == 0) Screen[pos + Pitch] = halo;
-                    if (pos >= Pitch && Screen[pos - Pitch] == 0) Screen[pos - Pitch] = halo;
+                    if (tgt[b + 1] == 0) tgt[b + 1] = halo;
+                    if (pos > 0 && tgt[b - 1] == 0) tgt[b - 1] = halo;
+                    if (tgt[b + BufW] == 0) tgt[b + BufW] = halo;
+                    if (pos >= Pitch && tgt[b - BufW] == 0) tgt[b - BufW] = halo;
                 }
             }
         }
@@ -648,19 +1007,20 @@ public sealed class GameSim
     {
         Sprite? spr = sheet?.Decode(index);
         if (spr == null) return;
+        var tgt = _tgt;
         for (int sy = 0; sy < spr.H; sy++)
         {
-            int dy = y + sy;
-            if ((uint)dy >= ScreenH) continue;
-            int row = dy * Pitch;
+            int dy = y + sy + OY;
+            if ((uint)dy >= BufH) continue;
+            int row = dy * BufW;
             int srow = sy * spr.W;
             for (int sx = 0; sx < spr.W; sx++)
             {
                 byte v = spr.Pixels[srow + sx];
                 if (v == 0) continue;
-                int dx = x + sx;
-                if ((uint)dx >= Pitch) continue;
-                Screen[row + dx] = filter != 0 ? (byte)(filter | (v & 0x0F)) : v;
+                int dx = x + sx + OX;
+                if ((uint)dx >= BufW) continue;
+                tgt[row + dx] = filter != 0 ? (byte)(filter | (v & 0x0F)) : v;
             }
         }
     }
@@ -669,20 +1029,21 @@ public sealed class GameSim
     {
         Sprite? spr = sheet?.Decode(index);
         if (spr == null) return;
+        var tgt = _tgt;
         for (int sy = 0; sy < spr.H; sy++)
         {
-            int dy = y + sy;
-            if ((uint)dy >= ScreenH) continue;
-            int row = dy * Pitch;
+            int dy = y + sy + OY;
+            if ((uint)dy >= BufH) continue;
+            int row = dy * BufW;
             int srow = sy * spr.W;
             for (int sx = 0; sx < spr.W; sx++)
             {
                 byte v = spr.Pixels[srow + sx];
                 if (v == 0) continue;
-                int dx = x + sx;
-                if ((uint)dx >= Pitch) continue;
-                byte d = Screen[row + dx];
-                Screen[row + dx] = (byte)((v & 0xF0) | (((d & 0x0F) + (v & 0x0F)) / 2));
+                int dx = x + sx + OX;
+                if ((uint)dx >= BufW) continue;
+                byte d = tgt[row + dx];
+                tgt[row + dx] = (byte)((v & 0xF0) | (((d & 0x0F) + (v & 0x0F)) / 2));
             }
         }
     }
@@ -692,6 +1053,29 @@ public sealed class GameSim
         int cyc = Math.Clamp(e.enemycycle - 1, 0, 19);
         BlitSprite(SheetForSlot(e.sheetSlot), e.egr[cyc] + sprOfs,
             e.ex + xOfs + tempMapXOfs, e.ey + yOfs, e.filter);
+    }
+
+    /// <summary>The engine's per-blit visibility gates; the extended view bypasses
+    /// them (they only exist to avoid drawing outside the vanilla screen).</summary>
+    private void DrawEnemyBlits(ref Enemy e, int tempMapXOfs, bool gated)
+    {
+        if (e.size == 1)
+        {
+            if (!gated || e.ey > -13)
+            {
+                BlitEnemy(ref e, tempMapXOfs, -6, -7, 0);
+                BlitEnemy(ref e, tempMapXOfs, 6, -7, 1);
+            }
+            if (!gated || (e.ey > -26 && e.ey < 182))
+            {
+                BlitEnemy(ref e, tempMapXOfs, -6, 7, 19);
+                BlitEnemy(ref e, tempMapXOfs, 6, 7, 20);
+            }
+        }
+        else if (!gated || e.ey > -13)
+        {
+            BlitEnemy(ref e, tempMapXOfs, 0, 0, 0);
+        }
     }
 
     // =====================================================================
@@ -732,27 +1116,16 @@ public sealed class GameSim
                     continue;
                 }
 
-                if (draw)
-                {
-                    if (e.size == 1)
-                    {
-                        if (e.ey > -13)
-                        {
-                            BlitEnemy(ref e, tempMapXOfs, -6, -7, 0);
-                            BlitEnemy(ref e, tempMapXOfs, 6, -7, 1);
-                        }
-                        if (e.ey > -26 && e.ey < 182)
-                        {
-                            BlitEnemy(ref e, tempMapXOfs, -6, 7, 19);
-                            BlitEnemy(ref e, tempMapXOfs, 6, 7, 20);
-                        }
-                    }
-                    else if (e.ey > -13)
-                    {
-                        BlitEnemy(ref e, tempMapXOfs, 0, 0, 0);
-                    }
-                }
+                if (draw && CategoryVisible(e.objCat))
+                    DrawEnemyBlits(ref e, tempMapXOfs, gated: !ExtendedDraw);
                 e.filter = 0;
+            }
+            else if (ExtendedDraw && draw && CategoryVisible(e.objCat) &&
+                     e.egr[Math.Clamp(e.enemycycle - 1, 0, 19)] != 999)
+            {
+                // outside the engine's animation window: frozen, but visible beyond
+                // the screen in the extended view
+                DrawEnemyBlits(ref e, tempMapXOfs, gated: false);
             }
 
             // cyclic acceleration
@@ -1143,11 +1516,15 @@ public sealed class GameSim
     {
         for (int y = y1; y <= y2; y++)
         {
-            if ((uint)y >= ScreenH) continue;
-            int row = y * Pitch;
+            int dy = y + OY;
+            if ((uint)dy >= BufH) continue;
+            int row = dy * BufW;
             for (int x = x1; x <= x2; x++)
-                if ((uint)x < Pitch)
-                    Screen[row + x] = col;
+            {
+                int dx = x + OX;
+                if ((uint)dx < BufW)
+                    Screen[row + dx] = col;
+            }
         }
     }
 
@@ -1209,10 +1586,13 @@ public sealed class GameSim
 
         if (_s.filterFade)
         {
-            _s.levelBrightness += _s.levelBrightnessChg;
+            // JE_shortint is an 8-bit signed value. Some authored fades (CORE)
+            // deliberately cross -128 and depend on wrapping to +127 before they
+            // reverse. Keeping this as an unbounded int makes the fade never return.
+            _s.levelBrightness = S8(_s.levelBrightness + _s.levelBrightnessChg);
             if ((_s.filterFadeStart && _s.levelBrightness < -14) || _s.levelBrightness > 14)
             {
-                _s.levelBrightnessChg = -_s.levelBrightnessChg;
+                _s.levelBrightnessChg = S8(-_s.levelBrightnessChg);
                 _s.filterFadeStart = false;
                 _s.levelFilter = _s.levelFilterNew;
             }
@@ -1223,14 +1603,14 @@ public sealed class GameSim
             }
         }
 
-        if (!draw) return;
+        if (!draw || !ShowScreenFilter) return;
 
         if (col != -99)
         {
             int hue = (col << 4) & 0xF0;
             for (int y = 0; y < ViewH; y++)
             {
-                int row = y * Pitch + ViewX;
+                int row = (y + OY) * BufW + ViewX + OX;
                 for (int x = 0; x < ViewW; x++)
                     Screen[row + x] = (byte)(hue | (Screen[row + x] & 0x0F));
             }
@@ -1239,13 +1619,61 @@ public sealed class GameSim
         {
             for (int y = 0; y < ViewH; y++)
             {
-                int row = y * Pitch + ViewX;
+                int row = (y + OY) * BufW + ViewX + OX;
                 for (int x = 0; x < ViewW; x++)
                 {
                     byte s = Screen[row + x];
                     uint t = (uint)((s & 0x0F) + bright);
                     byte low = t >= 0x1F ? (byte)0 : t >= 0x0F ? (byte)0x0F : (byte)t;
                     Screen[row + x] = (byte)((s & 0xF0) | low);
+                }
+            }
+        }
+    }
+
+    // =====================================================================
+    //  Presentation (JE_starShowVGA): flip / spotlight special codes.
+    // =====================================================================
+    public void PreparePresent()
+    {
+        Array.Copy(Screen, PresentScreen, Screen.Length);
+        int code = _s.smoothies[8] + (_s.smoothies[5] << 1);
+        if (code == 1 && ShowScreenFlip)
+        {
+            // upside-down playfield (TIME WAR / EYESPY style)
+            for (int r = 0; r < ViewH; r++)
+            {
+                int dst = (r + OY) * BufW + ViewX + OX;
+                int src = (ViewH - 1 - r + OY) * BufW + ViewX + OX;
+                Array.Copy(Screen, src, PresentScreen, dst, ViewW);
+            }
+        }
+        else if (code == 2 && ShowSpotlight)
+        {
+            // spotlight around the (phantom) player; everything else darkened
+            int lighty = 172 - PlayerY;
+            int lightx = 281 - PlayerX;
+            for (int r = 0; r < ViewH; r++)
+            {
+                int y = 184 - r;
+                int row = (r + OY) * BufW + ViewX + OX;
+                for (int c = 0; c < ViewW; c++)
+                {
+                    byte s = Screen[row + c];
+                    int x = 264 - c;
+                    if (lighty > y)
+                    {
+                        PresentScreen[row + c] = (byte)((s & 0xF0) | ((s >> 2) & 0x03));
+                        continue;
+                    }
+                    int lightdist = Math.Abs(lightx - x) + lighty;
+                    if (lightdist < y)
+                        PresentScreen[row + c] = s;
+                    else if (lightdist - y <= 5)
+                        PresentScreen[row + c] = (byte)((s & 0xF0) |
+                            (((s & 0x0F) + 3 * (5 - (lightdist - y))) / 4));
+                    else
+                        PresentScreen[row + c] = (byte)((s & 0xF0) | ((s & 0x0F) >> 2));
                 }
             }
         }
@@ -1260,16 +1688,23 @@ public sealed class GameSim
         {
             if (_avail[i] == 1)
             {
-                _avail[i] = MakeEnemy(ref _enemy[i], eDatI, uniqueShapeTableI);
+                _avail[i] = MakeEnemy(ref _enemy[i], eDatI, uniqueShapeTableI, enemyOffset);
                 return i + 1;
             }
         }
         return 0;
     }
 
-    private byte MakeEnemy(ref Enemy e, int eDatI, int uniqueShapeTableI)
+    /// <summary><paramref name="band"/> is the slot group the enemy is being created in
+    /// (0 sky / 25 ground / 50 top / 75 ground2) — it only feeds the viewer's category
+    /// tag, which must be stamped here because slots are recycled and would otherwise
+    /// keep the previous occupant's category.</summary>
+    private byte MakeEnemy(ref Enemy e, int eDatI, int uniqueShapeTableI, int band)
     {
         var dat = DatFor(eDatI);
+        // Same classification the map view uses, so a category switched off in the layer
+        // list hides the same things in both views (ObjectPlacer.Classify).
+        e.objCat = (byte)ObjectPlacer.Classify(dat.Armor, dat.Value, band);
 
         int shapeTableI = uniqueShapeTableI > 0 ? uniqueShapeTableI : dat.ShapeBank;
         if (shapeTableI == 21) e.sheetSlot = -2;
@@ -1414,7 +1849,7 @@ public sealed class GameSim
         ref EventRec ev = ref _ev[_s.eventLoc - 1];
         int tempW = ev.Dat + enemyTypeOfs;
         ref var e = ref _enemy[_s.b - 1];
-        _avail[_s.b - 1] = MakeEnemy(ref e, tempW, uniqueShapeTableI);
+        _avail[_s.b - 1] = MakeEnemy(ref e, tempW, uniqueShapeTableI, enemyOffset);
 
         // T2000: -200 means one random X, rolled once and written back into the event
         if (ev.Dat2 == -200)
@@ -1481,13 +1916,155 @@ public sealed class GameSim
         return index != -1;
     }
 
+    private bool GateEnemiesPresent(in EventRec gate)
+    {
+        if (gate.Dat2 == 0)
+        {
+            for (int link = 1; link <= 19; link++)
+                if (SearchFor(link, out _)) return true;
+            return false;
+        }
+
+        return SearchFor(gate.Dat2, out _) ||
+               (gate.Dat3 != 0 && SearchFor(gate.Dat3, out _)) ||
+               (gate.Dat4 != 0 && SearchFor(gate.Dat4, out _));
+    }
+
+    private void DefeatGateEnemies(in EventRec gate)
+    {
+        for (int i = 0; i < _enemy.Length; i++)
+        {
+            if (_avail[i] != 0) continue;
+            int link = _enemy[i].linknum;
+            bool match = gate.Dat2 == 0
+                ? link is >= 1 and <= 19
+                : link == gate.Dat2 || (gate.Dat3 != 0 && link == gate.Dat3) ||
+                  (gate.Dat4 != 0 && link == gate.Dat4);
+            if (match) DefeatPreviewEnemy(i);
+        }
+    }
+
+    private void DefeatLink(int link)
+    {
+        for (int i = 0; i < _enemy.Length; i++)
+            if (_avail[i] == 0 && _enemy[i].linknum == link)
+                DefeatPreviewEnemy(i);
+    }
+
+    private void DefeatAllActiveEnemies()
+    {
+        for (int i = 0; i < _enemy.Length; i++)
+            if (_avail[i] == 0)
+                DefeatPreviewEnemy(i);
+    }
+
+    private void DefeatPreviewEnemy(int i)
+    {
+        ref Enemy e = ref _enemy[i];
+        if (e.special && e.flagnum is >= 1 and <= 10)
+            _s.globalFlags[e.flagnum - 1] = e.setto;
+        _avail[i] = 1;
+    }
+
+    /// <summary>Find the enemy-test event that guards this authored backward jump.</summary>
+    private int FindGateForLoop(int jumpIndex, ushort target)
+    {
+        int best = -1;
+        ushort loopEnd = _ev[jumpIndex].Time;
+        for (int i = 0; i < jumpIndex; i++)
+        {
+            ref EventRec candidate = ref _ev[i];
+            if (candidate.Time < target || candidate.Time > loopEnd || candidate.Type != 70)
+                continue;
+
+            // A gate that exits beyond the rewind point is the controlling branch.
+            ushort exit = unchecked((ushort)candidate.Dat);
+            if (exit <= loopEnd || !GateEnemiesPresent(candidate)) continue;
+            best = i;
+            break;
+        }
+        return best;
+    }
+
+    private bool LoopContainsReadyEnd(int jumpIndex, ushort target)
+    {
+        for (int i = 0; i < jumpIndex; i++)
+            if (_ev[i].Time >= target && _ev[i].Time <= _ev[jumpIndex].Time &&
+                _ev[i].Type == 36)
+                return true;
+        return false;
+    }
+
+    private bool HasFutureEnd(int eventIndex)
+    {
+        for (int i = eventIndex + 1; i < _maxEvent; i++)
+            if (_ev[i].Type is 11 or 36)
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Cycles 1..PreviewLoopCycles only note when they ended; the release pass
+    /// (PreviewLoopCycles + 1) turns those marks into the retained loop region — it starts
+    /// where cycle 1 ended and closes on this tick, so it spans PreviewLoopCycles repeats.
+    /// </summary>
+    private void RecordScriptedGateCycle(
+        int eventIndex, int cycle, PreviewKind kind = PreviewKind.EnemyLoop)
+    {
+        int slot = eventIndex * PreviewLoopCycles;
+        if (cycle >= 1 && cycle <= PreviewLoopCycles)
+        {
+            _gateLoopTicks[slot + cycle - 1] = LogTick;
+            return;
+        }
+        if (cycle != PreviewLoopCycles + 1) return;
+
+        var cycleEnds = new int[PreviewLoopCycles];
+        for (int n = 1; n < PreviewLoopCycles; n++) cycleEnds[n - 1] = _gateLoopTicks[slot + n];
+        cycleEnds[^1] = LogTick;
+        GatePreviewLog?.Add(new GatePreview(
+            _gateLoopTicks[slot], LogTick, cycleEnds, kind, eventIndex));
+    }
+
+    private void PreviewQuietEnemyHold()
+    {
+        if (!PreviewEnemyGates || _s.enemyOnScreen == 0 || _s.previewGateTimerPause)
+            return;
+
+        bool blocksProgress = _s.stopBackgrounds || _s.stopBackgroundNum is > 0 and < 9 ||
+                              _s.readyToEndLevel || _s.backMove == 0;
+        const int holdTicks = (int)(20 * TicksPerSecond);
+        if (!blocksProgress || _s.tickCount - _s.previewLastEventTick < holdTicks)
+            return;
+
+        int start = Math.Max(1, _s.tickCount - holdTicks);
+        GatePreviewLog?.Add(new GatePreview(start, _s.tickCount, Array.Empty<int>(),
+            PreviewKind.EnemyHold, EventIndex: -1));
+
+        bool jump254 = _s.superEnemy254Jump > _s.curLoc && SearchFor(254, out _);
+        DefeatAllActiveEnemies();
+        if (_s.backMove == 0)
+        {
+            _s.backMove = 1;
+            _s.backMove2 = 2;
+            _s.backMove3 = 3;
+            _s.explodeMove = 2;
+            _s.stopBackgrounds = false;
+            _s.stopBackgroundNum = 0;
+        }
+        _s.previewLastEventTick = _s.tickCount;
+        if (jump254) EventJump((ushort)_s.superEnemy254Jump);
+    }
+
     // =====================================================================
     //  Event system (JE_eventSystem) 窶・all sim-relevant event types.
     // =====================================================================
     private void EventSystem()
     {
         ref EventRec ev = ref _ev[_s.eventLoc - 1];
-        EventLog?.Add((LogTick, ev.Type));
+        int logIndex = _s.eventLoc - 1;
+        int prevLoc = _s.curLoc;
+        _s.previewLastEventTick = _s.tickCount;
 
         switch (ev.Type)
         {
@@ -1734,7 +2311,24 @@ public sealed class GameSim
 
             case 38:
             {
-                _s.curLoc = unchecked((ushort)ev.Dat);
+                ushort target = unchecked((ushort)ev.Dat);
+                if (PreviewEnemyGates && target < ev.Time)
+                {
+                    int gateEvent = FindGateForLoop(logIndex, target);
+                    if (gateEvent >= 0)
+                    {
+                        int cycle = Math.Min(PreviewLoopCycles + 1, (int)++_gateLoopVisits[logIndex]);
+                        _s.previewGateTimerPause = true;
+                        RecordScriptedGateCycle(logIndex, cycle);
+                        if (cycle == PreviewLoopCycles + 1)
+                        {
+                            _gateLoopVisits[logIndex] = ushort.MaxValue;
+                            _releaseGateEvent = gateEvent;
+                        }
+                    }
+                }
+
+                _s.curLoc = target;
                 int newLoc = 1;
                 for (int t = 0; t < _maxEvent; t++)
                     if (_ev[t].Time <= _s.curLoc)
@@ -1760,11 +2354,14 @@ public sealed class GameSim
             case 43: _s.background2over = B8(ev.Dat); break;
 
             case 44:
+                // levelFilter/levelFilterNew are JE_shortint (signed char): dat4=157
+                // wraps to -99 = "no hue" — keeping it unsigned paints the whole
+                // screen one colour where the game shows only a brightness fade.
                 _s.filterActive = ev.Dat > 0;
                 _s.filterFade = ev.Dat == 2;
-                _s.levelFilter = ev.Dat2;
+                _s.levelFilter = S8(ev.Dat2);
                 _s.levelBrightness = ev.Dat3;
-                _s.levelFilterNew = ev.Dat4;
+                _s.levelFilterNew = S8(ev.Dat4);
                 _s.levelBrightnessChg = ev.Dat5;
                 _s.filterFadeStart = ev.Dat6 == 0;
                 break;
@@ -1815,7 +2412,66 @@ public sealed class GameSim
 
             case 53: _s.forceEvents = ev.Dat != 99; break;
 
-            case 54: EventJump(unchecked((ushort)ev.Dat)); break;
+            case 54:
+            {
+                ushort target = unchecked((ushort)ev.Dat);
+                int gateEvent = -1;
+                bool super254Gate = false;
+                bool finalReadyGate = false;
+                bool routeLoop = false;
+                if (PreviewEnemyGates && target < ev.Time)
+                {
+                    gateEvent = FindGateForLoop(logIndex, target);
+                    super254Gate = gateEvent < 0 && _s.superEnemy254Jump > ev.Time &&
+                                       SearchFor(254, out _);
+                    finalReadyGate = gateEvent < 0 && !super254Gate &&
+                                     (_s.readyToEndLevel || LoopContainsReadyEnd(logIndex, target));
+                    routeLoop = gateEvent < 0 && !super254Gate && !finalReadyGate &&
+                                HasFutureEnd(logIndex);
+                }
+
+                if (gateEvent >= 0 || super254Gate || finalReadyGate || routeLoop)
+                {
+                    int cycle = Math.Min(PreviewLoopCycles + 1, (int)++_gateLoopVisits[logIndex]);
+                    if (!routeLoop) _s.previewGateTimerPause = true;
+                    RecordScriptedGateCycle(logIndex, cycle,
+                        routeLoop ? PreviewKind.RouteLoop : PreviewKind.EnemyLoop);
+                    if (cycle == PreviewLoopCycles + 1)
+                    {
+                        _gateLoopVisits[logIndex] = ushort.MaxValue;
+                        if (super254Gate)
+                        {
+                            DefeatLink(254);
+                            _s.previewGateTimerPause = false;
+                            EventJump((ushort)_s.superEnemy254Jump);
+                            break;
+                        }
+
+                        if (finalReadyGate)
+                        {
+                            DefeatAllActiveEnemies();
+                            _s.readyToEndLevel = true;
+                            _s.endLevel = true;
+                            _s.finished = true;
+                            _s.previewGateTimerPause = false;
+                            break;
+                        }
+
+                        if (routeLoop)
+                        {
+                            _s.previewGateTimerPause = false;
+                            break;
+                        }
+
+                        // One final rewind lands at the authored gate. On that pass,
+                        // take its success branch as though the player killed the boss.
+                        _releaseGateEvent = gateEvent;
+                    }
+                }
+
+                EventJump(target);
+                break;
+            }
 
             case 55:
                 if (ev.Dat3 > 79 && ev.Dat3 < 90)
@@ -1906,6 +2562,14 @@ public sealed class GameSim
             case 69: break;  // invulnerability
 
             case 70:
+                if (PreviewEnemyGates && _releaseGateEvent == logIndex)
+                {
+                    DefeatGateEnemies(ev);
+                    _releaseGateEvent = -1;
+                    _s.previewGateTimerPause = false;
+                    EventJump(unchecked((ushort)ev.Dat));
+                    break;
+                }
                 if (ev.Dat2 == 0)
                 {
                     bool found = false;
@@ -2004,6 +2668,7 @@ public sealed class GameSim
                 break;
         }
 
+        EventLog?.Add(new EventExec(LogTick, ev.Type, logIndex, _s.curLoc < prevLoc));
         _s.eventLoc++;
     }
 }
