@@ -17,6 +17,15 @@ public struct EnemyDat
     public ushort EEnemyDie;
     public bool Loaded;
 
+    // Simulation fields (JE_makeEnemy / JE_drawEnemy)
+    public byte Tur0, Tur1, Tur2;      // turret weapon ids (251..255 = specials)
+    public byte Freq0, Freq1, Freq2;   // fire frequencies
+    public byte Animate;               // 0 static, 1 loop, 2 fire-triggered
+    public sbyte XRev, YRev;           // cyclic accel reversal points
+    public ushort Dgr;                 // damaged graphic
+    public sbyte DLevel, DAni;         // damaged threshold / animation
+    public byte ELaunchFreq;
+
     public bool IsGround => (ExplosionType & 1) == 0;
 }
 
@@ -121,8 +130,8 @@ public sealed class EnemyData
             if (r.Pos + EnemySize > r.Length) return; // safety
             var e = new EnemyDat { EGraphic = new ushort[20], Loaded = true };
             e.Ani = r.U8();
-            r.Pos += 3;            // tur[3]
-            r.Pos += 3;            // freq[3]
+            e.Tur0 = r.U8(); e.Tur1 = r.U8(); e.Tur2 = r.U8();
+            e.Freq0 = r.U8(); e.Freq1 = r.U8(); e.Freq2 = r.U8();
             e.XMove = r.S8();
             e.YMove = r.S8();
             e.XAccel = r.S8();
@@ -137,12 +146,14 @@ public sealed class EnemyData
             e.Esize = r.U8();
             for (int g = 0; g < 20; g++) e.EGraphic[g] = r.U16();
             e.ExplosionType = r.U8();
-            r.Pos += 1;            // animate
+            e.Animate = r.U8();
             e.ShapeBank = r.U8();
-            r.Pos += 2;            // xrev,yrev
-            r.Pos += 2;            // dgr
-            r.Pos += 2;            // dlevel,dani
-            r.Pos += 1;            // elaunchfreq
+            e.XRev = r.S8();
+            e.YRev = r.S8();
+            e.Dgr = r.U16();
+            e.DLevel = r.S8();
+            e.DAni = r.S8();
+            e.ELaunchFreq = r.U8();
             e.ELaunchType = r.U16();
             e.Value = r.S16();
             e.EEnemyDie = r.U16();

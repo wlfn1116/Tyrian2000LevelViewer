@@ -44,6 +44,10 @@ internal static unsafe class Program
             return DumpEvents(args);
         if (Array.IndexOf(args, "--enemydat") >= 0)
             return DumpEnemyDat(args);
+        if (Array.IndexOf(args, "--simtest") >= 0)
+            return SimTest(args);
+        if (Array.IndexOf(args, "--simshot") >= 0)
+            return SimShot(args);
 
         PreloadBundledNativeLibraries();
         if (SdlNs.SDL.Init(SDL_INIT_VIDEO) != 0)
@@ -100,7 +104,10 @@ internal static unsafe class Program
         int si = Array.IndexOf(args, "--start");
         int cliEp = si >= 0 && si + 1 < args.Length ? int.Parse(args[si + 1]) : -1;
         int cliLevel = si >= 0 && si + 2 < args.Length ? int.Parse(args[si + 2]) : -1;
-        var app = new App(renderer, settings, cliEp, cliLevel, window);
+        int pi = Array.IndexOf(args, "--playback");
+        int cliPlaybackTick = pi >= 0
+            ? (pi + 1 < args.Length && int.TryParse(args[pi + 1], out int pt) ? pt : 1) : -1;
+        var app = new App(renderer, settings, cliEp, cliLevel, window, cliPlaybackTick);
 
         bool running = true;
         int frame = 0;
@@ -417,6 +424,121 @@ internal static unsafe class Program
                 if (big > 0 && (nullBottom > 0 || shortTop > 0))
                     Console.WriteLine($"  ep{ep.Number} #{item.FileNum} {item.Name.Trim(),-10} 2x2={big} nullBottom={nullBottom} shortTop={shortTop}");
             }
+        }
+        return 0;
+    }
+
+    /// <summary>
+    /// Headless playback-simulator check: runs every level (or one, with
+    /// "--simtest ep level"), reports duration/end/typical perf, and verifies that
+    /// scrubbing is deterministic (seek == linear replay, by playfield hash).
+    /// </summary>
+    static int SimTest(string[] args)
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
+        var gd = new T2LV.Tyrian.GameData(dir);
+
+        int si = Array.IndexOf(args, "--simtest");
+        int onlyEp = si + 1 < args.Length && int.TryParse(args[si + 1], out int e) ? e : -1;
+        int onlyLevel = si + 2 < args.Length && int.TryParse(args[si + 2], out int l) ? l : -1;
+
+        static ulong Hash(byte[] screen)
+        {
+            ulong h = 14695981039346656037UL;
+            for (int y = 0; y < T2LV.Tyrian.GameSim.ViewH; y++)
+            {
+                int row = y * T2LV.Tyrian.GameSim.Pitch + T2LV.Tyrian.GameSim.ViewX;
+                for (int x = 0; x < T2LV.Tyrian.GameSim.ViewW; x++)
+                    h = (h ^ screen[row + x]) * 1099511628211UL;
+            }
+            return h;
+        }
+
+        bool failed = false;
+        int count = 0;
+        foreach (var ep in gd.Episodes)
+        {
+            if (onlyEp > 0 && ep.Number != onlyEp) continue;
+            foreach (var item in ep.Levels)
+            {
+                if (onlyLevel > 0 && item.FileNum != onlyLevel) continue;
+                var level = gd.LoadLevel(ep, item.FileNum);
+                var shapes = gd.GetShapeTable(level.ShapeChar);
+                var sim = new T2LV.Tyrian.GameSim(gd, ep, level, shapes);
+                T2LV.Tyrian.SimPlayback pb;
+                try
+                {
+                    pb = new T2LV.Tyrian.SimPlayback(sim, 10 * 60 * 35);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"ep{ep.Number} #{item.FileNum:00} {item.Name,-10} FAILED: {ex.Message}");
+                    failed = true;
+                    continue;
+                }
+                count++;
+
+                // determinism: a frame reached by scrubbing must equal the same frame
+                // reached by linear stepping from the previous keyframe boundary
+                int mid = Math.Max(1, pb.Duration / 2);
+                pb.SeekTo(mid);
+                ulong h1 = Hash(sim.Screen);
+                pb.SeekTo(1);
+                pb.SeekTo(mid);
+                ulong h2 = Hash(sim.Screen);
+                pb.SeekTo(Math.Max(1, mid - 130));   // land before the keyframe, walk over it
+                pb.SeekTo(mid);
+                ulong h3 = Hash(sim.Screen);
+                bool ok = h1 == h2 && h2 == h3;
+                if (!ok) failed = true;
+
+                Console.WriteLine($"ep{ep.Number} #{item.FileNum:00} {item.Name,-10} " +
+                    $"{T2LV.Tyrian.SimPlayback.FormatTime(pb.Duration),7} " +
+                    $"({pb.Duration,5} ticks) {(pb.EndedNaturally ? "end " : "cap ")}" +
+                    $"build {pb.PrecomputeMs,4} ms  events {pb.Events.Count,4}  " +
+                    (ok ? "determinism OK" : $"DETERMINISM MISMATCH {h1:x} {h2:x} {h3:x}"));
+            }
+        }
+        Console.WriteLine($"{count} levels simulated; {(failed ? "FAILURES present" : "all OK")}");
+        return failed ? 1 : 0;
+    }
+
+    /// <summary>"--simshot ep level tick[,tick...] out_prefix": save playback frames as PNGs.</summary>
+    static int SimShot(string[] args)
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
+        int si = Array.IndexOf(args, "--simshot");
+        if (si + 4 >= args.Length)
+        { Console.Error.WriteLine("usage: --simshot ep level tick[,tick...] out_prefix"); return 1; }
+        int ep = int.Parse(args[si + 1]);
+        int lvl = int.Parse(args[si + 2]);
+        int[] ticks = args[si + 3].Split(',').Select(int.Parse).ToArray();
+        string prefix = args[si + 4];
+
+        var gd = new T2LV.Tyrian.GameData(dir);
+        var epi = gd.Episodes.First(e => e.Number == ep);
+        var level = gd.LoadLevel(epi, lvl);
+        var shapes = gd.GetShapeTable(level.ShapeChar);
+        var sim = new T2LV.Tyrian.GameSim(gd, epi, level, shapes);
+        var pb = new T2LV.Tyrian.SimPlayback(sim, 21000);
+        uint[] pal = gd.Palettes.Get(AppSettings.GamePalette);
+
+        const int W = T2LV.Tyrian.GameSim.ViewW, H = T2LV.Tyrian.GameSim.ViewH;
+        var rgba = new uint[W * H];
+        foreach (int t in ticks)
+        {
+            pb.SeekTo(t);
+            for (int y = 0; y < H; y++)
+            {
+                int src = y * T2LV.Tyrian.GameSim.Pitch + T2LV.Tyrian.GameSim.ViewX;
+                for (int x = 0; x < W; x++)
+                    rgba[y * W + x] = pal[sim.Screen[src + x]] | 0xFF000000u;
+            }
+            string path = $"{prefix}_ep{ep}_{lvl:00}_t{pb.CurrentTick}.png";
+            Util.Png.WriteRgba(path, W, H, rgba);
+            Console.WriteLine($"wrote {path} (duration {pb.Duration})");
         }
         return 0;
     }

@@ -49,6 +49,25 @@ public sealed unsafe class App
     private volatile bool _exportActive;
     private volatile string? _exportDone;
 
+    // --- Playback (in-game simulation) ---
+    private SimPlayback? _playback;
+    private bool _playbackMode;
+    private bool _playing;
+    private int _playDirection = 1;          // 1 forward, -1 rewind
+    private float _playSpeed = 1f;
+    private float _playAccum;
+    private float _simScrollMult = 1f;
+    private int _simDifficulty = 2;          // normal
+    private bool _simFire = true;
+    private int _simMaxMinutes = 10;
+    private float _playZoom;                 // 0 = fit to the panel automatically
+    private Vector2 _playPan;                // manual pan offset, screen px
+    private readonly GameViewImage _gameView = new();
+    private static readonly float[] SpeedSteps = { 0.25f, 0.5f, 1f, 2f, 4f, 8f };
+    private static readonly string[] DifficultyNames =
+        { "Wimp", "Easy", "Normal", "Hard", "Impossible", "Insanity",
+          "Suicide", "Maniacal", "Zinglon", "Nortaneous", "Nortaneous 2" };
+
     private readonly SdlNs.SDLWindowPtr _window;
     private bool _scrollLevelListToSelection;      // keep the selection visible after keyboard/startup selects
     private bool _minimapDragging;
@@ -63,11 +82,12 @@ public sealed unsafe class App
     private bool _restoreView;
 
     public App(SdlNs.SDLRendererPtr renderer, AppSettings settings, int cliEp = -1, int cliLevelIdx = -1,
-        SdlNs.SDLWindowPtr window = default)
+        SdlNs.SDLWindowPtr window = default, int cliPlaybackTick = -1)
     {
         _renderer = renderer;
         _settings = settings;
         _window = window;
+        if (cliPlaybackTick >= 0) _playbackMode = true;
 
         _palette = Math.Max(0, settings.Palette);
         _objMode = Math.Clamp(settings.ObjMode, 0, 2);
@@ -90,6 +110,8 @@ public sealed unsafe class App
             ? settings.DataDir : GameData.FindDataDir();
         if (dir != null) LoadData(dir);
         else { _status = "Select your Tyrian 2000 folder with Browse..."; _showDirInput = true; }
+
+        if (cliPlaybackTick > 0) _playback?.SeekTo(cliPlaybackTick);
     }
 
     private void LoadData(string dir)
@@ -183,6 +205,10 @@ public sealed unsafe class App
             _objects = ObjectPlacer.Place(_gd, ep, _level, _enemyData, null, _layerScroll);
             if (_gameLayerOrder)
                 _layers = LayerStack.GameOrder(_layers, _level.ComputeStartFlags());
+            _playback = null;
+            _playing = false;
+            _playPan = Vector2.Zero;   // keep the zoom level, recenter the view
+            if (_playbackMode) BuildPlayback();
             _composeDirty = true;
             _viewInitialized = false;
             string name = ep.Levels[levelListIdx].Name.Trim();
@@ -208,8 +234,9 @@ public sealed unsafe class App
 
     /// <summary>
     /// Viewer-wide shortcuts: Up/Down switch levels, PageUp/PageDown pan the canvas a
-    /// screenful, Home/End jump to the level top/bottom. Inactive while typing a path
-    /// or while a combo popup is open.
+    /// screenful, Home/End jump to the level top/bottom. In playback mode Space
+    /// plays/pauses and Left/Right step ticks (Shift = 1 second). Inactive while
+    /// typing a path or while a combo popup is open.
     /// </summary>
     private void HandleKeys()
     {
@@ -221,11 +248,84 @@ public sealed unsafe class App
         if (ImGui.IsKeyPressed(ImGuiKey.DownArrow, true)) SelectLevelStep(1);
         if (ImGui.IsKeyPressed(ImGuiKey.UpArrow, true)) SelectLevelStep(-1);
 
+        if (_playbackMode && _playback != null)
+        {
+            if (ImGui.IsKeyPressed(ImGuiKey.Space))
+            {
+                _playing = !_playing;
+                _playDirection = 1;
+                _playAccum = 0;
+            }
+            int step = io.KeyShift ? (int)GameSim.TicksPerSecond : 1;
+            if (ImGui.IsKeyPressed(ImGuiKey.RightArrow, true))
+            { _playing = false; _playback.SeekTo(_playback.CurrentTick + step); }
+            if (ImGui.IsKeyPressed(ImGuiKey.LeftArrow, true))
+            { _playing = false; _playback.SeekTo(_playback.CurrentTick - step); }
+            if (ImGui.IsKeyPressed(ImGuiKey.Home)) _playback.SeekTo(1);
+            if (ImGui.IsKeyPressed(ImGuiKey.End)) _playback.SeekTo(_playback.Duration);
+            return;
+        }
+
         float page = Math.Max(64f, _canvasAvail.Y * 0.85f);
         if (ImGui.IsKeyPressed(ImGuiKey.PageUp, true)) _scroll.Y += page;
         if (ImGui.IsKeyPressed(ImGuiKey.PageDown, true)) _scroll.Y -= page;
         if (ImGui.IsKeyPressed(ImGuiKey.Home)) _scroll.Y = 0;
         if (ImGui.IsKeyPressed(ImGuiKey.End)) _scroll.Y = _canvasAvail.Y - CanvasHeight() * _zoom;
+    }
+
+    /// <summary>Build (or rebuild) the level simulation, keeping the timeline position.</summary>
+    private void BuildPlayback()
+    {
+        if (_gd == null || _level == null || _shapes == null || CurEpisode == null) return;
+        int keepTick = _playback?.CurrentTick ?? 1;
+        try
+        {
+            var sim = new GameSim(_gd, CurEpisode, _level, _shapes)
+            {
+                Difficulty = _simDifficulty,
+                ScrollMult = _simScrollMult,
+                FireEnabled = _simFire,
+            };
+            _playback = new SimPlayback(sim, Math.Max(1, _simMaxMinutes) * 60 * 35);
+            _playback.SeekTo(Math.Clamp(keepTick, 1, _playback.Duration));
+            _status = $"Playback ready: {SimPlayback.FormatTime(_playback.Duration)} " +
+                (_playback.EndedNaturally ? "(level end)" : "(capped)") +
+                $", built in {_playback.PrecomputeMs} ms";
+        }
+        catch (Exception ex)
+        {
+            _playback = null;
+            _playbackMode = false;
+            _status = "Playback build failed: " + ex.Message;
+        }
+    }
+
+    /// <summary>Advance/rewind the simulation with wall-clock pacing, then upload the frame.</summary>
+    private void UpdatePlayback()
+    {
+        if (_playback == null) return;
+        if (_playing)
+        {
+            _playAccum += ImGui.GetIO().DeltaTime * (float)GameSim.TicksPerSecond * _playSpeed;
+            int n = (int)_playAccum;
+            if (n > 0)
+            {
+                _playAccum -= n;
+                n = Math.Min(n, (int)GameSim.TicksPerSecond * 8);   // avoid catch-up spirals
+                if (_playDirection > 0)
+                {
+                    _playback.Advance(n);
+                    if (_playback.AtEnd) _playing = false;
+                }
+                else
+                {
+                    _playback.SeekTo(_playback.CurrentTick - n);
+                    if (_playback.CurrentTick <= 1) _playing = false;
+                }
+            }
+        }
+        var pal = _gd!.Palettes.Get(_palette);
+        _gameView.Update(_renderer, _playback.Sim.Screen, pal);
     }
 
     public void Render()
@@ -260,6 +360,9 @@ public sealed unsafe class App
             _composeDirty = false;
         }
         _img.Upload(_renderer);
+
+        if (_playbackMode && _playback != null)
+            UpdatePlayback();
 
         var vp = ImGui.GetMainViewport();
         ImGui.SetNextWindowPos(vp.WorkPos);
@@ -352,6 +455,50 @@ public sealed unsafe class App
         ImGui.SeparatorText("Objects (enemies / items)");
         int mode = _objMode;
         if (ImGui.Combo("display", &mode, new[] { "Sprites", "Markers", "Off" }, 3)) { _objMode = mode; _composeDirty = true; }
+
+        // --- Playback (in-game simulation) ---
+        ImGui.SeparatorText("Playback");
+        bool pb = _playbackMode;
+        if (ImGui.Checkbox("Playback mode", &pb))
+        {
+            _playbackMode = pb;
+            _playing = false;
+            if (pb && _playback == null) BuildPlayback();
+        }
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Simulate the level exactly like in-game: enemies move, fire and\nlaunch, all level events run, camera locked to the player's view.\nSpace = play/pause, Left/Right = step (Shift = 1 s).");
+        if (_playbackMode && _playback != null)
+        {
+            int dif = _simDifficulty;
+            ImGui.PushItemWidth(140);
+            if (ImGui.Combo("difficulty", &dif, DifficultyNames, DifficultyNames.Length))
+            { _simDifficulty = dif; BuildPlayback(); }
+
+            float mult = _simScrollMult;
+            if (ImGui.SliderFloat("scroll speed", &mult, 0.25f, 3f, "x%.2f"))
+                _simScrollMult = mult;
+            if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("What-if terrain scroll multiplier. The level's own variable\nscroll-rate events still apply on top; the event clock follows\nthe terrain, so spawn pacing changes with it.");
+
+            bool fire = _simFire;
+            if (ImGui.Checkbox("enemy fire", &fire)) { _simFire = fire; BuildPlayback(); }
+            ImGui.SameLine();
+            int cap = _simMaxMinutes;
+            ImGui.PushItemWidth(90);
+            if (ImGui.SliderInt("cap (min)", &cap, 1, 30))
+                _simMaxMinutes = cap;
+            if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
+            ImGui.PopItemWidth();
+            ImGui.PopItemWidth();
+
+            var sim = _playback.Sim;
+            ImGui.TextDisabled($"tick {_playback.CurrentTick}/{_playback.Duration}  loc {sim.CurLoc}  " +
+                $"enemies {sim.EnemyOnScreen}");
+            var (b1, b2, b3) = sim.BackMoves;
+            ImGui.TextDisabled($"scroll {b1}/{b2}/{b3}  " +
+                (_playback.EndedNaturally ? "ends naturally" : "capped (no natural end)"));
+        }
 
         // --- Palette ---
         ImGui.SeparatorText("Palette");
@@ -608,6 +755,12 @@ public sealed unsafe class App
 
     private void DrawCanvas()
     {
+        if (_playbackMode && _playback != null)
+        {
+            DrawPlaybackCanvas();
+            return;
+        }
+
         var canvasPos = ImGui.GetCursorScreenPos();
         var avail = ImGui.GetContentRegionAvail();
         if (avail.X < 16 || avail.Y < 16) return;
@@ -678,6 +831,200 @@ public sealed unsafe class App
         dl.AddText(new Vector2(clipMin.X + 8, clipMax.Y - 20), Gfx.Rgba(180, 180, 190),
             $"zoom {(_zoom * 100):0}%   |  wheel = zoom · shift+wheel = scroll · drag = pan · Up/Down = level · PgUp/PgDn/Home/End");
         dl.PopClipRect();
+    }
+
+    // =====================================================================
+    //  Playback canvas: locked in-game view + transport + timeline.
+    // =====================================================================
+    private void DrawPlaybackCanvas()
+    {
+        var pb = _playback!;
+        var avail = ImGui.GetContentRegionAvail();
+        if (avail.X < 60 || avail.Y < 100) return;
+        _canvasAvail = avail;
+
+        float controlsH = ImGui.GetFrameHeightWithSpacing() + 34f;
+        var viewSize = new Vector2(avail.X, Math.Max(60, avail.Y - controlsH));
+        var pos = ImGui.GetCursorScreenPos();
+        var dl = ImGui.GetWindowDrawList();
+
+        // --- the locked game view (wheel = zoom, drag = pan, double-click = fit) ---
+        float fit = MathF.Min(viewSize.X / GameViewImage.W, viewSize.Y / GameViewImage.H);
+        if (fit >= 1f) fit = MathF.Floor(fit);   // pixel-perfect integer fit
+        float scale = _playZoom > 0 ? _playZoom : fit;
+
+        ImGui.InvisibleButton("playview", viewSize,
+            ImGuiButtonFlags.MouseButtonLeft | ImGuiButtonFlags.MouseButtonMiddle);
+        bool viewHovered = ImGui.IsItemHovered();
+        bool viewActive = ImGui.IsItemActive();
+        var io = ImGui.GetIO();
+        var mouse = ImGui.GetMousePos();
+
+        Vector2 CenterOff(float s) => new(
+            MathF.Floor((viewSize.X - GameViewImage.W * s) * 0.5f),
+            MathF.Floor((viewSize.Y - GameViewImage.H * s) * 0.5f));
+        var imgPos = pos + CenterOff(scale) + _playPan;
+
+        if (viewHovered && io.MouseWheel != 0)
+        {
+            float newScale = Math.Clamp(scale * MathF.Pow(1.15f, io.MouseWheel), 0.25f, 16f);
+            if (MathF.Abs(newScale - MathF.Round(newScale)) < 0.08f)
+                newScale = MathF.Round(newScale);   // settle on crisp integer steps
+            if (newScale != scale)
+            {
+                Vector2 rel = (mouse - imgPos) / scale;   // keep the pixel under the cursor
+                _playPan = mouse - pos - CenterOff(newScale) - rel * newScale;
+                _playZoom = newScale;
+                scale = newScale;
+            }
+        }
+        if (viewActive &&
+            (ImGui.IsMouseDragging(ImGuiMouseButton.Left) || ImGui.IsMouseDragging(ImGuiMouseButton.Middle)))
+            _playPan += io.MouseDelta;
+        if (viewHovered && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+        { _playZoom = 0; _playPan = Vector2.Zero; scale = fit; }
+
+        // keep at least a sliver of the frame inside the panel
+        var imgSize = new Vector2(GameViewImage.W, GameViewImage.H) * scale;
+        var cOff = CenterOff(scale);
+        const float keep = 40f;
+        _playPan.X = Math.Clamp(_playPan.X, keep - imgSize.X - cOff.X, viewSize.X - keep - cOff.X);
+        _playPan.Y = Math.Clamp(_playPan.Y, keep - imgSize.Y - cOff.Y, viewSize.Y - keep - cOff.Y);
+        imgPos = pos + cOff + _playPan;
+
+        dl.AddRectFilled(pos, pos + viewSize, Gfx.Rgba(10, 10, 12));
+        dl.PushClipRect(pos, pos + viewSize, true);
+        _gameView.Draw(dl, imgPos, scale);
+        dl.AddRect(imgPos - new Vector2(1, 1), imgPos + imgSize + new Vector2(1, 1),
+            Gfx.Rgba(80, 80, 95));
+        string osd = $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.Duration)}" +
+            (_playing ? _playDirection > 0 ? $"   >> x{_playSpeed:0.##}" : $"   << x{_playSpeed:0.##}" : "   paused") +
+            $"   zoom {scale * 100:0}%";
+        dl.AddText(pos + new Vector2(8, 6), Gfx.Rgba(235, 235, 245), osd);
+        dl.PopClipRect();
+
+        // --- transport row ---
+        bool SmallBtn(string label, string tip)
+        {
+            bool hit = ImGui.Button(label);
+            if (ImGui.IsItemHovered()) ImGui.SetTooltip(tip);
+            ImGui.SameLine(0, 4);
+            return hit;
+        }
+
+        if (SmallBtn("|<", "Jump to start")) { pb.SeekTo(1); _playing = false; }
+        if (SmallBtn("-1", "Step one tick back (Left)")) { pb.SeekTo(pb.CurrentTick - 1); _playing = false; }
+        bool rewinding = _playing && _playDirection < 0;
+        if (SmallBtn(rewinding ? "||##rew" : "<<", rewinding ? "Pause" : "Play backwards"))
+        {
+            if (rewinding) _playing = false;
+            else { _playing = true; _playDirection = -1; _playAccum = 0; }
+        }
+        bool fwd = _playing && _playDirection > 0;
+        if (SmallBtn(fwd ? "||" : ">", fwd ? "Pause (Space)" : "Play (Space)"))
+        {
+            if (fwd) _playing = false;
+            else
+            {
+                if (pb.AtEnd) pb.SeekTo(1);
+                _playing = true; _playDirection = 1; _playAccum = 0;
+            }
+        }
+        if (SmallBtn(">>", "Fast-forward (cycles 2x/4x/8x; click > for normal speed)"))
+        {
+            _playing = true; _playDirection = 1; _playAccum = 0;
+            _playSpeed = _playSpeed switch { < 2f => 2f, < 4f => 4f, < 8f => 8f, _ => 1f };
+        }
+        if (SmallBtn("+1", "Step one tick forward (Right)")) { pb.SeekTo(pb.CurrentTick + 1); _playing = false; }
+        if (SmallBtn(">|", "Jump to end")) { pb.SeekTo(pb.Duration); _playing = false; }
+        if (SmallBtn("Fit", "Reset zoom and pan (or double-click the view)\nwheel = zoom, drag = pan"))
+        { _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
+
+        ImGui.PushItemWidth(64);
+        int speedIdx = Array.IndexOf(SpeedSteps, _playSpeed);
+        if (speedIdx < 0) speedIdx = 2;
+        var speedNames = SpeedSteps.Select(s => $"x{s:0.##}").ToArray();
+        if (ImGui.Combo("##speed", &speedIdx, speedNames, speedNames.Length))
+            _playSpeed = SpeedSteps[speedIdx];
+        ImGui.PopItemWidth();
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Playback speed (game runs at 35 ticks/s)");
+        ImGui.SameLine(0, 10);
+        ImGui.TextDisabled($"tick {pb.CurrentTick}/{pb.Duration}" +
+            (pb.EndedNaturally ? "" : "  [capped]"));
+
+        DrawTimeline(pb);
+    }
+
+    /// <summary>The scrubbable duration bar: enemy-density strip, event markers, playhead.</summary>
+    private void DrawTimeline(SimPlayback pb)
+    {
+        var dl = ImGui.GetWindowDrawList();
+        var pos = ImGui.GetCursorScreenPos();
+        float w = ImGui.GetContentRegionAvail().X;
+        const float h = 26f;
+        if (w < 40) return;
+
+        ImGui.InvisibleButton("timeline", new Vector2(w, h));
+        bool hovered = ImGui.IsItemHovered();
+        bool active = ImGui.IsItemActive();
+        var mouse = ImGui.GetMousePos();
+        float mouseFrac = Math.Clamp((mouse.X - pos.X) / w, 0f, 1f);
+
+        if (active)
+            pb.SeekTo(1 + (int)MathF.Round(mouseFrac * (pb.Duration - 1)));
+
+        dl.AddRectFilled(pos, pos + new Vector2(w, h), Gfx.Rgba(28, 28, 34));
+
+        // enemy-density strip (bottom-anchored bars)
+        if (pb.Density.Length > 1)
+        {
+            int cols = (int)w;
+            for (int x = 0; x < cols; x++)
+            {
+                int t0 = (int)((long)x * pb.Density.Length / cols);
+                int t1 = Math.Max(t0 + 1, (int)((long)(x + 1) * pb.Density.Length / cols));
+                int peak = 0;
+                for (int t = t0; t < t1 && t < pb.Density.Length; t++)
+                    if (pb.Density[t] > peak) peak = pb.Density[t];
+                if (peak == 0) continue;
+                float bh = Math.Min(1f, peak / 24f) * (h - 8);
+                dl.AddLine(new Vector2(pos.X + x, pos.Y + h - 1 - bh),
+                    new Vector2(pos.X + x, pos.Y + h - 1), Gfx.Rgba(120, 60, 60, 200));
+            }
+        }
+
+        // progress fill
+        float frac = pb.Duration <= 1 ? 0f : (pb.CurrentTick - 1) / (float)(pb.Duration - 1);
+        dl.AddRectFilled(pos, new Vector2(pos.X + w * frac, pos.Y + h), Gfx.Rgba(90, 130, 200, 60));
+
+        // event markers (top half ticks, one class per colour)
+        foreach (var (tick, type) in pb.Events)
+        {
+            uint col;
+            switch (type)
+            {
+                case 2 or 3 or 30: col = Gfx.Rgba(80, 210, 230); break;      // scroll speed
+                case 4 or 83: col = Gfx.Rgba(255, 90, 90); break;            // map stop
+                case 38 or 54 or 70 or 71 or 75 or 76: col = Gfx.Rgba(255, 170, 60); break; // flow
+                case 11 or 36: col = Gfx.Rgba(240, 240, 240); break;         // level end
+                case 79: col = Gfx.Rgba(230, 90, 220); break;                // boss bar
+                default: continue;
+            }
+            float ex = pos.X + (pb.Duration <= 1 ? 0 : (tick - 1) / (float)(pb.Duration - 1)) * w;
+            dl.AddLine(new Vector2(ex, pos.Y + 1), new Vector2(ex, pos.Y + 9), col);
+        }
+
+        // playhead
+        float px = pos.X + w * frac;
+        dl.AddLine(new Vector2(px, pos.Y), new Vector2(px, pos.Y + h), Gfx.Rgba(255, 235, 130), 2f);
+        dl.AddRect(pos, pos + new Vector2(w, h), Gfx.Rgba(90, 90, 105));
+
+        if (hovered || active)
+        {
+            int t = 1 + (int)MathF.Round(mouseFrac * (pb.Duration - 1));
+            ImGui.SetTooltip($"{SimPlayback.FormatTime(t)}  (tick {t})\n" +
+                "cyan = scroll speed  red = map stop  orange = jump/flow\nwhite = level end  magenta = boss bar");
+        }
     }
 
     /// <summary>Keep at least a sliver of the level inside the viewport so it can't be lost.</summary>
@@ -833,5 +1180,9 @@ public sealed unsafe class App
         _scroll.Y = avail.Y - CanvasHeight() * _zoom;
     }
 
-    public void Dispose() => _img.Dispose();
+    public void Dispose()
+    {
+        _img.Dispose();
+        _gameView.Dispose();
+    }
 }

@@ -29,6 +29,7 @@ public sealed class GameData
     private readonly Dictionary<char, ShapeTable> _shapeCache = new();
     private readonly Dictionary<char, CompShapes?> _newshCache = new();
     private readonly Dictionary<int, EnemyData> _enemyCache = new();
+    private readonly Dictionary<int, WeaponData> _weaponCache = new();
     private MainShapes? _main;
 
     // shapeFile[] from lvlmast.c: enemy shape-bank (1-based) -> newsh file char.
@@ -95,12 +96,26 @@ public sealed class GameData
     public CompShapes? GetNewsh(int bank)
     {
         if (bank < 1 || bank > ShapeFile.Length) return null;
-        char c = char.ToLowerInvariant(ShapeFile[bank - 1]);
+        return GetNewshChar(ShapeFile[bank - 1]);
+    }
+
+    /// <summary>newsh file by its literal file character (the engine's JE_loadCompShapes).</summary>
+    public CompShapes? GetNewshChar(char fileChar)
+    {
+        char c = char.ToLowerInvariant(fileChar);
         if (_newshCache.TryGetValue(c, out var cs)) return cs;
         string path = Path.Combine(DataDir, $"newsh{c}.shp");
         cs = File.Exists(path) ? CompShapes.LoadFile(path) : null;
         _newshCache[c] = cs;
         return cs;
+    }
+
+    public WeaponData GetWeapons(EpisodeInfo ep)
+    {
+        if (_weaponCache.TryGetValue(ep.Number, out var wd)) return wd;
+        wd = WeaponData.Load(DataDir, ep);
+        _weaponCache[ep.Number] = wd;
+        return wd;
     }
 
     /// <summary>Resolve a shape bank to a sprite sheet given the 4 currently active event-5 banks.</summary>
