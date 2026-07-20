@@ -2,10 +2,14 @@ namespace T2LV.Tyrian;
 
 public struct WeaponDat
 {
+    public ushort Drain;        // generator power per shot
+    public byte ShotRepeat;     // ticks between shots
     public byte Multi;
     public ushort WeapAni;
     public byte Max;
     public byte Tx, Ty, Aim;
+    public byte CircleSize;     // 0 = straight, else a circular/complex path
+    public byte Trail;          // trail type, 255 = none
     public byte[] Attack;    // [8]
     public byte[] Del;       // [8]
     public sbyte[] Sx, Sy;   // [8]
@@ -55,8 +59,8 @@ public sealed class WeaponData
                 Bx = new sbyte[8], By = new sbyte[8],
                 Sg = new ushort[8], Loaded = true,
             };
-            r.Pos += 2;                    // drain
-            r.Pos += 1;                    // shotrepeat
+            w.Drain = r.U16();
+            w.ShotRepeat = r.U8();
             w.Multi = r.U8();
             w.WeapAni = r.U16();
             w.Max = r.U8();
@@ -72,9 +76,9 @@ public sealed class WeaponData
             for (int k = 0; k < 8; k++) w.Sg[k] = r.U16();
             w.Acceleration = r.S8();
             w.AccelerationX = r.S8();
-            r.Pos += 1;                    // circlesize
+            w.CircleSize = r.U8();
             w.Sound = r.U8();
-            r.Pos += 1;                    // trail
+            w.Trail = r.U8();
             w.ShipBlastFilter = r.U8();
             wd.Weapons[i] = w;
         }

@@ -31,6 +31,8 @@ public sealed unsafe partial class App
     private static readonly uint CubeNoneCol = Gfx.Rgba(130, 134, 146);
     private static readonly uint CubeHeadCol = Gfx.Rgba(240, 242, 248);   // the level headings
 
+    private const float CubeHeadMinW = 220f;   // narrower than this, the heading moves below the portrait
+
     /// <summary>Open the reader on a particular cube; also the "--showcubes N" entry point,
     /// which is how a specific outpost's shelf gets framed for a screenshot.</summary>
     public void ShowCube(int episodeIdx, int cubeIndex) => OpenCubes(episodeIdx, cubeIndex);
@@ -297,6 +299,7 @@ public sealed unsafe partial class App
         if (cube == null) { ImGui.TextDisabled("Pick a datacube to read it."); return; }
 
         // --- Portrait, in the palette the outpost swaps in behind it. ---
+        float avail = ImGui.GetContentRegionAvail().X;
         var face = _gd.Main.Faces?.Get(cube.FaceSprite);
         if (face != null && face.W > 0)
         {
@@ -314,11 +317,14 @@ public sealed unsafe partial class App
             _cubeFace.Draw(dl, at, scale);
             dl.AddRect(at, at + new Vector2(face.W * scale, face.H * scale), Gfx.Rgba(90, 100, 130, 190), 3f);
             ImGui.Dummy(new Vector2(face.W * scale, face.H * scale));
-            ImGui.SameLine(0, 14f);
+            // Beside the portrait while a readable column is left over; below it once the
+            // window is narrow enough that the heading would wrap into a sliver instead.
+            if (avail - face.W * scale - 14f >= CubeHeadMinW) ImGui.SameLine(0, 14f);
         }
 
         ImGui.BeginGroup();
         DrawCubeSpans(SpansOf(cube.Title));
+        ImGui.PushTextWrapPos(0f);
         ImGui.TextDisabled($"{cube.Header}    ·    episode {ep.Number}, cube {cube.Index}");
 
         var sites = CubeSites(ep, cube.Index);
@@ -333,6 +339,7 @@ public sealed unsafe partial class App
         }
         if (sites.Count == 0)
             ImGui.TextDisabled("Written for this episode, but no outpost's ']?' list names it.");
+        ImGui.PopTextWrapPos();
         ImGui.EndGroup();
 
         ImGui.Dummy(new Vector2(0, 4));
@@ -346,15 +353,66 @@ public sealed unsafe partial class App
         ImGui.EndChild();
     }
 
-    /// <summary>Lay one line out span by span so the '~' emphasis keeps its own colour.</summary>
+    /// <summary>
+    /// Lay one line out span by span so the '~' emphasis keeps its own colour, breaking
+    /// between words once the reader is narrower than the line. ImGui's own wrapping is no
+    /// use here: a line is several separate text items, and each would wrap on its own
+    /// without knowing what already sits before it on the row.
+    /// </summary>
     private static void DrawCubeSpans(List<CubeSpan> spans)
     {
-        for (int i = 0; i < spans.Count; i++)
+        if (spans.Count == 0) { ImGui.NewLine(); return; }
+
+        // Measured from where the line starts, which inside a group is the group's left
+        // edge — so wrapped rows line up under the first one rather than under the window.
+        float wrap = Math.Max(ImGui.GetContentRegionAvail().X, 1f);
+        float x = 0f;            // width of what is already on this row
+        bool join = false;       // the next item continues that row rather than starting one
+        bool rowWord = false;    // the row holds a word, so breaking before the next one helps
+
+        // A run is emitted as one text item, exactly as a whole span used to be: ImGui
+        // rounds each item's width up to a pixel, so per-word items would drift right.
+        void Flush(Vector4 col, string s)
         {
-            if (i > 0) ImGui.SameLine(0, 0);
-            ImGui.TextColored(ColorOf(spans[i].Highlight ? CubeMarkCol : CubeTextCol), spans[i].Text);
+            if (s.Length == 0) return;
+            float w = ImGui.CalcTextSize(s).X;
+            if (join) ImGui.SameLine(0, 0);
+            // A word wider than the whole row has nowhere to break: hand that one to
+            // ImGui, which splits it mid-word rather than letting it run off the edge.
+            bool hard = !join && w > wrap;
+            if (hard) ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + wrap);
+            ImGui.TextColored(col, s);
+            if (hard) ImGui.PopTextWrapPos();
+            x = hard ? 0f : x + w;
+            join = !hard;
         }
-        if (spans.Count == 0) ImGui.NewLine();
+
+        foreach (var span in spans)
+        {
+            var col = ColorOf(span.Highlight ? CubeMarkCol : CubeTextCol);
+            string t = span.Text;
+            int run = 0;         // start of the part of this span not yet emitted
+            int i = 0;
+            while (i < t.Length)
+            {
+                int gap = i;
+                while (gap < t.Length && t[gap] == ' ') gap++;
+                int end = gap;
+                while (end < t.Length && t[end] != ' ') end++;
+
+                if (rowWord && x + ImGui.CalcTextSize(t[run..end]).X > wrap)
+                {
+                    Flush(col, t[run..i]);     // everything that still fitted
+                    run = gap;                 // the break is spent on the leading spaces
+                    x = 0f;
+                    join = false;
+                    rowWord = false;
+                }
+                if (end > gap) rowWord = true;
+                i = end;
+            }
+            Flush(col, t[run..]);
+        }
     }
 
     private static List<CubeSpan> SpansOf(string s)

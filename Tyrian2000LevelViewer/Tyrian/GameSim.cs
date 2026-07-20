@@ -246,6 +246,19 @@ public sealed class GameSim
         into.Sort((a, b) => BandDrawRank(a.Band).CompareTo(BandDrawRank(b.Band)));
     }
 
+    /// <summary>
+    /// Which slots hold a live enemy right now, drawn this frame or not. Unlike
+    /// <see cref="CollectEnemies"/> this says nothing about what is visible — it is the raw
+    /// occupancy, which is what a viewer needs to follow one particular spawn across the
+    /// frames after it, before any of it has reached the playfield.
+    /// </summary>
+    public void CollectLiveSlots(HashSet<int> into)
+    {
+        into.Clear();
+        for (int i = 0; i < _avail.Length; i++)
+            if (_avail[i] == 0) into.Add(i);
+    }
+
     private readonly List<EnemyView> _pickScratch = new();
 
     /// <summary>
@@ -271,6 +284,11 @@ public sealed class GameSim
     /// <summary>Damage that outlives any armour value the data can hold (the engine's cap is
     /// 255), so one hit always reaches the kill branch.</summary>
     public const int InstantKillDamage = 30000;
+
+    /// <summary>Ticks a sky slot may stay frozen above the top edge before playback reclaims
+    /// it — tyrian2.c's MAP_STOP_STALL_LIMIT (~6 s), the same dwell its map-stop watchdog
+    /// waits before culling an unreachable parked enemy.</summary>
+    private const int ParkedAboveLimit = 210;
 
     /// <summary>Palette band the damage flash paints with. Tyrian uses the firing weapon's
     /// `shipblastfilter`; with no player weapon here, the front-weapon slot (1, the
@@ -531,6 +549,7 @@ public sealed class GameSim
         public int explonum, mapoffset, flagnum, iced;
         public byte objCat;           // ObjCategory, for the viewer's per-category toggles
         public int xminbounce, xmaxbounce, yminbounce, ymaxbounce;
+        public int parkedTicks;       // consecutive ticks frozen above the top edge (sky bank)
     }
 
     internal struct Shot
@@ -814,9 +833,15 @@ public sealed class GameSim
         _ => null,
     };
 
+    /// <summary>The shape bank a sheet slot is holding. The two negative slots are the banks
+    /// MakeEnemy intercepts before the four event-5 slots — reporting them as bank 0 would
+    /// send anything that reads this back to a sheet the sprite is not in.</summary>
     private int SheetIdAt(int slot) => slot switch
     {
-        0 => _s.sheetId0, 1 => _s.sheetId1, 2 => _s.sheetId2, 3 => _s.sheetId3, _ => 0,
+        0 => _s.sheetId0, 1 => _s.sheetId1, 2 => _s.sheetId2, 3 => _s.sheetId3,
+        -2 => 21,   // coins / gems
+        -3 => 26,   // powerups
+        _ => 0,
     };
 
     /// <summary>Neutral-frame parallax offsets (mainint.c:4693, phantom player). In
@@ -1619,6 +1644,7 @@ public sealed class GameSim
         // e.mapoffset (hover/on-screen), the draw/cull gates, aim, and shot creation (sh.sx), so
         // objects ride the same shifted playfield as the background. notes.md §Widescreen.
         if (Widescreen) tempMapXOfs += PlayfieldXShift;
+        bool skyBank = enemyOffset == 25;   // slots 0..24, the batch with no tempBackMove channel
         int px = PlayerX - 25;   // player[0].x -= 25 wrapper
         for (int i = enemyOffset - 25; i < enemyOffset; i++)
         {
@@ -1705,6 +1731,25 @@ public sealed class GameSim
             if (e.ex < -80 || e.ex > (Widescreen ? WsEnemyCullR : 340)) { _avail[i] = 1; continue; }
             e.ey += e.eyc;
             if (e.ey < -112 || e.ey > 190) { _avail[i] = 1; continue; }
+
+            // The sky bank is the one batch drawn with tempBackMove == 0 (tyrian2.c 2757/3324),
+            // so a sky enemy with no vertical motion of its own is frozen where it spawned. One
+            // frozen above the top edge is never drawn and never leaves the [-112, 190]
+            // keep-alive band, so it holds its slot — and its share of enemyOnScreen — for the
+            // rest of the level. The game does clear those: the ones in reach die to the
+            // player's ascending fire, and the map-stop watchdog culls the rest
+            // (enemy_stuck_above_screen, notes.md §Map-stop softlock watchdog). Playback has
+            // neither, and 25 sky slots is exactly what GYGES's boss needs — its eight parked
+            // links (map 269, every one eyc 0 / fixedmovey 0) cost the boss seven of its 24
+            // tiles, and one parked slot alone stalls SURFACE and MACES on a sky-bank map stop.
+            // Cull on the watchdog's own 210-tick dwell, so an enemy a later event starts
+            // moving is never taken.
+            if (skyBank && e.ey <= (e.size == 1 ? -26 : -13) &&
+                e.eyc <= 0 && e.eycc == 0 && e.fixedmovey <= 0 && e.yaccel == 0)
+            {
+                if (++e.parkedTicks >= ParkedAboveLimit) { _avail[i] = 1; continue; }
+            }
+            else e.parkedTicks = 0;
 
             if (e.ex <= e.xminbounce || e.ex >= e.xmaxbounce) e.exc = S8(-e.exc);
             if (e.ey <= e.yminbounce || e.ey >= e.ymaxbounce) e.eyc = S8(-e.eyc);
@@ -2276,6 +2321,7 @@ public sealed class GameSim
         }
 
         e.mapoffset = 0;
+        e.parkedTicks = 0;
         e.eshotmultipos[0] = e.eshotmultipos[1] = e.eshotmultipos[2] = 0;
         e.enemyground = (dat.ExplosionType & 1) == 0;
         e.explonum = dat.ExplosionType >> 1;

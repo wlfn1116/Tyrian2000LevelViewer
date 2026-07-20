@@ -50,6 +50,8 @@ internal static unsafe class Program
             return SimShot(args);
         if (Array.IndexOf(args, "--tree") >= 0)
             return DumpTree(args);
+        if (Array.IndexOf(args, "--assemblies") >= 0)
+            return DumpAssemblies(args);
 
         PreloadBundledNativeLibraries();
         if (SdlNs.SDL.Init(SDL_INIT_VIDEO) != 0)
@@ -126,6 +128,13 @@ internal static unsafe class Program
         if (Array.IndexOf(args, "--showtree") >= 0) settings.ShowTree = true;
         if (Array.IndexOf(args, "--showcubes") >= 0) settings.ShowCubes = true;
         if (Array.IndexOf(args, "--cubesbylevel") >= 0) { settings.ShowCubes = true; settings.CubesByLevel = true; }
+        if (Array.IndexOf(args, "--showsprites") >= 0) settings.ShowSprites = true;
+        if (Array.IndexOf(args, "--gapless") >= 0) settings.SpritesGapless = true;
+        if (Array.IndexOf(args, "--showenemies") >= 0) settings.ShowEnemies = true;
+        if (Array.IndexOf(args, "--showassemblies") >= 0) { settings.ShowEnemies = true; settings.EnemyBrowseMode = 1; }
+        if (Array.IndexOf(args, "--asm-all") >= 0) settings.AssembliesUnique = false;   // one row per spawn
+        if (Array.IndexOf(args, "--showitems") >= 0) settings.ShowItems = true;
+        if (Array.IndexOf(args, "--showanalysis") >= 0) settings.ShowAnalysis = true;
         if (Array.IndexOf(args, "--allepisodes") >= 0) settings.AllEpisodes = true;
         int pli = Array.IndexOf(args, "--player");
         int cliPlayerX = pli >= 0 && pli + 1 < args.Length && int.TryParse(args[pli + 1], out int pxv) ? pxv : -1;
@@ -140,6 +149,46 @@ internal static unsafe class Program
             if (ci >= 0 && ci + 1 < args.Length && int.TryParse(args[ci + 1], out int cube))
                 app.ShowCube(Math.Max(0, cliEp), cube);
         }
+
+        // "--showsprites N" frames one bank (its position in the browser's own list), and
+        // "--showenemies N" one enemyDat entry, so a screenshot can be aimed at either.
+        int bankArg = Array.IndexOf(args, "--showsprites");
+        if (bankArg >= 0 && bankArg + 1 < args.Length && int.TryParse(args[bankArg + 1], out int bank))
+            app.ShowSpriteBank(bank);
+        int enemyArg = Array.IndexOf(args, "--showenemies");
+        if (enemyArg >= 0 && enemyArg + 1 < args.Length && int.TryParse(args[enemyArg + 1], out int enemy))
+            app.ShowEnemy(Math.Max(0, cliEp), enemy);
+        // "--showassemblies N" the same way, by the group's row in the list it ends up showing,
+        // and "--asmlevel NAME" sets its level picker (exact name, so TYRIAN is not TYRIAN X).
+        int asmArg = Array.IndexOf(args, "--showassemblies");
+        if (asmArg >= 0 && asmArg + 1 < args.Length && int.TryParse(args[asmArg + 1], out int asmRow))
+            app.ShowAssembly(asmRow);
+        // "--asmopen" then presses that row's "open" link, which is the only way to reach the
+        // map scroll / playback seek it triggers without a real click.
+        if (Array.IndexOf(args, "--asmopen") >= 0) app.OpenSelectedAssembly();
+        int asmLvArg = Array.IndexOf(args, "--asmlevel");
+        if (asmLvArg >= 0 && asmLvArg + 1 < args.Length)
+            app.PickAssemblyLevel(args[asmLvArg + 1]);
+        // "--damaged" previews the second form, in either enemy-browser mode.
+        if (Array.IndexOf(args, "--damaged") >= 0) app.ShowDamagedForms();
+
+        // "--showitems <tab> [row]" picks one of the shop tabs (0 ships .. 5 specials), and
+        // optionally the row within it.
+        int itemArg = Array.IndexOf(args, "--showitems");
+        if (itemArg >= 0 && itemArg + 1 < args.Length && int.TryParse(args[itemArg + 1], out int tab))
+        {
+            int row = itemArg + 2 < args.Length && int.TryParse(args[itemArg + 2], out int r) ? r : -1;
+            app.ShowItemTab(tab, row);
+        }
+
+        // "--showanalysis 1" picks the cross-level ranking rather than the current level.
+        int anArg = Array.IndexOf(args, "--showanalysis");
+        if (anArg >= 0 && anArg + 1 < args.Length && int.TryParse(args[anArg + 1], out int anMode))
+            app.ShowAnalysis(anMode);
+
+        // "--search <text>" opens the search window already showing that query's results.
+        int qArg = Array.IndexOf(args, "--search");
+        if (qArg >= 0 && qArg + 1 < args.Length) app.ShowSearch(args[qArg + 1]);
 
         int mi = Array.IndexOf(args, "--mouse");
         var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -473,6 +522,11 @@ internal static unsafe class Program
         {
             var d = ed.Get(i);
             Console.WriteLine($"  enemyDat[{i}] esize={d.Esize} egr0={(d.EGraphic!=null&&d.EGraphic.Length>0?d.EGraphic[0]:0)} bank={d.ShapeBank} armor={d.Armor} value={d.Value} startX={d.StartX}+/-{d.StartXC} startY={d.StartY}+/-{d.StartYC}");
+            Console.WriteLine($"      move={d.XMove},{d.YMove} accel={d.XAccel},{d.YAccel} " +
+                $"cyclic={d.XCAccel},{d.YCAccel} rev={d.XRev},{d.YRev} " +
+                $"ani={d.Ani}/{d.Animate} launch={d.ELaunchType}@{d.ELaunchFreq} die={d.EEnemyDie} " +
+                $"dgr={d.Dgr}/{d.DLevel}/{d.DAni} explo={d.ExplosionType} " +
+                $"egr=[{string.Join(",", d.EGraphic?.Take(Math.Clamp((int)d.Ani, 1, 20)) ?? Enumerable.Empty<ushort>())}]");
         }
         return 0;
     }
@@ -499,6 +553,71 @@ internal static unsafe class Program
                 extra = $" enemyDat[{e.Dat}] esize={d.Esize} egr0={(d.EGraphic!=null&&d.EGraphic.Length>0?d.EGraphic[0]:0)} bank={d.ShapeBank}";
             }
             Console.WriteLine($"  t={e.Time} type={e.Type} dat={e.Dat} dat2={e.Dat2} dat3={e.Dat3} dat4={e.Dat4} dat5={e.Dat5} dat6={e.Dat6}{extra}");
+        }
+        return 0;
+    }
+
+    /// <summary>"--assemblies &lt;ep&gt; [lvl]": the multi-part groups the enemy browser reconstructs,
+    /// as text. Which spawns end up in one group is the whole question there, and reading it
+    /// off a screenshot of a composited preview is guesswork.</summary>
+    static int DumpAssemblies(string[] args)
+    {
+        int gi = Array.IndexOf(args, "--assemblies");
+        // "--assemblies all" spans the whole game, which is what the browser's "All episodes"
+        // folds over; a number is one episode, and a second number narrows to one level.
+        string epArg = gi + 1 < args.Length ? args[gi + 1] : "1";
+        int epNum = int.TryParse(epArg, out int en) ? en : -1;
+        int only = gi + 2 < args.Length && int.TryParse(args[gi + 2], out int f) ? f : -1;
+        bool all = Array.IndexOf(args, "--asm-all") >= 0;   // every spawn, not one row per body
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        var gd = new T2LV.Tyrian.GameData(dir!);
+        var episodes = epNum < 0 ? gd.Episodes : gd.Episodes.Where(e => e.Number == epNum).ToList();
+
+        // Gather first, then fold: the browser's scope is everything it is showing, so a body
+        // used in four levels is one entry with four sites rather than four entries.
+        var groups = new List<T2LV.Tyrian.EnemyAssembly>();
+        var levels = new Dictionary<(int Ep, int File), (T2LV.Tyrian.EpisodeInfo Ep, T2LV.Tyrian.Level Lv)>();
+        for (int e = 0; e < gd.Episodes.Count; e++)
+        {
+            var ep = gd.Episodes[e];
+            if (!episodes.Contains(ep)) continue;
+            var ed = gd.GetEnemyData(ep);
+            var seen = new HashSet<int>();
+            foreach (var item in ep.Levels)
+            {
+                if (only >= 0 && item.FileNum != only) continue;
+                if (!seen.Add(item.FileNum)) continue;
+                string name = string.IsNullOrWhiteSpace(item.Name) ? $"level {item.FileNum}" : item.Name.Trim();
+                var lv = gd.LoadLevel(ep, item.FileNum);
+                levels[(e, item.FileNum)] = (ep, lv);
+                groups.AddRange(T2LV.Tyrian.EnemyAssembly.Find(lv, ed, name, e));
+            }
+        }
+        T2LV.Tyrian.EnemyAssembly.MarkRepeats(groups, acrossLevels: true);
+
+        foreach (var a in groups.OrderBy(a => a.EpisodeIdx).ThenBy(a => a.LevelFileNum).ThenBy(a => a.Time))
+        {
+            // Default to the browser's "unique" view: one row per body, ×N where it recurs.
+            // "--asm-all" prints every spawn.
+            if (!all && a.RepeatOf != null) continue;
+            var (ep, lv) = levels[(a.EpisodeIdx, a.LevelFileNum)];
+            // Same as the browser: only the simulation knows where the parts really land.
+            bool sim = a.ResolveFromSim(gd, ep, lv);
+            Console.WriteLine($"{a.LevelName,-12} #{a.LevelFileNum,-2} t={a.Time,-6} " +
+                $"links={string.Join('/', a.Links.OrderBy(l => l)),-12} " +
+                $"{a.Kind,-9} {a.Parts.Count,3} parts  armour {a.TotalArmor,5}  " +
+                $"{a.Width:0}x{a.Height:0}px{(sim ? "" : "  (authored layout)")}" +
+                (!all && a.RepeatCount > 1
+                    ? $"  ×{a.RepeatCount}" + (a.LevelCount > 1 ? $" in {a.LevelCount} levels" : "")
+                    : ""));
+            if (!all && a.RepeatCount > 1)
+                foreach (var byLevel in a.Sites.GroupBy(s => (s.EpisodeIdx, s.LevelFileNum, s.LevelName)))
+                    Console.WriteLine($"      used in ep{gd.Episodes[byLevel.Key.EpisodeIdx].Number} " +
+                        $"{byLevel.Key.LevelName,-12} at " +
+                        string.Join(" ", byLevel.Select(s => $"t={s.Time}")));
+            foreach (var g in a.Parts.GroupBy(p => p.EnemyId).OrderBy(g => g.Key))
+                Console.WriteLine($"      #{g.Key,-4} x{g.Count(),-2} at " +
+                    string.Join(" ", g.Select(p => $"({p.X:0},{p.Y:0})")));
         }
         return 0;
     }

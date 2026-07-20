@@ -49,6 +49,16 @@ public sealed class ByteReader
         return v;
     }
 
+    /// <summary>A length-prefixed name in a fixed-width buffer, as the item tables store them:
+    /// one length byte then <paramref name="buffer"/> bytes, space-padded (episodes.c:477-480).</summary>
+    public string PascalName(int buffer = 30)
+    {
+        int n = U8();
+        var s = System.Text.Encoding.ASCII.GetString(_data, Pos, Math.Min(buffer, Math.Max(0, Length - Pos)));
+        Pos += buffer;
+        return s[..Math.Min(n, s.Length)].TrimEnd();
+    }
+
     public byte[] Bytes(int count)
     {
         var b = new byte[count];

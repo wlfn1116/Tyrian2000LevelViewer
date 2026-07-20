@@ -465,8 +465,38 @@ public static class ObjectPlacer
         };
     }
 
+    /// <summary>What a spawn event actually puts on screen.</summary>
+    internal readonly record struct SpawnInfo(
+        int EnemyId, int Sprite, int ShapeBank, bool Big, int Armor, short Value);
+
+    /// <summary>
+    /// Resolve a spawn event to the thing it creates. Events 49-52 do not name an enemyDat
+    /// entry at all: they spawn the scratch entry 0 after writing the event's own sprite
+    /// (dat), shape bank (dat3) and armour (dat6) into it, so reading dat as an enemy id
+    /// there gives an unrelated enemy. See the event 49-52 case in GameSim.EventSystem.
+    /// </summary>
+    internal static SpawnInfo ResolveSpawn(in EventRec ev, EnemyData ed)
+    {
+        if (ev.Type is >= 49 and <= 52)
+        {
+            var scratch = ed.Get(0);
+            return new SpawnInfo(0, ev.Dat, ev.Dat3, scratch.Esize == 1,
+                unchecked((byte)ev.Dat6), scratch.Value);
+        }
+        return Describe(ev.Dat, ed);
+    }
+
+    /// <summary>The same, for an entry named directly (an ordinary spawn, or one of the four
+    /// consecutive entries event 12 tiles into a block).</summary>
+    internal static SpawnInfo Describe(int enemyId, EnemyData ed)
+    {
+        var d = ed.Get(enemyId);
+        return new SpawnInfo(enemyId, d.EGraphic is { Length: > 0 } ? d.EGraphic[0] : 0,
+            d.ShapeBank, d.Esize == 1, d.Armor, d.Value);
+    }
+
     // band + base on-screen ey for each spawn event type
-    private static bool IsSpawn(byte type, out int band, out int baseEy)
+    internal static bool IsSpawn(byte type, out int band, out int baseEy)
     {
         band = 0; baseEy = -28;
         switch (type)

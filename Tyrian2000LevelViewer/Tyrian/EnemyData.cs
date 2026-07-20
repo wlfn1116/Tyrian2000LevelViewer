@@ -46,17 +46,23 @@ public sealed class EnemyData
 
     public readonly EnemyDat[] Enemies = new EnemyDat[ENEMY_NUM + 1]; // 0..1850
 
+    /// <summary>Where the enemy table actually started. The item tables that precede it are
+    /// sized exactly, so this doubles as the anchor <see cref="ItemData"/> counts backwards from —
+    /// which is sturdier than counting forwards past 1638 weapon records.</summary>
+    public int EnemyOffset { get; private set; }
+
     public static EnemyData Load(string dataDir, EpisodeInfo ep)
     {
         var ed = new EnemyData();
         var (raw, start) = LocateBlock(dataDir, ep);
-        int off = start + ed.PreEnemyOffset();
-        // Sanity-check the deterministic offset; only fall back to a scan if it looks wrong.
-        if (!LooksLikeEnemyTable(raw, off))
-            off = DetectEnemyOffset(raw, off);
-        ed.ParseAt(raw, off);
+        ed.EnemyOffset = ResolveEnemyOffset(raw, start + ed.PreEnemyOffset());
+        ed.ParseAt(raw, ed.EnemyOffset);
         return ed;
     }
+
+    /// <summary>Sanity-check the deterministic offset; only fall back to a scan if it looks wrong.</summary>
+    public static int ResolveEnemyOffset(byte[] raw, int estimate)
+        => LooksLikeEnemyTable(raw, estimate) ? estimate : DetectEnemyOffset(raw, estimate);
 
     public int PreEnemyOffset()
     {

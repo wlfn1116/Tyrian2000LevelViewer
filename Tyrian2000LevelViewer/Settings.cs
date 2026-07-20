@@ -42,8 +42,22 @@ public sealed class AppSettings
     public bool ClickKillExplosions { get; set; } = true;
     /// <summary>Bitmask of the unfolded playback-HUD sections (PbSec); -1 = never saved.</summary>
     public int PbSections { get; set; } = -1;
+    public bool PbPinRight { get; set; }                // dock the playback HUD to the view's right edge
+    public bool PbFitAroundHud { get; set; }            // "UI fit": fit the view clear of that HUD
     public bool ShowTree { get; set; }                  // the episode level-tree window
     public bool ShowCubes { get; set; }                 // the datacube reader window
+    public bool ShowSprites { get; set; }               // the sprite-bank browser
+    public bool ShowEnemies { get; set; }               // the enemy / assembly browser
+    public bool ShowItems { get; set; }                 // the ship & item database
+    public bool ShowAnalysis { get; set; }              // the level analysis panel
+    public float SpriteListWidth { get; set; }          // 0 = default
+    public float EnemyListWidth { get; set; }
+    public float ItemListWidth { get; set; }
+    public int EnemyBrowseMode { get; set; }            // 0 = entries, 1 = assemblies
+    public bool? AssembliesUnique { get; set; }         // fold repeats of one body; null = on
+    public bool SpritesGapless { get; set; }            // pack the sprite grid with no gaps
+    public int SpritesColumns { get; set; }             // 0 = fit to the panel width
+    public bool? SpritesCheckerboard { get; set; }      // null = never saved, defaults on
     public bool CubesByLevel { get; set; }              // ... listing cubes under their level
     public float CubeListWidth { get; set; }            // ... width of its list column; 0 = default
     public bool AllEpisodes { get; set; }               // browse every episode at once

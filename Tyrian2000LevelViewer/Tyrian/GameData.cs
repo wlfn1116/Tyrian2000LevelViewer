@@ -43,10 +43,13 @@ public sealed class GameData
     private readonly Dictionary<char, CompShapes?> _newshCache = new();
     private readonly Dictionary<int, EnemyData> _enemyCache = new();
     private readonly Dictionary<int, WeaponData> _weaponCache = new();
+    private readonly Dictionary<int, ItemData> _itemCache = new();
     private readonly Dictionary<int, EpisodeGraph> _graphCache = new();
     private readonly Dictionary<int, List<DataCube>> _cubeCache = new();
     private List<string>? _planetNames;
     private MainShapes? _main;
+    private MainShapes? _xmas;
+    private bool _xmasTried;
 
     // shapeFile[] from lvlmast.c: enemy shape-bank (1-based) -> newsh file char.
     private static readonly char[] ShapeFile =
@@ -54,6 +57,16 @@ public sealed class GameData
         '2','4','7','8','A','B','C','D','E','F','G','H','I','J','K','L','M','N',
         'O','P','Q','R','S','T','U','5','#','V','0','@','3','^','5','9','\'','%'
     };
+
+    /// <summary>How many enemy shape banks the engine knows (shapeFile[]'s length).</summary>
+    public static int ShapeBankCount => ShapeFile.Length;
+
+    /// <summary>The newsh file character a 1-based enemy shape bank loads from.</summary>
+    public static char ShapeBankChar(int bank)
+        => bank >= 1 && bank <= ShapeFile.Length ? ShapeFile[bank - 1] : '?';
+
+    /// <summary>The terrain tile sets the levels draw from (shapes%c.dat).</summary>
+    public static readonly char[] TileSetChars = { 'w', 'x', 'y', 'z', ')' };
 
     public GameData(string dataDir)
     {
@@ -113,6 +126,24 @@ public sealed class GameData
     public Level LoadLevel(EpisodeInfo ep, int fileNum) => Level.Parse(ep.Container, fileNum);
 
     public MainShapes Main => _main ??= MainShapes.Load(Path.Combine(DataDir, "tyrian.shp"));
+
+    /// <summary>
+    /// The Christmas shape file. Xmas mode is a wholesale swap of tyrian.shp for tyrianc.shp
+    /// (opentyr.c:281) — same 13 sub-tables, different art — so it is the same structure read
+    /// from a different file rather than a set of extra sprites. Null if the file is absent.
+    /// </summary>
+    public MainShapes? XmasMain
+    {
+        get
+        {
+            if (_xmasTried) return _xmas;
+            _xmasTried = true;
+            string path = Path.Combine(DataDir, "tyrianc.shp");
+            try { _xmas = File.Exists(path) ? MainShapes.Load(path) : null; }
+            catch { _xmas = null; }
+            return _xmas;
+        }
+    }
 
     public EnemyData GetEnemyData(EpisodeInfo ep)
     {
@@ -181,6 +212,17 @@ public sealed class GameData
             item.DifficultyGate = g.DifficultyGate(item.FileNum);
         }
         return g;
+    }
+
+    /// <summary>The episode's shop tables (ships, ports, sidekicks, shields, generators,
+    /// specials), cached. Never null; check <see cref="ItemData.Loaded"/>.</summary>
+    public ItemData GetItems(EpisodeInfo ep)
+    {
+        if (_itemCache.TryGetValue(ep.Number, out var it)) return it;
+        try { it = ItemData.Load(DataDir, ep); }
+        catch { it = new ItemData(); }
+        _itemCache[ep.Number] = it;
+        return it;
     }
 
     public WeaponData GetWeapons(EpisodeInfo ep)

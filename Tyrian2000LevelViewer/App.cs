@@ -71,6 +71,10 @@ public sealed unsafe partial class App
     private int _simLoopCycles = 2;          // boss-gate / route-loop repeats kept in the preview
     private float _playZoom;                 // 0 = fit to the panel automatically
     private Vector2 _playPan;                // manual pan offset, screen px
+    private bool _fitAroundHud;              // "UI fit": fit the slice the controls HUD leaves free
+    private bool _hudPinRight;               // dock the controls HUD to the view's right edge
+    private bool _hudDocked;                 // ... and this frame's layout actually had room for it
+    private Vector2 _hudPos, _hudSize;       // its rect last frame -- what "UI fit" fits around
     private bool _simExtendedView;           // show beyond the in-game screen
     private bool _widescreen;                // true-widescreen playback (356px playfield, wider bounds)
     private bool _expandedParallax;          // widescreen sub-option: wider all-layer parallax sweep (commit edd8118)
@@ -161,11 +165,25 @@ public sealed unsafe partial class App
         _showCubes = settings.ShowCubes;
         _cubeByLevel = settings.CubesByLevel;
         if (settings.CubeListWidth > 100f) _cubeListW = settings.CubeListWidth;
+        _showSprites = settings.ShowSprites;
+        _showEnemies = settings.ShowEnemies;
+        _showItems = settings.ShowItems;
+        _showAnalysis = settings.ShowAnalysis;
+        _enemyMode = Math.Clamp(settings.EnemyBrowseMode, 0, 1);
+        _asmUnique = settings.AssembliesUnique ?? true;
+        _sprGapless = settings.SpritesGapless;
+        _sprCols = Math.Clamp(settings.SpritesColumns, 0, 40);
+        _sprCheckerboard = settings.SpritesCheckerboard ?? true;
+        if (settings.SpriteListWidth > 100f) _sprListW = settings.SpriteListWidth;
+        if (settings.EnemyListWidth > 100f) _enemyListW = settings.EnemyListWidth;
+        if (settings.ItemListWidth > 100f) _itemListW = settings.ItemListWidth;
         _allEpisodes = settings.AllEpisodes;
         if (settings.TreeEdgeMask != 0) _treeEdgeMask = settings.TreeEdgeMask;   // 0 = never saved
         if (settings.PbSections >= 0)   // -1 = never saved: keep the defaults above
             for (int i = 0; i < _pbOpen.Length; i++)
                 _pbOpen[i] = (settings.PbSections & (1 << i)) != 0;
+        _hudPinRight = settings.PbPinRight;
+        _fitAroundHud = settings.PbFitAroundHud;
         _levelsHeight = settings.LevelsHeight > 30 ? settings.LevelsHeight : 170f;
         _layersHeight = settings.LayersHeight > 30 ? settings.LayersHeight : 0f;  // 0 = fit to content
         ApplyLayerSettings(settings.Layers);
@@ -194,6 +212,7 @@ public sealed unsafe partial class App
     {
         try
         {
+            ResetBrowserCaches();
             _gd = new GameData(dir);
             _dataDir = dir;
             SetDirBuf(dir);
@@ -261,11 +280,25 @@ public sealed unsafe partial class App
         s.ShowCubes = _showCubes;
         s.CubesByLevel = _cubeByLevel;
         s.CubeListWidth = _cubeListW;
+        s.ShowSprites = _showSprites;
+        s.ShowEnemies = _showEnemies;
+        s.ShowItems = _showItems;
+        s.ShowAnalysis = _showAnalysis;
+        s.SpriteListWidth = _sprListW;
+        s.EnemyListWidth = _enemyListW;
+        s.ItemListWidth = _itemListW;
+        s.EnemyBrowseMode = _enemyMode;
+        s.AssembliesUnique = _asmUnique;
+        s.SpritesGapless = _sprGapless;
+        s.SpritesColumns = _sprCols;
+        s.SpritesCheckerboard = _sprCheckerboard;
         s.AllEpisodes = _allEpisodes;
         s.TreeEdgeMask = _treeEdgeMask;
         int secBits = 0;
         for (int i = 0; i < _pbOpen.Length; i++) if (_pbOpen[i]) secBits |= 1 << i;
         s.PbSections = secBits;
+        s.PbPinRight = _hudPinRight;
+        s.PbFitAroundHud = _fitAroundHud;
         s.LevelsHeight = _levelsHeight;
         s.LayersHeight = _layersHeight;
         s.HasView = _viewInitialized;
@@ -414,7 +447,49 @@ public sealed unsafe partial class App
     {
         int idx = _browse.FindIndex(b => b.Episode == episodeIdx &&
             _gd!.Episodes[b.Episode].Levels[b.Level].FileNum == fileNum);
-        if (idx >= 0) SelectLevel(idx, ensureVisible: true);
+        if (idx < 0) return;
+        // Already the open level: reloading it would reset the view and throw away the built
+        // playback, and rebuilding that runs the whole level again. Browsing to a second place
+        // in the level you are already watching should cost nothing.
+        if (idx == _levelIdx && _level != null &&
+            _episodeIdx == episodeIdx && _levelFileNum == fileNum)
+        {
+            _scrollLevelListToSelection = true;
+            return;
+        }
+        SelectLevel(idx, ensureVisible: true);
+    }
+
+    /// <summary>
+    /// Where a browser's "open" link wants the viewer to land. <see cref="Time"/> is a map
+    /// position, and both canvases honour it their own way: the map scrolls to the objects
+    /// authored there, playback seeks to the tick the sim spawned them on. The entry ids narrow
+    /// down which of the enemies alive around that moment are the ones that were asked for.
+    /// </summary>
+    private readonly record struct MapJump(ushort Time, IReadOnlyCollection<int>? EnemyIds);
+
+    /// <summary>Pending target for the canvas, taken once the level it belongs to is loaded.</summary>
+    private MapJump? _pendingJump;
+
+    /// <summary>
+    /// Centre the canvas on where the events at <paramref name="time"/> put their objects. The
+    /// event's own coordinate is a map position, not a canvas row -- what turns one into the
+    /// other is the level's timeline, which the placed objects already carry, so read it back
+    /// off them rather than redoing the walk.
+    /// </summary>
+    private void ScrollToEventTime(ushort time, Vector2 avail)
+    {
+        if (_level == null || _objects.Count == 0) return;
+        float? top = null;
+        foreach (var o in _objects)
+            if (o.Time == time)
+            {
+                float y = LevelRenderer.ObjectCanvasY(o, _timeline, CanvasHeight(), ObjYOffset());
+                top = top == null ? y : Math.Min(top.Value, y);
+            }
+        if (top == null) return;
+        float min = Math.Min(0f, avail.Y - CanvasHeight() * _zoom);
+        _scroll.Y = Math.Clamp(-top.Value * _zoom + avail.Y * 0.5f, min, 0f);
     }
 
     /// <summary>
@@ -429,6 +504,9 @@ public sealed unsafe partial class App
         var io = ImGui.GetIO();
         if (io.WantTextInput || ImGui.IsAnyItemActive()) return;
         if (ImGui.IsPopupOpen("", ImGuiPopupFlags.AnyPopupId | ImGuiPopupFlags.AnyPopupLevel)) return;
+
+        // Ahead of the playback branch's early return, so search is reachable in either mode.
+        if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.F)) OpenSearch();
 
         if (ImGui.IsKeyPressed(ImGuiKey.DownArrow, true)) SelectLevelStep(1);
         if (ImGui.IsKeyPressed(ImGuiKey.UpArrow, true)) SelectLevelStep(-1);
@@ -543,6 +621,7 @@ public sealed unsafe partial class App
     private void UpdatePlayback()
     {
         if (_playback == null) return;
+        if (_pendingJump is { } jump) { _pendingJump = null; SeekPlaybackTo(jump); }
         SyncPlaybackVisibility();
         if (_playing)
         {
@@ -572,6 +651,117 @@ public sealed unsafe partial class App
         else
             _gameView.Update(_renderer, _playback.Sim.PresentScreen, pal,
                 GameSim.OX + GameSim.ViewX, GameSim.OY, _playback.Sim.PlayfieldWidth, GameSim.ViewH);
+    }
+
+    /// <summary>How far past the spawn frame to look for the group, ~2 s.</summary>
+    private const int JumpSettleTicks = 70;
+
+    private readonly List<GameSim.EnemyView> _jumpEnemies = new();
+    private readonly HashSet<int> _slotsBefore = new(), _slotsSpawned = new();
+
+    /// <summary>
+    /// Send playback to the moment a browsed group is spawned, so the browsers' "open" links
+    /// land on it here just as they scroll the map to it there.
+    /// </summary>
+    private void SeekPlaybackTo(MapJump jump)
+    {
+        var pb = _playback;
+        if (pb == null || _level == null) return;
+
+        int spawn = PlaybackTickForMapTime(jump.Time, out bool exact);
+        if (spawn < 0) { _status = $"t={jump.Time}: the run recorded no events to seek to."; return; }
+
+        pb.SeekTo(spawn);
+        _playing = false;
+        int landed = SettleOnGroup(jump, spawn);
+        // ASCII only: the ImGui font is Latin-1, so a dash here has to be a plain hyphen.
+        _status = exact
+            ? $"t={jump.Time} - playback at {SimPlayback.FormatTime(landed)} (tick {landed})" +
+              (landed != spawn ? $", {landed - spawn} ticks into the spawn" : "")
+            : $"t={jump.Time} is never reached on this route; went to the nearest point that is, " +
+              $"{SimPlayback.FormatTime(landed)} (tick {landed}).";
+    }
+
+    /// <summary>
+    /// The earliest tick on which the events authored at map position <paramref name="time"/>
+    /// ran. Map position is not a clock — route jumps, boss gates and scroll-speed changes all
+    /// decide when a given one is reached, and some are never reached at all — so the answer
+    /// comes from the precompute's own event log rather than from a conversion. When the route
+    /// skips the position entirely this falls back to the nearest position it did run,
+    /// reporting that through <paramref name="exact"/>; -1 only if the log is empty.
+    /// </summary>
+    private int PlaybackTickForMapTime(ushort time, out bool exact)
+    {
+        exact = false;
+        if (_playback == null || _level == null) return -1;
+        var evs = _level.Events;
+        int hit = -1, near = -1, nearGap = int.MaxValue;
+        foreach (var e in _playback.Events)
+        {
+            if ((uint)e.Index >= (uint)evs.Length) continue;
+            int gap = evs[e.Index].Time - time;
+            if (gap == 0) { if (hit < 0 || e.Tick < hit) hit = e.Tick; continue; }
+            gap = Math.Abs(gap);
+            if (gap < nearGap || (gap == nearGap && e.Tick < near)) { nearGap = gap; near = e.Tick; }
+        }
+        exact = hit >= 0;
+        return exact ? hit : near;
+    }
+
+    /// <summary>
+    /// Roll forward from the spawn frame to the one that actually shows what was asked for, and
+    /// return the tick landed on. Event enemies are created off the top of the playfield
+    /// (CreateNewEventEnemy starts them at ey = -28) and fly in over the next second or two, so
+    /// the spawn frame itself is usually still empty sky — DELIANI's boss is only halfway in
+    /// 50 ticks later.
+    ///
+    /// The group is identified by the enemy slots the spawn tick filled, taken by diffing the
+    /// live set across it. Entry ids and link numbers are both reused all level long, and
+    /// matching on those settles on whatever unrelated enemy happens to share one; the ids are
+    /// kept only to reject a slot freed and refilled inside the window. Finding nothing leaves
+    /// the playhead on the spawn frame, which is still the right answer for a group that never
+    /// becomes visible at all.
+    /// </summary>
+    private int SettleOnGroup(MapJump jump, int spawnTick)
+    {
+        var pb = _playback!;
+        if (spawnTick <= 1) return spawnTick;   // no frame before it to diff against
+
+        pb.SeekTo(spawnTick - 1);
+        pb.Sim.CollectLiveSlots(_slotsBefore);
+        pb.Advance(1);
+        pb.Sim.CollectLiveSlots(_slotsSpawned);
+        _slotsSpawned.ExceptWith(_slotsBefore);
+        if (_slotsSpawned.Count == 0) return spawnTick;   // nothing was created here
+
+        // CollectEnemies' own gate is horizontal only, so the vertical span is tested here. The
+        // frame worth stopping on is the one holding the whole group: DELIANI's boss enters over
+        // 25 ticks and reads as half a ship for most of them. Parts that are already gone or
+        // never enter would make that unreachable, so the first frame with any part wholly in,
+        // and then the first with any part half in, stand in for it.
+        bool byId = jump.EnemyIds is { Count: > 0 };
+        int anyIn = -1, partial = -1;
+        for (int n = 0; ; n++)
+        {
+            pb.Sim.CollectEnemies(_jumpEnemies);
+            int seen = 0, whole = 0;
+            foreach (var e in _jumpEnemies)
+            {
+                if (!_slotsSpawned.Contains(e.Slot) || !e.OnScreen) continue;
+                if (byId && !jump.EnemyIds!.Contains(e.EnemyId)) continue;
+                seen++;
+                if (e.ScreenY >= 0 && e.ScreenY < GameSim.ViewH) whole++;
+                else if (partial < 0 && e.ScreenY + e.HalfH > 0 && e.ScreenY < GameSim.ViewH)
+                    partial = pb.CurrentTick;
+            }
+            if (seen > 0 && whole == seen) return pb.CurrentTick;
+            if (whole > 0 && anyIn < 0) anyIn = pb.CurrentTick;
+            if (n >= JumpSettleTicks || pb.AtEnd) break;
+            pb.Advance(1);
+        }
+        int landed = anyIn > 0 ? anyIn : partial > 0 ? partial : spawnTick;
+        pb.SeekTo(landed);
+        return landed;
     }
 
     public void Render()
@@ -627,14 +817,80 @@ public sealed unsafe partial class App
         DrawControls();
         ImGui.EndChild();
         ImGui.SameLine();
-        ImGui.BeginChild("canvas", new Vector2(0, 0), ImGuiChildFlags.Borders,
+
+        // Pinned, the playback HUD is a column of its own on the right -- the mirror of the
+        // controls column -- so the canvas gives up that width instead of being covered by it.
+        // Too narrow a window to spare it and the HUD falls back to floating, rather than
+        // leaving a squeezed canvas or no HUD at all. Settled here, before the canvas draws,
+        // because the overlay inside it has to know which of the two forms is in play.
+        _hudDocked = _playbackMode && _playback != null && _hudPinRight &&
+                     ImGui.GetContentRegionAvail().X > HudColW + MinCanvasW;
+        float canvasW = _hudDocked ? -(HudColW + ImGui.GetStyle().ItemSpacing.X) : 0f;
+        ImGui.BeginChild("canvas", new Vector2(canvasW, 0), ImGuiChildFlags.Borders,
             ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
         DrawCanvas();
         ImGui.EndChild();
+        if (_hudDocked)
+        {
+            ImGui.SameLine();
+            DrawSimColumn();
+        }
         ImGui.End();
 
         DrawTreeWindow();
         DrawCubeWindow();
+        DrawSpriteWindow();
+        DrawEnemyWindow();
+        DrawItemWindow();
+        DrawAnalysisWindow();
+        DrawSearchWindow();
+    }
+
+    /// <summary>
+    /// The reference browsers: everything the data set holds that is not the level in the
+    /// viewport. They are toggles rather than a menu because each is a window you leave open
+    /// beside the viewer. The first pair reads the episode the picker above is on; the rest
+    /// span the whole data set.
+    /// </summary>
+    private void DrawReferenceButtons()
+    {
+        ImGui.SeparatorText("Reference");
+        float w = (ImGui.GetContentRegionAvail().X - 5f) / 2f;
+        if (Chip("Level tree", _showTree, AcRoutes, w,
+                "The episode's level tree: which level leads to which, including the\n" +
+                "outpost route choices, the secret warps hidden in the level data, and\n" +
+                "the forks that depend on difficulty, player count or a boss timer."))
+            _showTree = !_showTree;
+        ImGui.SameLine(0, 5);
+        if (Chip("Datacubes", _showCubes, AcDisplay, w,
+                "Read the datacubes the outposts hand out, portrait and all.\n" +
+                "Some are always on the shelf; the rest only unlock if you picked\n" +
+                "datacubes up in the level just before that outpost."))
+            _showCubes = !_showCubes;
+
+        if (Chip("Enemies", _showEnemies, AcEnemy, w,
+                "Every enemyDat entry, animated the way the engine animates it,\n" +
+                "plus the multi-part formations and bosses the levels assemble\nout of them."))
+            _showEnemies = !_showEnemies;
+        ImGui.SameLine(0, 5);
+        if (Chip("Sprites", _showSprites, AcSprite, w,
+                "Every sprite bank in the data set: the 36 enemy banks, the\n" +
+                "tyrian.shp sub-tables the menus draw from, and the terrain tiles."))
+            _showSprites = !_showSprites;
+
+        if (Chip("Ships & items", _showItems, AcBuild, w,
+                "The shop's tables -- ships, front and rear guns, sidekicks,\n" +
+                "shields, generators and special weapons, with their in-game icons."))
+            _showItems = !_showItems;
+        ImGui.SameLine(0, 5);
+        if (Chip("Analysis", _showAnalysis, AcSim, w,
+                "What a level is made of: spawn density, incoming fire, armour\n" +
+                "per segment, and how the levels rank against each other."))
+            _showAnalysis = !_showAnalysis;
+
+        if (Chip("Search  (Ctrl+F)", _showSearch, AcPlayer, -1f,
+                "One box over levels, enemies, items, datacubes and sprites."))
+            OpenSearch();
     }
 
     private void DrawControls()
@@ -664,17 +920,7 @@ public sealed unsafe partial class App
         ImGui.SetNextItemWidth(-1);
         EpisodeCombo("##episode");
 
-        if (ImGui.Button(_showTree ? "Hide tree" : "Show tree")) _showTree = !_showTree;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("The episode's level tree: which level leads to which, including the\n" +
-                "outpost route choices, the secret warps hidden in the level data, and\n" +
-                "the forks that depend on difficulty, player count or a boss timer.");
-        ImGui.SameLine();
-        if (ImGui.Button(_showCubes ? "Hide datacubes" : "Datacubes")) _showCubes = !_showCubes;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Read the datacubes the outposts hand out, portrait and all.\n" +
-                "Some are always on the shelf; the rest only unlock if you picked\n" +
-                "datacubes up in the level just before that outpost.");
+        DrawReferenceButtons();
 
         // --- Levels (resizable) ---
         ImGui.SeparatorText($"Levels ({_browse.Count})");
@@ -858,7 +1104,9 @@ public sealed unsafe partial class App
     private string LevelFileStem()
     {
         var ep = CurEpisode!;
-        string name = _levelIdx < ep.Levels.Count ? ep.Levels[_levelIdx].Name.Trim() : "";
+        // Look the name up by file number, not by _levelIdx -- that indexes _browse, which
+        // spans every episode in All-episodes mode and would name the file after the wrong level.
+        string name = ep.Levels.FirstOrDefault(l => l.FileNum == _levelFileNum)?.Name.Trim() ?? "";
         if (name.Length == 0) name = "unnamed";
         name = name.Replace(' ', '_');
         foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
@@ -1054,7 +1302,7 @@ public sealed unsafe partial class App
     {
         if (_playbackMode && _playback != null)
         {
-            DrawPlaybackCanvas();
+            DrawPlaybackCanvas();     // a pending jump is a seek there, taken in UpdatePlayback
             return;
         }
 
@@ -1064,6 +1312,8 @@ public sealed unsafe partial class App
         _canvasAvail = avail;
 
         if (!_viewInitialized && _level != null) { FitWidth(); _viewInitialized = true; }
+        // After the fit, so a jump requested while another level was loaded is not undone by it.
+        if (_pendingJump is { } jumpTo) { _pendingJump = null; ScrollToEventTime(jumpTo.Time, avail); }
 
         ImGui.InvisibleButton("canvas_btn", avail,
             ImGuiButtonFlags.MouseButtonLeft | ImGuiButtonFlags.MouseButtonMiddle);
@@ -1234,6 +1484,14 @@ public sealed unsafe partial class App
     private enum PbSec { Sim, Build, Player, Enemies, Display, Routes, Status }
 
     private const float HudW = 258f;      // fixed content width, so the chip grid comes out even
+    // Pinned, the HUD is a column: its content width plus the padding either side and room for
+    // a scrollbar, so unfolding every section never squeezes the chip grid.
+    private const float HudColW = HudW + 40f;
+    // What the canvas must keep for the column to be worth giving up the width: the transport
+    // row's own floor, every control on it at its shortest (measured: ~442px at the default
+    // font). Under that the HUD goes back to floating rather than leave a row that clips.
+    private const float MinCanvasW = 460f;
+    private static readonly uint HudBg = Gfx.Rgba(15, 17, 23, 236);
     private static readonly uint AcSim     = Gfx.Rgba(255, 190,  90);
     private static readonly uint AcBuild   = Gfx.Rgba(110, 225, 195);
     private static readonly uint AcPlayer  = Gfx.Rgba(120, 210, 250);   // the player glyph's cyan
@@ -1322,11 +1580,12 @@ public sealed unsafe partial class App
         return open;
     }
 
+    /// <summary>The floating overlay: the HUD as a draggable window over the playfield. Used
+    /// while it is not pinned -- pinned, DrawSimColumn puts the same body in a real column.</summary>
     private void DrawSimOverlay(Vector2 viewPos, Vector2 viewSize)
     {
-        if (_playback == null) return;
+        if (_playback == null || _hudDocked) return;
         var pb = _playback;
-        var sim = pb.Sim;
 
         ImGui.SetNextWindowPos(new Vector2(viewPos.X + viewSize.X - 12f, viewPos.Y + 12f),
             ImGuiCond.FirstUseEver, new Vector2(1f, 0f));
@@ -1335,52 +1594,91 @@ public sealed unsafe partial class App
         ImGui.SetNextWindowSizeConstraints(Vector2.Zero,
             new Vector2(4096f, Math.Max(220f, viewSize.Y - 24f)));
 
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, Gfx.Rgba(15, 17, 23, 236));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, HudBg);
         ImGui.PushStyleColor(ImGuiCol.Border, Gfx.Rgba(92, 104, 140, 210));
         ImGui.PushStyleColor(ImGuiCol.TitleBg, Gfx.Rgba(28, 36, 56, 235));
         ImGui.PushStyleColor(ImGuiCol.TitleBgActive, Gfx.Rgba(44, 60, 92, 245));
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 7f);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1f);
+        PushHudMetrics();
+
+        bool hudOpen = ImGui.Begin("Playback controls##pbhud",
+            ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.AlwaysAutoResize |
+            ImGuiWindowFlags.NoNavInputs | ImGuiWindowFlags.NoNavFocus |
+            ImGuiWindowFlags.NoFocusOnAppearing);
+        // Its rect, collapsed or not, is what "UI fit" keeps the game view clear of.
+        _hudPos = ImGui.GetWindowPos();
+        _hudSize = ImGui.GetWindowSize();
+        if (hudOpen) DrawHudBody(pb);
+        ImGui.End();
+        PopHudMetrics();
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor(4);
+    }
+
+    /// <summary>
+    /// The pinned form: a fixed, square-cornered column down the right edge of the window,
+    /// the mirror of the controls column on the left. Drawn from the root layout rather than
+    /// from the canvas, so it owns its width instead of covering the view.
+    /// </summary>
+    private void DrawSimColumn()
+    {
+        var pb = _playback!;
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, HudBg);
+        PushHudMetrics();
+        ImGui.BeginChild("pbcolumn", new Vector2(HudColW, 0), ImGuiChildFlags.Borders);
+        // Nothing overlaps the view in this mode, but keep the rect live so an unpin lands
+        // "UI fit" on a truthful rectangle on the very next frame.
+        _hudPos = ImGui.GetWindowPos();
+        _hudSize = ImGui.GetWindowSize();
+        DrawHudBody(pb);
+        ImGui.EndChild();
+        PopHudMetrics();
+        ImGui.PopStyleColor();
+    }
+
+    /// <summary>The tighter metrics the HUD's chip grid is laid out against, in either form.</summary>
+    private static void PushHudMetrics()
+    {
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(11, 9));
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(5, 2));
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(7, 4));
+    }
 
-        if (ImGui.Begin("Playback controls##pbhud",
-                ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.AlwaysAutoResize |
-                ImGuiWindowFlags.NoNavInputs | ImGuiWindowFlags.NoNavFocus |
-                ImGuiWindowFlags.NoFocusOnAppearing))
-        {
-            // Pin the auto-resize width so folding sections never reflows the chip grid.
-            ImGui.Dummy(new Vector2(HudW, 0));
-            DrawHudHeader(pb);
+    private static void PopHudMetrics() => ImGui.PopStyleVar(3);
 
-            if (Section(PbSec.Sim, "SIMULATION", AcSim,
-                    $"{DifficultyNames[_simDifficulty]} · x{_simScrollMult:0.##}"))
-                DrawSimSection();
+    /// <summary>The HUD's contents: header, then every collapsible section.</summary>
+    private void DrawHudBody(SimPlayback pb)
+    {
+        var sim = pb.Sim;
 
-            if (Section(PbSec.Build, "ENGINE BUILD", AcBuild,
-                    _widescreen ? $"widescreen {GameSim.WideViewW}" : $"vanilla {GameSim.ViewW}"))
-                DrawBuildSection(sim);
+        // Pin the width so folding sections never reflows the chip grid.
+        ImGui.Dummy(new Vector2(HudW, 0));
+        DrawHudHeader(pb);
 
-            if (Section(PbSec.Player, "PLAYER", AcPlayer, $"{_simPlayerX}, {_simPlayerY}"))
-                DrawPlayerSection();
+        if (Section(PbSec.Sim, "SIMULATION", AcSim,
+                $"{DifficultyNames[_simDifficulty]} · x{_simScrollMult:0.##}"))
+            DrawSimSection();
 
-            if (Section(PbSec.Enemies, "ENEMIES", AcEnemy,
-                    !_clickKill ? "click: off" : _clickKillInstant ? "instant kill" : $"{_clickKillDamage} dmg"))
-                DrawEnemySection();
+        if (Section(PbSec.Build, "ENGINE BUILD", AcBuild,
+                _widescreen ? $"widescreen {GameSim.WideViewW}" : $"vanilla {GameSim.ViewW}"))
+            DrawBuildSection(sim);
 
-            if (Section(PbSec.Display, "DISPLAY", AcDisplay, $"{FxCount()}/6 on"))
-                DrawDisplaySection();
+        if (Section(PbSec.Player, "PLAYER", AcPlayer, $"{_simPlayerX}, {_simPlayerY}"))
+            DrawPlayerSection();
 
-            if (Section(PbSec.Routes, "ROUTES & GATES", AcRoutes, $"{pb.LoopRegions.Count}"))
-                DrawRoutesAndGates(pb);
+        if (Section(PbSec.Enemies, "ENEMIES", AcEnemy,
+                !_clickKill ? "click: off" : _clickKillInstant ? "instant kill" : $"{_clickKillDamage} dmg"))
+            DrawEnemySection();
 
-            if (Section(PbSec.Status, "STATUS", AcStatus, $"{sim.EnemyOnScreen} on screen"))
-                DrawStatusSection(pb, sim);
-        }
-        ImGui.End();
-        ImGui.PopStyleVar(5);
-        ImGui.PopStyleColor(4);
+        if (Section(PbSec.Display, "DISPLAY", AcDisplay, $"{FxCount()}/6 on"))
+            DrawDisplaySection();
+
+        if (Section(PbSec.Routes, "ROUTES & GATES", AcRoutes, $"{pb.LoopRegions.Count}"))
+            DrawRoutesAndGates(pb);
+
+        if (Section(PbSec.Status, "STATUS", AcStatus, $"{sim.EnemyOnScreen} on screen"))
+            DrawStatusSection(pb, sim);
     }
 
     /// <summary>Always-visible header: what is being simulated, what the transport is doing,
@@ -1804,6 +2102,75 @@ public sealed unsafe partial class App
     private const int PlayerBufOX = 79, PlayerBufOY = 140;
 
     /// <summary>
+    /// Buffer-space to view-space mapping for the playback canvas, presentation flip included.
+    /// JE_starShowVGA's code 1 mirrors the playfield band in place before the frame is shown
+    /// (GameSim.PreparePresent), so everything laid over it — enemy markers, the hover box and
+    /// its tooltip, the tile readout, the player glyph, click-to-kill — has to travel through
+    /// the same mirror the pixels did, or it addresses the reflection instead of the thing.
+    /// Reflection is its own inverse, so one function serves both directions.
+    /// </summary>
+    private readonly struct PlayView
+    {
+        private readonly Vector2 _imgPos;
+        private readonly float _scale, _texOX, _texOY;
+        private readonly int _vw, _vh;
+        private readonly float _fx0, _fx1;   // the mirrored column span
+
+        public PlayView(GameSim sim, bool extended, Vector2 imgPos, float scale, int vw, int vh)
+        {
+            _imgPos = imgPos; _scale = scale; _vw = vw; _vh = vh;
+            // The texture is the whole buffer in extended view, else the cropped playfield.
+            _texOX = extended ? 0 : GameSim.OX + GameSim.ViewX;
+            _texOY = extended ? 0 : GameSim.OY;
+            Flipped = sim.ScreenFlipped;
+            _fx0 = GameSim.OX + GameSim.ViewX;
+            _fx1 = _fx0 + sim.PlayfieldWidth;
+        }
+
+        /// <summary>True when this frame is presented upside-down.</summary>
+        public bool Flipped { get; }
+
+        /// <summary>Does the pixel at this buffer point take part in the flip? Only the
+        /// playfield band is copied mirrored, so in extended view the margins around it stay
+        /// where they were and a point out there must not be moved.</summary>
+        private bool Flips(float bx, float by) =>
+            Flipped && bx >= _fx0 && bx < _fx1 &&
+            by >= GameSim.OY && by <= GameSim.OY + GameSim.ViewH;
+
+        /// <summary>Reflect within the band. Continuous rather than per-pixel-index: a buffer
+        /// coordinate here is a position — a sprite's centre, the cursor — and this form is its
+        /// own exact inverse at any fraction, so a drag still tracks the cursor to the pixel.</summary>
+        private static float Mirror(float by) => 2f * GameSim.OY + GameSim.ViewH - by;
+
+        private Vector2 Place(float bx, float by) =>
+            _imgPos + new Vector2(bx - _texOX, by - _texOY) * _scale;
+
+        /// <summary>Where a buffer point shows up on the presented frame.</summary>
+        public Vector2 ToScreen(float bx, float by) =>
+            Place(bx, Flips(bx, by) ? Mirror(by) : by);
+
+        /// <summary>Which buffer point a point on the presented frame is over.</summary>
+        public Vector2 ToBuffer(Vector2 pt)
+        {
+            var b = (pt - _imgPos) / _scale + new Vector2(_texOX, _texOY);
+            return new Vector2(b.X, Flips(b.X, b.Y) ? Mirror(b.Y) : b.Y);
+        }
+
+        /// <summary>Screen-space bounds of a buffer-space box, back in min/max order after the
+        /// mirror swaps its top and bottom. The flip is decided once from the centre, so a box
+        /// straddling the band's edge in extended view still comes out a box.</summary>
+        public (Vector2 Min, Vector2 Max) Box(float bx0, float by0, float bx1, float by1) =>
+            Flips((bx0 + bx1) * 0.5f, (by0 + by1) * 0.5f)
+                ? (Place(bx0, Mirror(by1)), Place(bx1, Mirror(by0)))
+                : (Place(bx0, by0), Place(bx1, by1));
+
+        /// <summary>Is this buffer point inside the drawn texture? Tested before the flip,
+        /// which maps the band onto itself and so can never move a point in or out.</summary>
+        public bool InView(float bx, float by) =>
+            bx >= _texOX && by >= _texOY && bx < _texOX + _vw && by < _texOY + _vh;
+    }
+
+    /// <summary>
     /// Player-position mode: a draggable marker at the phantom player. Dragging it feeds
     /// GameSim.PlayerX/Y, so the parallax, light cone and enemy aim re-derive live; a
     /// full rebuild on release makes the whole timeline coherent with the new position.
@@ -1813,24 +2180,16 @@ public sealed unsafe partial class App
     /// view, and stays available with the marker hidden or player mode off — the parallax
     /// swinging under the cursor is the feedback then, which is the point of hiding it.
     /// </summary>
-    private void HandlePlayerMarker(ImDrawListPtr dl, Vector2 imgPos, float scale,
+    private void HandlePlayerMarker(ImDrawListPtr dl, in PlayView view,
         Vector2 mouse, bool viewHovered, Vector2 viewPos, Vector2 viewSize)
     {
         if (_playback == null) return;
         bool markerShown = _playerSimMode && !_pivotInvisible;
 
-        float texOX = _simExtendedView ? 0 : GameSim.OX + GameSim.ViewX;
-        float texOY = _simExtendedView ? 0 : GameSim.OY;
-        Vector2 ToScreen(float bx, float by) => imgPos + new Vector2(bx - texOX, by - texOY) * scale;
-
-        // When the playfield is presented upside-down (screen flip), the marker must sit
-        // on the flipped image: mirror its Y within the crop, and invert the drag the same
-        // way. Mirror() is its own inverse, so the glyph still tracks the cursor exactly.
-        bool flipped = _playback.Sim.ScreenFlipped;
-        float Mirror(float by) => 2f * GameSim.OY + GameSim.ViewH - 1 - by;
-        float MarkerBufY(int py) => flipped ? Mirror(py + PlayerBufOY) : py + PlayerBufOY;
-
-        Vector2 mk = ToScreen(_simPlayerX + PlayerBufOX, MarkerBufY(_simPlayerY));
+        // When the playfield is presented upside-down (screen flip), the marker must sit on the
+        // flipped image, so it goes out through PlayView and the drag comes back in the same
+        // way. The mirror is its own inverse, so the glyph still tracks the cursor exactly.
+        Vector2 mk = view.ToScreen(_simPlayerX + PlayerBufOX, _simPlayerY + PlayerBufOY);
         bool over = markerShown && viewHovered && Vector2.Distance(mouse, mk) <= 15f;
 
         if (!_draggingPlayer && viewHovered && ImGui.IsMouseClicked(ImGuiMouseButton.Right))
@@ -1842,16 +2201,15 @@ public sealed unsafe partial class App
         {
             if (ImGui.IsMouseDown(_playerDragButton))
             {
-                var mb = (mouse - imgPos) / scale + new Vector2(texOX, texOY);
-                float effY = flipped ? Mirror(mb.Y) : mb.Y;
+                var mb = view.ToBuffer(mouse);
                 int nx = Math.Clamp((int)MathF.Round(mb.X - PlayerBufOX), PlayerXMin, PlayerXMax);
-                int ny = Math.Clamp((int)MathF.Round(effY - PlayerBufOY), 0, 170);
+                int ny = Math.Clamp((int)MathF.Round(mb.Y - PlayerBufOY), 0, 170);
                 if (nx != _simPlayerX || ny != _simPlayerY)
                 {
                     _simPlayerX = nx; _simPlayerY = ny;
                     _playback.Sim.PlayerX = nx; _playback.Sim.PlayerY = ny;
                     _playback.RedrawCurrent();
-                    mk = ToScreen(nx + PlayerBufOX, MarkerBufY(ny));
+                    mk = view.ToScreen(nx + PlayerBufOX, ny + PlayerBufOY);
                 }
             }
             else
@@ -1866,7 +2224,7 @@ public sealed unsafe partial class App
         // A faint guide line at the player's X marks the parallax pivot.
         dl.AddLine(new Vector2(mk.X, viewPos.Y), new Vector2(mk.X, viewPos.Y + viewSize.Y),
             Gfx.Rgba(120, 220, 255, 45));
-        DrawPlayerGlyph(dl, mk, _draggingPlayer || over, flipped);
+        DrawPlayerGlyph(dl, mk, _draggingPlayer || over, view.Flipped);
     }
 
     /// <summary>
@@ -1875,7 +2233,7 @@ public sealed unsafe partial class App
     /// left-drag still pans the view; <see cref="HandlePlayerMarker"/> runs first, so a press
     /// that grabbed the player marker never doubles as a shot.
     /// </summary>
-    private void HandleClickKill(Vector2 imgPos, float scale, Vector2 mouse, bool viewHovered)
+    private void HandleClickKill(in PlayView view, Vector2 mouse, bool viewHovered)
     {
         if (!_clickKill || _playback == null) return;
 
@@ -1887,9 +2245,9 @@ public sealed unsafe partial class App
         _clickKillPress = null;
         if (Vector2.Distance(mouse, press) > 4f) return;   // that was a pan, not a click
 
-        float texOX = _simExtendedView ? 0 : GameSim.OX + GameSim.ViewX;
-        float texOY = _simExtendedView ? 0 : GameSim.OY;
-        var b = (press - imgPos) / scale + new Vector2(texOX, texOY);
+        // Through PlayView, so a shot on an upside-down screen hits the enemy the cursor is
+        // over rather than its reflection across the playfield's middle.
+        var b = view.ToBuffer(press);
         int slot = _playback.Sim.PickEnemyAt(
             (int)MathF.Floor(b.X), (int)MathF.Floor(b.Y), _objCatMask);
         if (slot < 0) return;
@@ -1924,6 +2282,30 @@ public sealed unsafe partial class App
         dl.AddLine(new Vector2(c.X + r + 1, c.Y), new Vector2(c.X + r + 7, c.Y), ring);
     }
 
+    /// <summary>
+    /// The slice of the view an auto-fit aims at, view-relative. Normally the whole panel --
+    /// the HUD is a floating overlay and the frame is free to sit under it. With "UI fit" armed
+    /// the band the HUD covers is carved off whichever side it sits on, so the two end up
+    /// side by side and no part of the game view is hidden behind the controls.
+    /// </summary>
+    private (Vector2 Off, Vector2 Size) FitRegion(Vector2 viewPos, Vector2 viewSize)
+    {
+        if (!_fitAroundHud || _hudSize.X <= 0f) return (Vector2.Zero, viewSize);
+
+        const float gap = 8f, minLeft = 120f;   // never squeeze the frame down to nothing
+        float l = _hudPos.X - viewPos.X;        // the HUD's edges, view-relative
+        float r = l + _hudSize.X;
+        // Pinned it is a column beside the view, not over it: nothing to fit around.
+        if (r <= 0f || l >= viewSize.X) return (Vector2.Zero, viewSize);
+        if (l + _hudSize.X * 0.5f > viewSize.X * 0.5f)      // HUD on the right half
+        {
+            float w = Math.Clamp(l - gap, minLeft, viewSize.X);
+            return (Vector2.Zero, new Vector2(w, viewSize.Y));
+        }
+        float x = Math.Clamp(r + gap, 0f, Math.Max(0f, viewSize.X - minLeft));
+        return (new Vector2(x, 0f), new Vector2(viewSize.X - x, viewSize.Y));
+    }
+
     // =====================================================================
     //  Playback canvas: locked in-game view + transport + timeline.
     // =====================================================================
@@ -1942,7 +2324,8 @@ public sealed unsafe partial class App
         // --- the locked game view (wheel = zoom, drag = pan, double-click = fit) ---
         int vw = _gameView.W, vh = _gameView.H;
         if (vw <= 0 || vh <= 0) return;
-        float fit = MathF.Min(viewSize.X / vw, viewSize.Y / vh);
+        var (fitOff, fitSize) = FitRegion(pos, viewSize);
+        float fit = MathF.Min(fitSize.X / vw, fitSize.Y / vh);
         if (fit >= 1f) fit = MathF.Floor(fit);   // pixel-perfect integer fit
         float scale = _playZoom > 0 ? _playZoom : fit;
 
@@ -1955,9 +2338,9 @@ public sealed unsafe partial class App
         var io = ImGui.GetIO();
         var mouse = ImGui.GetMousePos();
 
-        Vector2 CenterOff(float s) => new(
-            MathF.Floor((viewSize.X - vw * s) * 0.5f),
-            MathF.Floor((viewSize.Y - vh * s) * 0.5f));
+        Vector2 CenterOff(float s) => fitOff + new Vector2(
+            MathF.Floor((fitSize.X - vw * s) * 0.5f),
+            MathF.Floor((fitSize.Y - vh * s) * 0.5f));
         var imgPos = pos + CenterOff(scale) + _playPan;
 
         if (viewHovered && io.MouseWheel != 0)
@@ -2006,10 +2389,13 @@ public sealed unsafe partial class App
             dl.AddRect(vp0, vp1, Gfx.Rgba(255, 225, 120, 200), 0f, 0, 1.5f);
             dl.AddText(vp0 + new Vector2(4, 2), Gfx.Rgba(255, 225, 120, 170), "screen");
         }
-        DrawPlaybackOverlay(dl, pb, imgPos, scale, vw, vh, mouse,
+        // One mapping for everything laid over the frame, so markers, hover, the readout and
+        // the guns all agree with the picture — including when it is presented upside-down.
+        var view = new PlayView(pb.Sim, _simExtendedView, imgPos, scale, vw, vh);
+        DrawPlaybackOverlay(dl, pb, view, scale, mouse,
             viewHovered && !viewActive, pos, viewSize);
-        HandlePlayerMarker(dl, imgPos, scale, mouse, viewHovered, pos, viewSize);
-        HandleClickKill(imgPos, scale, mouse, viewHovered);
+        HandlePlayerMarker(dl, view, mouse, viewHovered, pos, viewSize);
+        HandleClickKill(view, mouse, viewHovered);
         string loopOsd = "";
         var activeGate = pb.LoopRegions.FirstOrDefault(r =>
             pb.CurrentTick >= r.StartTick && pb.CurrentTick <= r.EndTick);
@@ -2097,14 +2483,72 @@ public sealed unsafe partial class App
         if (TransportBtn("##pbend", Glyph.JumpEnd, "Jump to end", bsz, gap: 12f))
         { pb.SeekTo(pb.Duration); _playing = false; }
 
-        if (TextBtn("Fit", new Vector2(MathF.Round(fh * 1.7f), fh),
-                "Reset zoom and pan (or double-click the view)\nwheel = zoom, drag = pan", 12f))
-        { _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
+        // The tail of the row has to survive a narrow canvas -- pinning the HUD into its own
+        // column takes ~300px out of it. Nothing here wraps or scrolls, so instead the parts
+        // give way in order of how well they earn their space, and the controls never move.
+        const float comboW = 64f;
+        float fitW = MathF.Round(fh * 1.7f);
+        float W(string s) => ImGui.CalcTextSize(s).X;
+        float ChipW(string s) => MathF.Ceiling(W(s) + ImGui.GetStyle().FramePadding.X * 2f + 10f);
 
-        ImGui.AlignTextToFramePadding();
-        ImGui.TextDisabled("speed");
-        ImGui.SameLine(0, 6);
-        ImGui.SetNextItemWidth(64);
+        // First to give: the layout chips' labels, down to a word each, once the full ones
+        // would crowd out the speed control. The ## ids stay fixed so the buttons do not
+        // lose their hover/active state as the labels change.
+        bool roomy = ImGui.GetContentRegionAvail().X >=
+            fitW + 5f + ChipW("UI fit") + 4f + ChipW("Pin right") + 12f + comboW;
+        string uiLbl = roomy ? "UI fit" : "UI", pinLbl = roomy ? "Pin right" : "Pin";
+
+        if (TextBtn("Fit", new Vector2(fitW, fh),
+                "Fit the whole panel, zoom and pan reset (or double-click the view).\n" +
+                "The frame is free to sit under the controls HUD.\nwheel = zoom, drag = pan", 5f))
+        { _fitAroundHud = false; _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
+
+        // The two layout toggles: fit clear of the HUD, and keep the HUD somewhere to be clear of.
+        // Sized off the label rather than a multiple of the row height, which clipped them.
+        if (Chip($"{uiLbl}##uifit", _fitAroundHud, AcDisplay, ChipW(uiLbl),
+                "Fit the view into what the floating \"Playback controls\" HUD leaves free,\n" +
+                "so the frame sits beside the panel instead of under it. Stays armed:\n" +
+                "resizes and folding HUD sections re-fit to the space actually left.\n" +
+                "Pinned right, the HUD is already out of the view and this does nothing."))
+        { _fitAroundHud = !_fitAroundHud; _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
+        ImGui.SameLine(0, 4);
+        if (Chip($"{pinLbl}##pinright", _hudPinRight, AcDisplay, ChipW(pinLbl),
+                "Turn the \"Playback controls\" HUD into a fixed column down the right edge\n" +
+                "of the window -- the mirror of the controls column on the left -- instead\n" +
+                "of a panel floating over the playfield. The view keeps the rest."))
+        { _hudPinRight = !_hudPinRight; _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
+        ImGui.SameLine(0, 12);
+
+        // What is actually left for the tail, measured rather than modelled.
+        float left = ImGui.GetContentRegionAvail().X;
+        string endTag = pb.LoopDetected
+            ? $"  [{pb.LoopRegions.Count} loop/hold section{(pb.LoopRegions.Count == 1 ? "" : "s")} previewed]"
+            : pb.EndedNaturally ? "" : "  [capped]";
+        string ticks = $"{pb.CurrentTick}/{pb.Duration}";
+        float TailW(bool word, string tick) => (word ? W("speed") + 6f : 0f) + comboW
+            + (tick.Length > 0 ? 14f + W(tick) : 0f);
+
+        // Richest tail that fits. The loop/cap tag goes first (the timeline marks those
+        // sections anyway), then the labelling words, then the tick counter itself -- the
+        // OSD over the view still has the clock. The last entry is the combo alone, which
+        // always fits: the fallback to a floating HUD keeps the canvas wider than that.
+        var tails = new (bool Word, string Tick)[]
+        {
+            (true,  $"tick {ticks}{endTag}"),
+            (true,  $"tick {ticks}"),
+            (true,  ticks),
+            (false, ticks),
+            (false, ""),
+        };
+        var tail = tails.FirstOrDefault(t => TailW(t.Word, t.Tick) <= left, tails[^1]);
+
+        if (tail.Word)
+        {
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextDisabled("speed");
+            ImGui.SameLine(0, 6);
+        }
+        ImGui.SetNextItemWidth(comboW);
         int speedIdx = Array.IndexOf(SpeedSteps, _playSpeed);
         if (speedIdx < 0) speedIdx = 2;
         var speedNames = SpeedSteps.Select(s => $"x{s:0.##}").ToArray();
@@ -2112,12 +2556,14 @@ public sealed unsafe partial class App
             _playSpeed = SpeedSteps[speedIdx];
         if (ImGui.IsItemHovered()) ImGui.SetTooltip("Playback speed (game runs at 35 ticks/s)");
 
-        ImGui.SameLine(0, 14);
-        ImGui.AlignTextToFramePadding();
-        string endTag = pb.LoopDetected
-            ? $"  [{pb.LoopRegions.Count} loop/hold section{(pb.LoopRegions.Count == 1 ? "" : "s")} previewed]"
-            : pb.EndedNaturally ? "" : "  [capped]";
-        ImGui.TextDisabled($"tick {pb.CurrentTick}/{pb.Duration}{endTag}");
+        if (tail.Tick.Length > 0)
+        {
+            ImGui.SameLine(0, 14);
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextDisabled(tail.Tick);
+            if (endTag.Length > 0 && !tail.Tick.EndsWith(']') && ImGui.IsItemHovered())
+                ImGui.SetTooltip(endTag.Trim());
+        }
 
         DrawTimeline(pb);
     }
@@ -2344,36 +2790,30 @@ public sealed unsafe partial class App
     /// off in the layer list is neither marked nor picked, and the tile readout follows
     /// the live scroll cursors.
     /// </summary>
-    private void DrawPlaybackOverlay(ImDrawListPtr dl, SimPlayback pb, Vector2 imgPos,
-        float scale, int vw, int vh, Vector2 mouse, bool hovered,
-        Vector2 viewPos, Vector2 viewSize)
+    private void DrawPlaybackOverlay(ImDrawListPtr dl, SimPlayback pb, in PlayView view,
+        float scale, Vector2 mouse, bool hovered, Vector2 viewPos, Vector2 viewSize)
     {
         if (!hovered) _hoverInfo = "";
         if (_objMode == 2 && !hovered) return;
 
-        // The texture is the whole buffer in extended view, else the cropped playfield.
-        float texOX = _simExtendedView ? 0 : GameSim.OX + GameSim.ViewX;
-        float texOY = _simExtendedView ? 0 : GameSim.OY;
-        Vector2 ToScreen(float bx, float by) =>
-            imgPos + new Vector2(bx - texOX, by - texOY) * scale;
-        bool InView(float bx, float by) =>
-            bx >= texOX && by >= texOY && bx < texOX + vw && by < texOY + vh;
-
         pb.Sim.CollectEnemies(_playEnemies, _objCatMask);
 
-        var m = (mouse - imgPos) / scale + new Vector2(texOX, texOY);
+        // Buffer space is what the sim reports and what it picks in, so the cursor is taken
+        // there once — through the presentation flip, if there is one — and everything below
+        // compares in that one space, upside-down screen or not.
+        var m = view.ToBuffer(mouse);
         bool canPick = hovered && _objMode != 2;
         float r = Math.Clamp(3.5f * scale, 3f, 9f);
         GameSim.EnemyView? pick = null;
         for (int i = _playEnemies.Count - 1; i >= 0; i--)   // front-most band first
         {
             var e = _playEnemies[i];
-            if (!InView(e.CenterX, e.CenterY)) continue;
+            if (!view.InView(e.CenterX, e.CenterY)) continue;
             if (canPick && pick == null &&
                 Math.Abs(m.X - e.CenterX) <= e.HalfW && Math.Abs(m.Y - e.CenterY) <= e.HalfH)
                 pick = e;
             if (_objMode != 1) continue;
-            var p = ToScreen(e.CenterX, e.CenterY);
+            var p = view.ToScreen(e.CenterX, e.CenterY);
             uint col = ObjectPlacer.CategoryColor(e.Category);
             dl.AddCircleFilled(p, r, col);
             dl.AddCircle(p, r, Gfx.Rgba(0, 0, 0, 180));
@@ -2387,14 +2827,14 @@ public sealed unsafe partial class App
             // Same affordance as the map view's sprite hover: the sprite cell outlined in
             // its category colour (12x14 per blit, 24x28 for a 2x2).
             var one = new Vector2(1, 1);
-            dl.AddRect(ToScreen(hit.CenterX - hit.HalfW, hit.CenterY - hit.HalfH) - one,
-                       ToScreen(hit.CenterX + hit.HalfW, hit.CenterY + hit.HalfH) + one,
-                       ObjectPlacer.CategoryColor(hit.Category));
+            var (b0, b1) = view.Box(hit.CenterX - hit.HalfW, hit.CenterY - hit.HalfH,
+                                    hit.CenterX + hit.HalfW, hit.CenterY + hit.HalfH);
+            dl.AddRect(b0 - one, b1 + one, ObjectPlacer.CategoryColor(hit.Category));
             ShowEnemyTooltip(hit);
         }
 
         int bx = (int)MathF.Floor(m.X), by = (int)MathF.Floor(m.Y);
-        if (!InView(bx, by)) { _hoverInfo = ""; return; }
+        if (!view.InView(bx, by)) { _hoverInfo = ""; return; }
         string where = $"screen {bx - GameSim.OX},{by - GameSim.OY}";
         _hoverInfo = pb.Sim.TryPickTile(bx, by, out var t)
             ? $"{where}   BG{t.Layer + 1} col {t.Col} row {t.Row}  cell={t.Cell} shapeId={t.ShapeId}"
