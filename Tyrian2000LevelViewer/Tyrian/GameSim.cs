@@ -65,6 +65,13 @@ public sealed class GameSim
 
     // --- sim parameters (fixed per run; changing them requires a rebuild) ---
     public int Difficulty = 2;          // 0 wimp .. 10; 2 = normal
+    /// <summary>The engine's galagaMode, set by a ']g' in the episode script — only
+    /// ** ALE ** (ep1 #18) and SQUADRON (ep4 #18) carry one. It rewrites enemy fire
+    /// wholesale (see <see cref="FireTurrets"/>) and pins the difficulty at NORMAL, so
+    /// without it those two levels play with normal turret rates and are far more hostile
+    /// than the real game. Defaulted from the level in the constructor; a sim parameter,
+    /// so overriding it needs a rebuild.</summary>
+    public bool GalagaMode;
     public float ScrollMult = 1f;       // terrain speed what-if multiplier
     public bool FireEnabled = true;     // simulate enemy turrets
     public bool PreviewEnemyGates = true; // keep PreviewLoopCycles boss loops, then continue as if defeated
@@ -74,7 +81,8 @@ public sealed class GameSim
     /// widens from 264 to 299px and the player range, parallax, spotlight and enemy/shot cull
     /// bounds all follow, exactly as the widescreen source derives them (notes.md §Widescreen).
     /// A sim parameter — it changes the simulation, so a change requires a rebuild. Off =
-    /// vanilla, byte-for-byte.</summary>
+    /// vanilla, byte-for-byte (the one exception being <see cref="WideStarfield"/>, which is
+    /// offered in both modes).</summary>
     public bool Widescreen;
     /// <summary>Widescreen-only "Extra Parallax" (OpenTyrian2000-Engaged commits edd8118 +
     /// ae13d1c): the near terrain layer pans across EXACTLY its 336px map — mapXOfs sweeps 36
@@ -85,10 +93,30 @@ public sealed class GameSim
     /// Only meaningful with <see cref="Widescreen"/>; a sim parameter, so a change requires a
     /// rebuild.</summary>
     public bool ExpandedParallax;
+    /// <summary>Run the widescreen build's rewritten starfield instead of vanilla's. Off
+    /// restores the original 100 stars on a 16-bit linear position, which stop seven rows above
+    /// the playfield bottom (at either width) and never reach the widened right edge. A sim
+    /// parameter, not a draw option: the two fields hold different state and draw a different
+    /// number of stars from the level's RNG at init, so switching needs a rebuild — and shifts
+    /// enemy spawns, exactly as the difference does between the real builds. Unlike
+    /// <see cref="ExpandedParallax"/> / <see cref="MirrorLayers"/> this is NOT gated on
+    /// <see cref="Widescreen"/>: the bug it fixes is just as visible at the vanilla width. It is
+    /// therefore the one setting that can make vanilla playback differ from the stock engine —
+    /// leave it off for a byte-for-byte vanilla run.</summary>
+    public bool WideStarfield = true;
     /// <summary>Playfield crop width in effect: <see cref="WideViewW"/> (299) in widescreen,
     /// else vanilla <see cref="ViewW"/> (264). Drives the display crop, screen filter, flip
     /// and spotlight geometry.</summary>
     public int PlayfieldWidth => Widescreen ? WideViewW : ViewW;
+    /// <summary>The widescreen build's surface width (video.h vga_width). The playfield's
+    /// right edge (PLAYFIELD_RIGHT = 322) lives past the vanilla 320, so anything the engine
+    /// walks per scanline has to run this far.</summary>
+    private const int VgaWidth = 356;
+    /// <summary>Width of the engine surface the frame is composed on: <see cref="VgaWidth"/>
+    /// in widescreen, else the vanilla <see cref="ScreenW"/>. Everything the engine derives
+    /// from surface->w / surface->pitch follows it — the smoothie filters, the mirrored-layer
+    /// edge strip and the starfield's spread.</summary>
+    public int SurfaceWidth => Widescreen ? VgaWidth : ScreenW;
 
     // --- view options (draw-only; safe to change without a rebuild + redraw) ---
     public bool ExtendedDraw;           // render beyond the vanilla screen bounds
@@ -218,6 +246,184 @@ public sealed class GameSim
         into.Sort((a, b) => BandDrawRank(a.Band).CompareTo(BandDrawRank(b.Band)));
     }
 
+    private readonly List<EnemyView> _pickScratch = new();
+
+    /// <summary>
+    /// Slot of the front-most enemy whose sprite cell contains the buffer-space point, or -1.
+    /// Uses <see cref="CollectEnemies"/>'s own footprints and visibility rules, so what the
+    /// viewer boxes on hover is exactly what a click hits. Score items (already-dropped
+    /// pickups) are skipped, matching the engine's shot test — it only collides with slots in
+    /// the live state.
+    /// </summary>
+    public int PickEnemyAt(int bufX, int bufY, int categoryMask = ~0)
+    {
+        CollectEnemies(_pickScratch, categoryMask);
+        for (int i = _pickScratch.Count - 1; i >= 0; i--)   // front-most band last
+        {
+            var e = _pickScratch[i];
+            if (_avail[e.Slot] != 0) continue;
+            if (Math.Abs(bufX - e.CenterX) <= e.HalfW && Math.Abs(bufY - e.CenterY) <= e.HalfH)
+                return e.Slot;
+        }
+        return -1;
+    }
+
+    /// <summary>Damage that outlives any armour value the data can hold (the engine's cap is
+    /// 255), so one hit always reaches the kill branch.</summary>
+    public const int InstantKillDamage = 30000;
+
+    /// <summary>Palette band the damage flash paints with. Tyrian uses the firing weapon's
+    /// `shipblastfilter`; with no player weapon here, the front-weapon slot (1, the
+    /// Pulse-Cannon every ship starts with) stands in for it. Falls back to the engine's own
+    /// red hit band if that entry carries no tint.</summary>
+    public byte HitFilter
+    {
+        get { byte f = _wd.Get(1).ShipBlastFilter; return f != 0 ? f : (byte)0x70; }
+    }
+
+    /// <summary>
+    /// Hit the enemy in <paramref name="slot"/> for <paramref name="damage"/>, running the
+    /// engine's own shot-collision outcome (tyrian2.c draw_player_shot): every segment sharing
+    /// the hit enemy's link number dies with it — which is what takes a multi-part boss apart in
+    /// one go — `enemydie` successors spawn, the damaged-state art swaps in once armour crosses
+    /// `edlevel`, and each corpse gets the explosion its enemyDat asks for. There is no player
+    /// here, so the original's score / cash / cube payout, sound queue and the shot's own
+    /// ice+filter payload are dropped; everything that shows on screen is kept.
+    /// <paramref name="explosions"/> off suppresses the débris only — what dies still dies.
+    /// Returns false if the slot held no live enemy.
+    /// </summary>
+    public bool DamageEnemy(int slot, int damage, bool explosions)
+    {
+        if ((uint)slot >= (uint)_enemy.Length || _avail[slot] != 0) return false;
+
+        int armorleft = _enemy[slot].armorleft;
+        int link = _enemy[slot].linknum;
+        if (link == 0) link = 255;
+
+        if (armorleft < 255)   // 255 = invulnerable: no bar flash, no tint, no armour lost
+        {
+            if (link == _s.bossLink0) _s.bossColor0 = 6;
+            if (link == _s.bossLink1) _s.bossColor1 = 6;
+
+            // Tyrian's damage flash: a hit repaints the enemy in the firing weapon's blast
+            // band for exactly one drawn frame (JE_drawEnemy clears `filter` right after
+            // blitting it), and every linked segment flashes with it. The engine restricts
+            // that to `enemyground` sprites — where a shot's blast physically lands — but a
+            // click has no blast, and feedback that only shows on some enemies is no feedback,
+            // so the tint goes on whatever was hit.
+            byte tint = HitFilter;
+            _enemy[slot].filter = tint;
+            for (int i = 0; i < _enemy.Length; i++)
+                if (_avail[i] != 1 && _enemy[i].linknum == link)
+                    _enemy[i].filter = tint;
+        }
+
+        if (armorleft > damage) DamageEnemySurvived(slot, damage, link, armorleft, explosions);
+        else KillEnemyGroup(slot, link, explosions);
+        return true;
+    }
+
+    /// <summary>The hit was survivable: take the armour off, and if that crosses the enemy's
+    /// `edlevel` threshold, flip it (and its linked siblings) into their damaged state.</summary>
+    private void DamageEnemySurvived(int slot, int damage, int link, int armorleft, bool explosions)
+    {
+        ref Enemy hit = ref _enemy[slot];
+        if (hit.armorleft != 255)
+        {
+            hit.armorleft = B8(hit.armorleft - damage);
+            // The engine sparks at the shot; with no shot, the enemy taking it is the spot.
+            if (explosions) SetupExplosion(hit.ex + hit.mapoffset, hit.ey, 0, 0);
+        }
+
+        // engine: (armorleft - damage <= edlevel) && ((!edamaged) ^ (edani < 0))
+        if (armorleft - damage > hit.edlevel || !(!hit.edamaged ^ (hit.edani < 0))) return;
+
+        for (int i = 0; i < _enemy.Length; i++)
+        {
+            if (_avail[i] == 1) continue;
+            int ln = _enemy[i].linknum;
+            if (i != slot && !(link != 255 &&
+                    ((_enemy[i].edlevel > 0 && ln == link) ||
+                     (_s.enemyContinualDamage && link - 100 == ln) ||
+                     (ln > 40 && ln / 20 == link / 20 && ln <= link))))
+                continue;
+
+            ref Enemy e = ref _enemy[i];
+            e.enemycycle = 1;
+            e.edamaged = !e.edamaged;
+            if (e.edani != 0)
+            {
+                e.ani = Math.Abs(e.edani);
+                e.aniactive = 1; e.animax = 0; e.animin = e.edgr;
+                e.enemycycle = B8(e.animin - 1);
+            }
+            else if (e.edgr > 0)
+            {
+                e.egr[0] = (ushort)e.edgr;
+                e.ani = 1; e.aniactive = 0; e.animax = 0; e.animin = 1;
+            }
+            else _avail[i] = 1;
+            e.aniwhenfire = 0;
+            if (e.armorleft > (byte)e.edlevel) e.armorleft = (byte)e.edlevel;
+
+            if (!explosions) continue;
+            int tx = e.ex + e.mapoffset;
+            if (DatFor(e.enemytype).Esize != 1) SetupExplosion(tx, e.ey - 6, 0, 1);
+            else SetupExplosionLarge(e.enemyground, e.explonum / 2, tx, e.ey);
+        }
+    }
+
+    /// <summary>The armour ran out: destroy the whole linked formation the hit belonged to.</summary>
+    private void KillEnemyGroup(int slot, int link, bool explosions)
+    {
+        if (link == 254 && _s.superEnemy254Jump > 0) EventJump((ushort)_s.superEnemy254Jump);
+
+        for (int i = 0; i < _enemy.Length; i++)
+        {
+            if (_avail[i] == 1) continue;
+            int ln = _enemy[i].linknum;
+            if (i != slot && link != 254 && !(link != 255 &&
+                    (link == ln || link - 100 == ln ||
+                     (ln > 40 && ln / 20 == link / 20 && ln <= link))))
+                continue;
+
+            ref Enemy e = ref _enemy[i];
+            int sx = e.ex + e.mapoffset;
+            if (e.special && e.flagnum is >= 1 and <= 10)
+                _s.globalFlags[e.flagnum - 1] = e.setto;
+
+            // Whatever this enemy leaves behind — a powerup, a wreck, the next boss stage.
+            if (e.enemydie > 0)
+            {
+                int offset = DatFor(e.enemydie).Value > 30000 ? 0 : i - i % 25;
+                int made = NewEnemy(offset, e.enemydie, 0);
+                if (made != 0)
+                {
+                    ref Enemy spawn = ref _enemy[made - 1];
+                    spawn.scoreitem = spawn.evalue != 0;
+                    spawn.ex = e.ex;
+                    spawn.ey = e.ey;
+                }
+            }
+
+            if (e.edlevel == -1 && link == ln)   // becomes a collectable rather than dying
+            {
+                e.edlevel = 0;
+                _avail[i] = 2;
+                e.egr[0] = (ushort)e.edgr;
+                e.ani = 1; e.aniactive = 0; e.animax = 0; e.animin = 1;
+                e.edamaged = true; e.enemycycle = 1;
+            }
+            else _avail[i] = 1;
+
+            if (!explosions) continue;
+            if (DatFor(e.enemytype).Esize == 1)
+                SetupExplosionLarge(e.enemyground, e.explonum, sx, e.ey);
+            else
+                SetupExplosion(sx, e.ey, 0, 1);
+        }
+    }
+
     /// <summary>A background cell under a point, resolved through the live scroll cursors.</summary>
     public readonly record struct TileHit(int Layer, int Row, int Col, int Cell, int ShapeId);
 
@@ -251,10 +457,16 @@ public sealed class GameSim
         {
             bool visible = layer == 0 ? ShowBg1 : layer == 1 ? ShowBg2 : ShowBg3;
             if (!visible) continue;
+            // Layer 2 rides layer 1's X phase while the water smoothie welds them (see
+            // Bg2WaterSync); the blend variant never does, and only background2over == 3
+            // draws layer 2 unblended without background2notTransparent.
+            bool bg2Blend = !_s.background2notTransparent && _s.background2over != 3;
+            bool bg2Sync = Bg2WaterSync(bg2Blend);
             (int posIdx, int bp, int xPos, int backPos) = layer switch
             {
                 0 => (_s.mapYPos, _s.mapXbp, _s.mapXPos, _s.backPos),
-                1 => (_s.mapY2Pos, _s.mapX2bp, _s.mapX2Pos, _s.backPos2),
+                1 => (_s.mapY2Pos, bg2Sync ? _s.mapXbp : _s.mapX2bp,
+                      bg2Sync ? _s.mapXPos : _s.mapX2Pos, _s.backPos2),
                 _ => (_s.mapY3Pos, _s.mapX3bp, _s.mapX3Pos, _s.backPos3),
             };
             int cols = layer == 2 ? 15 : 14;
@@ -330,7 +542,10 @@ public sealed class GameSim
 
     internal struct Expl { public int ttl, x, y, sprite, deltaY; public bool fixedPosition; }
     internal struct RepExpl { public int delay, ttl, x, y; public bool big; }
-    internal struct Star { public ushort position; public int speed; public byte color; }
+    /// <summary><see cref="position"/> is the vanilla star (one JE_word linear offset that
+    /// relies on 16-bit overflow to wrap); <see cref="x"/>/<see cref="y"/> are the widescreen
+    /// build's, where only the row advances. Each path uses its own fields.</summary>
+    internal struct Star { public ushort position; public int x; public float y; public int speed; public byte color; }
 
     /// <summary>Every scalar of engine state, one value-copyable struct.</summary>
     internal struct S
@@ -363,7 +578,12 @@ public sealed class GameSim
         public bool previewGateTimerPause;
         public bool randomExplosions, readyToEndLevel, endLevel, finished;
         public int difficultyLevel;
+        public int galagaShotFreq;                     // galagaMode fire chance, in 400
         public int starfieldSpeed;
+        /// <summary>Widescreen starfield only: rotates the above-screen respawn height so
+        /// consecutive recycles stagger across the spawn band. RNG-free by design — the
+        /// per-tick starfield must never touch the gameplay stream.</summary>
+        public int starSpawnPhase;
         public int enemyOnScreen;
         public bool enemyStillExploding;
         public int bossLink0, bossLink1, bossColor0, bossColor1, bossArmor0, bossArmor1;
@@ -453,6 +673,12 @@ public sealed class GameSim
             _map[layer] = m;
         }
         _maxEvent = lv.Events.Length;
+
+        // The ']g' that JE_loadMap reads out of the episode script belongs to the level, not
+        // to the caller, so resolve it here — the viewer, --simshot and --simtest all get it
+        // without plumbing a flag through.
+        foreach (var item in ep.Levels)
+            if (item.FileNum == lv.FileNum) { GalagaMode = item.GalagaMode; break; }
     }
 
     /// <summary>Reset to the level start (JE_loadMap tail + JE_main start_level_first).</summary>
@@ -506,17 +732,32 @@ public sealed class GameSim
         _s.filterActive = true; _s.filterFade = true; _s.filterFadeStart = false;
         _s.levelFilter = -99; _s.levelBrightness = -14; _s.levelBrightnessChg = 1;
         _s.background2notTransparent = false;
-        _s.difficultyLevel = Difficulty;
+        // JE_loadMap pins a Galaga level at NORMAL whatever the player picked (tyrian2.c:2263),
+        // so the difficulty parameter genuinely has no effect on those two levels.
+        _s.difficultyLevel = GalagaMode ? 2 : Difficulty;
+        _s.galagaShotFreq = 0;
         // keeps map from scrolling past the top
         _s.bkWrap1 = _s.bkWrap1to = 1 * 14;
         _s.bkWrap2 = _s.bkWrap2to = 1 * 14;
         _s.bkWrap3 = _s.bkWrap3to = 1 * 15;
 
+        // initialize_starfield. Both models draw from the gameplay RNG, and the widescreen
+        // build's larger field consumes more of it — exactly as the real build does, so a
+        // widescreen run's stream legitimately differs from a vanilla one.
+        bool wideStars = WideStarfield;
+        int starCount = wideStars ? WideStarCount : VanillaStarCount;
+        if (_stars.Length != starCount) _stars = new Star[starCount];
         for (int i = _stars.Length - 1; i >= 0; i--)
         {
-            _stars[i].position = (ushort)(_rng.Next() % 320 + _rng.Next() % 200 * Pitch);
+            if (wideStars)
+            {
+                _stars[i].x = (int)(_rng.Next() % (uint)SurfaceWidth);
+                _stars[i].y = _rng.Next() % StarfieldWrap;
+            }
+            else
+                _stars[i].position = (ushort)(_rng.Next() % 320 + _rng.Next() % 200 * Pitch);
             _stars[i].speed = (int)(_rng.Next() % 3) + 2;
-            _stars[i].color = (byte)(_rng.Next() % 16 + 0x90);
+            _stars[i].color = (byte)(_rng.Next() % 16 + StarfieldHue);
         }
 
         ComputeParallax();
@@ -921,17 +1162,37 @@ public sealed class GameSim
         int lastCol = Widescreen ? 13 : 11;          // rightmost on-screen tile column
         int xshift = Widescreen ? PlayfieldXShift : 0;
         // Mirror off + expanded parallax: the flat map layout would fill the over-panned strip
-        // (offset >= 24 <=> bp <= 0) with the PREVIOUS row's right columns -- a phantom second
-        // copy of the map on the left. Skip those foreign-row tiles so the uncovered edge reads
-        // black instead (user request; the build's notes call black the intent). Aligned strips
-        // (leftRow == rightRow) are no-ops, so event-77 mid-row seats (SQUADRON's backdrop) keep
-        // their authored wrap except while actually over-panned.
-        bool suppressWrap = !mirror && ExpandedParallax && bp <= 0;
+        // (the columns panned past the layer's left edge) with the PREVIOUS row's right columns
+        // -- a phantom second copy of the map on the left. Skip exactly those, so the uncovered
+        // edge reads black instead (user request; the build's notes call black the intent). The
+        // test is the layer column, the same `c < 0` the mirror branch keys on, NOT the tile's
+        // map row: a strip seated mid-row by event 77 (SQUADRON's backdrop, flat index 4000)
+        // straddles two map rows at every pan, and comparing rows blacked out the whole authored
+        // left-hand wrap along with the over-pan.
+        bool suppressWrap = !mirror && ExpandedParallax;
 
         int iMin = ExtendedDraw ? -6 : -1;
         int iMax = ExtendedDraw ? 7 : 6;
         int tMin = ExtendedDraw ? -4 : 0;
-        int tMax = ExtendedDraw ? 16 : lastCol;
+        // Mirrored Layers right-edge strip (commit b529895 bg_edge_px). A row is exactly
+        // (lastCol+1)*24 = 336px -- the width of the near map -- so at the far-right pan extreme
+        // it ends flush with PLAYFIELD_RIGHT and nothing covers the columns past it. The lava and
+        // water smoothies SAMPLE up to 7px to the right of the pixel they write, so at the
+        // screen's right edge they read that black fill; their per-scanline waver is a triangle
+        // wave, which turns the miss into the sawtooth "black triangles" seen on EP1 ASSASSIN /
+        // EP4 LAVA RUN, and the feedback through the row above/below bleeds it further left over
+        // frames. Append up to one more tile column, clipped to the surface width so the strip
+        // can never run past it; the mirror branch below already resolves that out-of-row column
+        // as a flipped edge column, so it is simply more of the layer. Inert with mirroring off
+        // (out-of-row columns have no defined content there -- they wrap into the next map row)
+        // and in extended view, which already draws whole columns well past the surface.
+        int edgePx = 0;
+        if (mirror && !ExtendedDraw)
+        {
+            int room = SurfaceWidth - (xPos + xshift) - (lastCol + 1) * 24;
+            edgePx = room <= 0 ? 0 : Math.Min(room, 24);
+        }
+        int tMax = ExtendedDraw ? 16 : lastCol + (edgePx > 0 ? 1 : 0);
 
         var tgt = _tgt;
         for (int i = iMin; i <= iMax; i++)
@@ -960,19 +1221,20 @@ public sealed class GameSim
                 {
                     if (t < 0 && FloorDiv(idx, cols) != leftRow) continue;
                     if (t > lastCol && FloorDiv(idx, cols) != rightRow) continue;
-                    if (suppressWrap && FloorDiv(idx, cols) != rightRow) continue;
+                    if (suppressWrap && col0 + t < 0) continue;
                 }
                 if ((uint)idx >= (uint)map.Length) continue;
                 byte[]? data = map[idx];
                 if (data == null) continue;
                 int bx = xPos + xshift + t * 24;
+                int tileW = edgePx > 0 && t > lastCol ? edgePx : 24;   // clipped edge strip
                 for (int ty = 0; ty < 28; ty++)
                 {
                     int dy = y + ty + OY;
                     if ((uint)dy >= BufH) continue;
                     int src = ty * 24;
                     int dstRow = dy * BufW;
-                    for (int tx = 0; tx < 24; tx++)
+                    for (int tx = 0; tx < tileW; tx++)
                     {
                         byte v = data[src + (flip ? 23 - tx : tx)];
                         if (v == 0) continue;
@@ -997,14 +1259,24 @@ public sealed class GameSim
             DrawBgLayer(0, _s.mapYPos, _s.mapXbp, _s.mapXPos, _s.backPos, blend: false);
     }
 
+    /// <summary>backgrnd.c draw_background_2: "the water effect combines background 1 and 2 by
+    /// synchronizing the x coordinate" — while the water smoothie runs, layer 2 pans on layer
+    /// 1's X phase (mapXPos / mapXbpPos) instead of its own. Only the plain variant does this;
+    /// draw_background_2_blend always uses layer 2's own, so the weld follows the same condition
+    /// the blend does. CORE is the level that shows it: without the weld its overlay drifts
+    /// against the terrain it is supposed to ripple with.</summary>
+    private bool Bg2WaterSync(bool blend) => !blend && _s.smoothies[1] != 0;
+
     private void DrawBackground2(bool draw, bool allowBlend = true)
     {
         if (_s.map2YDelayMax > 1 && _s.backMove2 < 2)
             _s.backMove2 = _s.map2YDelay == 1 ? 1 : 0;
 
         bool blend = allowBlend && !_s.background2notTransparent;   // wild detail default
+        bool sync = Bg2WaterSync(blend);
         if (draw && ShowBg2)
-            DrawBgLayer(1, _s.mapY2Pos, _s.mapX2bp, _s.mapX2Pos, _s.backPos2, blend);
+            DrawBgLayer(1, _s.mapY2Pos, sync ? _s.mapXbp : _s.mapX2bp,
+                sync ? _s.mapXPos : _s.mapX2Pos, _s.backPos2, blend);
 
         if (--_s.map2YDelay == 0)
         {
@@ -1044,39 +1316,54 @@ public sealed class GameSim
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int VIdx(int p) => (p / 320 + OY) * BufW + p % 320 + OX;   // vanilla-linear -> buffer
 
+    /// <summary>Surface-linear index -> buffer, for a scanline stride of <paramref name="w"/>
+    /// (the engine's surface->pitch). Identical to <see cref="VIdx"/> at the vanilla 320.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int SIdx(int p, int w) => (p / w + OY) * BufW + p % w + OX;
+
     private void ApplySmoothie(SmoothieKind kind)
     {
         byte[] src = _tgt;
         byte[] dst = Screen;
+        // The filters walk vga_width per scanline (backgrnd.c), which is 356 in widescreen --
+        // 36 px past the vanilla 320, and the playfield's right edge (PLAYFIELD_RIGHT = 322)
+        // sits inside that extra span. Running them at a fixed 320 left the last 3 displayed
+        // columns unfiltered: raw terrain beside the smoothed image.
+        int W = SurfaceWidth;
         if (!ReferenceEquals(src, dst))
         {
-            CopyMargins(src, dst);   // margins bypass the filters (they cover the vanilla area)
+            CopyMargins(src, dst, W);   // margins bypass the filters (they cover the surface)
             int filteredRows = kind is SmoothieKind.Lava or SmoothieKind.Water ? 185 : 184;
-            CopyVanillaTail(src, dst, filteredRows);
+            CopySurfaceTail(src, dst, filteredRows, W);
         }
 
         switch (kind)
         {
             case SmoothieKind.Lava:
             {
-                int w = 320 * 185 - 1;
-                int p = 320 * 185;
+                int w = W * 185 - 1;
+                int p = W * 185;
                 for (int y = 185 - 1; y >= 0; y--)
                 {
-                    for (int x = 320 - 1; x >= 0; x -= 8)
+                    // waver steps once per group of 8 and the row's last group is short when
+                    // the width is not a multiple of 8 (356 = 44*8 + 4), so w outruns p by
+                    // those 4 px per row -- the engine's own drift; reproduce it literally.
+                    for (int x = W; x > 0; )
                     {
                         int waver = Math.Abs(((w >> 9) & 0x0F) - 8) - 1;
                         w -= 8;
-                        for (int xi = 8 - 1; xi >= 0; xi--)
+                        int count = Math.Min(8, x);
+                        x -= count;
+                        for (int xi = 0; xi < count; xi++)
                         {
                             p--;
                             int value = 0;
                             if (p + waver >= 0)
-                                value += (src[VIdx(p + waver)] & 0x0F) * 2;
-                            value += dst[VIdx(p + waver + 320)] & 0x0F;
-                            if (p + waver - 320 >= 0)
-                                value += dst[VIdx(p + waver - 320)] & 0x0F;
-                            dst[VIdx(p)] = (byte)((value / 4) | 0x70);
+                                value += (src[SIdx(p + waver, W)] & 0x0F) * 2;
+                            value += dst[SIdx(p + waver + W, W)] & 0x0F;
+                            if (p + waver - W >= 0)
+                                value += dst[SIdx(p + waver - W, W)] & 0x0F;
+                            dst[SIdx(p, W)] = (byte)((value / 4) | 0x70);
                         }
                     }
                 }
@@ -1085,24 +1372,26 @@ public sealed class GameSim
             case SmoothieKind.Water:
             {
                 byte hue = (byte)(_s.smoothieData[1] << 4);
-                int w = 320 * 185 - 1;
-                int p = 320 * 185;
+                int w = W * 185 - 1;
+                int p = W * 185;
                 for (int y = 185 - 1; y >= 0; y--)
                 {
-                    for (int x = 320 - 1; x >= 0; x -= 8)
+                    for (int x = W; x > 0; )
                     {
                         int waver = Math.Abs(((w >> 10) & 0x07) - 4) - 1;
                         w -= 8;
-                        for (int xi = 8 - 1; xi >= 0; xi--)
+                        int count = Math.Min(8, x);
+                        x -= count;
+                        for (int xi = 0; xi < count; xi++)
                         {
                             p--;
-                            byte s = src[VIdx(p)];
+                            byte s = src[SIdx(p, W)];
                             if ((s & 0x30) == 0)
-                                dst[VIdx(p)] = s;
+                                dst[SIdx(p, W)] = s;
                             else
                             {
-                                int value = (s & 0x0F) + (dst[VIdx(p + waver + 320)] & 0x0F);
-                                dst[VIdx(p)] = (byte)((value / 2) | hue);
+                                int value = (s & 0x0F) + (dst[SIdx(p + waver + W, W)] & 0x0F);
+                                dst[SIdx(p, W)] = (byte)((value / 2) | hue);
                             }
                         }
                     }
@@ -1116,7 +1405,7 @@ public sealed class GameSim
                 for (int y = 0; y < 184; y++)
                 {
                     int row = (y + OY) * BufW + OX;
-                    for (int x = 0; x < 320; x++)
+                    for (int x = 0; x < W; x++)
                     {
                         byte s = src[row + x];
                         byte d = dst[row + x];
@@ -1130,36 +1419,56 @@ public sealed class GameSim
         _tgt = Screen;   // VGAScreen = game_screen; later draws land on the filtered image
     }
 
-    /// <summary>Copy everything outside the vanilla 320x200 area from src to dst so the
-    /// extended margins stay in sync when a filter switches the draw target.</summary>
-    private static void CopyMargins(byte[] src, byte[] dst)
+    /// <summary>Copy everything outside the <paramref name="surfaceW"/> x 200 engine surface
+    /// from src to dst so the extended margins stay in sync when a filter switches the draw
+    /// target. The surface itself is left alone: lava and water read dst back as their previous
+    /// frame, so overwriting it here would break the feedback.</summary>
+    private static void CopyMargins(byte[] src, byte[] dst, int surfaceW)
     {
         for (int y = 0; y < BufH; y++)
         {
             int row = y * BufW;
-            if (y < OY || y >= OY + 200)
+            if (y < OY || y >= OY + ScreenH)
             {
                 Array.Copy(src, row, dst, row, BufW);
                 continue;
             }
             Array.Copy(src, row, dst, row, OX);
-            Array.Copy(src, row + OX + 320, dst, row + OX + 320, BufW - OX - 320);
+            Array.Copy(src, row + OX + surfaceW, dst, row + OX + surfaceW, BufW - OX - surfaceW);
         }
     }
 
     /// <summary>The original filters stop at the displayed scanlines. Preserve the
-    /// otherwise invisible vanilla tail so it remains useful in extended view.</summary>
-    private static void CopyVanillaTail(byte[] src, byte[] dst, int firstRow)
+    /// otherwise invisible tail below them so it remains useful in extended view.</summary>
+    private static void CopySurfaceTail(byte[] src, byte[] dst, int firstRow, int surfaceW)
     {
         for (int y = firstRow; y < ScreenH; y++)
         {
             int row = (y + OY) * BufW + OX;
-            Array.Copy(src, row, dst, row, ScreenW);
+            Array.Copy(src, row, dst, row, surfaceW);
         }
     }
 
+    // =====================================================================
+    //  Starfield (backgrnd.c). Vanilla carries each star as a single JE_word linear offset
+    //  that relies on 16-bit overflow to wrap, and draws it only while it is above row 177 —
+    //  seven rows short of the 184-row playfield, so the bottom of the screen has no stars,
+    //  and the wrap lands mid-row so a star jumps sideways as it recycles. The widescreen
+    //  build rewrote it as (x, float y) points: x never moves, the field spans the full surface
+    //  width and all 184 displayed rows, and a recycled star respawns just above the top edge
+    //  instead of popping in at row 0. Which model runs is WideStarfield's call, independent of
+    //  Widescreen — the dead stripe at the bottom is the same bug at either width.
+    // =====================================================================
+    private const int VanillaStarCount = 100, WideStarCount = 330;
+    private const int StarfieldHue = 0x90;
+    private const int StarfieldWrap = 184;      // rows; a star recycles once it drifts past this
+    private const int StarfieldVisible = 184;   // rows; stars draw above this (the playfield bottom)
+    private const int StarfieldSpawnMin = 4, StarfieldSpawnSpread = 32;
+
     private void UpdateAndDrawStarfield(bool draw)
     {
+        if (WideStarfield) { UpdateAndDrawStarfieldWide(draw); return; }
+
         var tgt = _tgt;
         for (int i = _stars.Length - 1; i >= 0; i--)
         {
@@ -1171,7 +1480,7 @@ public sealed class GameSim
             {
                 int b = VIdx(pos);
                 if (tgt[b] == 0) tgt[b] = st.color;
-                if (st.color - 4 >= 0x90)
+                if (st.color - 4 >= StarfieldHue)
                 {
                     byte halo = (byte)(st.color - 4);
                     if (tgt[b + 1] == 0) tgt[b + 1] = halo;
@@ -1180,6 +1489,45 @@ public sealed class GameSim
                     if (pos >= Pitch && tgt[b - BufW] == 0) tgt[b - BufW] = halo;
                 }
             }
+        }
+    }
+
+    private void UpdateAndDrawStarfieldWide(bool draw)
+    {
+        int w = SurfaceWidth;
+        for (int i = _stars.Length - 1; i >= 0; i--)
+        {
+            ref var st = ref _stars[i];
+            st.y += st.speed + _s.starfieldSpeed;   // only the row moves; x is fixed for life
+            if (st.y >= StarfieldWrap)
+            {
+                // Respawn a little ABOVE the top edge so the star drifts into view instead of
+                // popping in at row 0 and holding there for the wrap tick.
+                st.y = -(StarfieldSpawnMin + _s.starSpawnPhase % StarfieldSpawnSpread);
+                _s.starSpawnPhase += 13;   // step coprime with the spread -> even coverage
+            }
+            if (draw && ShowStarfield) DrawStar(st.x, (int)(st.y + 0.5f), st.color, w);
+        }
+    }
+
+    /// <summary>One star: centre pixel plus a dimmer 4-neighbour halo, each written only where
+    /// the screen is still black. Bounds are checked per axis so a halo pixel cannot wrap into
+    /// the neighbouring row.</summary>
+    private void DrawStar(int x, int y, byte color, int surfaceW)
+    {
+        if (x < 0 || x >= surfaceW || y < 0 || y >= StarfieldVisible) return;
+
+        var tgt = _tgt;
+        int pos = (y + OY) * BufW + x + OX;
+        if (tgt[pos] == 0) tgt[pos] = color;
+
+        if (color - 4 >= StarfieldHue)
+        {
+            byte halo = (byte)(color - 4);
+            if (x + 1 < surfaceW && tgt[pos + 1] == 0) tgt[pos + 1] = halo;
+            if (x - 1 >= 0 && tgt[pos - 1] == 0) tgt[pos - 1] = halo;
+            if (y + 1 < ScreenH && tgt[pos + BufW] == 0) tgt[pos + BufW] = halo;
+            if (y - 1 >= 0 && tgt[pos - BufW] == 0) tgt[pos - BufW] = halo;
         }
     }
 
@@ -1384,10 +1732,10 @@ public sealed class GameSim
                 continue;
             }
 
-            bool slotFull = false;
+            bool endEnemy = false;
             if (FireEnabled)
-                slotFull = FireTurrets(ref e, tempX, tempY, tempMapXOfs);
-            if (slotFull) continue;   // goto draw_enemy_end (skips launch)
+                endEnemy = FireTurrets(ref e, tempX, tempY, tempMapXOfs);
+            if (endEnemy) continue;   // goto draw_enemy_end (skips launch)
 
             // Enemy launch routine
             if (e.launchfreq != 0)
@@ -1443,8 +1791,9 @@ public sealed class GameSim
         }
     }
 
-    /// <summary>Turret fire (JE_drawEnemy shots). Returns true when out of shot slots
-    /// (engine: goto draw_enemy_end, skipping the launch routine).</summary>
+    /// <summary>Turret fire (JE_drawEnemy shots). Returns true when the engine takes its
+    /// goto draw_enemy_end — out of shot slots, or a suppressed Galaga shot — which abandons
+    /// the remaining turrets and the launch routine for this enemy this tick.</summary>
     private bool FireTurrets(ref Enemy e, int tempX, int tempY, int tempMapXOfs)
     {
         for (int j = 3; j > 0; j--)
@@ -1461,6 +1810,14 @@ public sealed class GameSim
                 if (_s.difficultyLevel > 7)
                     e.eshotwait[j - 1] = B8(e.eshotwait[j - 1] / 2 + 1);
             }
+
+            // Galaga levels gut enemy fire (tyrian2.c:1374): an enemy still sitting in
+            // formation (eyc == 0) never shoots, and a diving one only gets a
+            // galagaShotFreq-in-400 chance. galagaShotFreq starts at 0 and only event 78
+            // raises it, so ** ALE ** never fires a shot and SQUADRON only reaches 3/400
+            // in its final loop. mt_rand runs only when the first test fails, as in C.
+            if (GalagaMode && (e.eyc == 0 || _rng.Next() % 400 >= (uint)_s.galagaShotFreq))
+                return true;   // goto draw_enemy_end
 
             switch (temp3)
             {
@@ -2448,7 +2805,10 @@ public sealed class GameSim
             case 25:  // Enemy Global Damage change
                 for (int i = 0; i < 100; i++)
                     if (ev.Dat4 == 0 || _enemy[i].linknum == ev.Dat4)
-                        _enemy[i].armorleft = B8(ev.Dat);
+                        // Galaga scales the armor by difficultyLevel / 2, integer-divided
+                        // (tyrian2.c:6642) — 1x at the NORMAL that JE_loadMap pins it to.
+                        _enemy[i].armorleft = B8(GalagaMode
+                            ? ev.Dat * (_s.difficultyLevel / 2) : ev.Dat);
                 break;
 
             case 26: _s.smallEnemyAdjust = ev.Dat != 0; break;
@@ -2854,7 +3214,9 @@ public sealed class GameSim
                 _s.mapY2Pos = (ev.Dat2 > 0 ? ev.Dat2 : ev.Dat) / 2;
                 break;
 
-            case 78: break;  // galaga shot freq
+            case 78:  // raise the galagaMode fire chance by 1/400, capped at 10
+                if (_s.galagaShotFreq < 10) _s.galagaShotFreq++;
+                break;
 
             case 79:
                 _s.bossLink0 = ev.Dat;

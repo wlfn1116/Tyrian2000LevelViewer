@@ -5,7 +5,19 @@ public sealed class LevelListItem
     public int FileNum;
     public string Name = "";
     public bool BonusLevel;
-    public string Display => $"{FileNum:00}  {(string.IsNullOrWhiteSpace(Name) ? "(unnamed)" : Name.Trim())}" + (BonusLevel ? "  [bonus]" : "");
+    public bool GalagaMode;      // the script's ]g: Galaga-style mini-game rules apply
+    /// <summary>Every way in is a warp ball — the level is off the campaign's normal route.
+    /// Filled in once the episode's flow graph is built (GameData.GetGraph).</summary>
+    public bool SecretLevel;
+    /// <summary>"Hard+" / "below Hard" when the difficulty you started on decides whether
+    /// you ever see this level; empty when any difficulty reaches it.</summary>
+    public string DifficultyGate = "";
+
+    public string Display =>
+        $"{FileNum:00}  {(string.IsNullOrWhiteSpace(Name) ? "(unnamed)" : Name.Trim())}"
+        + (SecretLevel ? "  [secret]" : "")
+        + (DifficultyGate.Length > 0 ? $"  [{DifficultyGate.ToLowerInvariant()}]" : "")
+        + (BonusLevel ? "  [bonus]" : "");
 }
 
 public sealed class EpisodeInfo
@@ -14,6 +26,7 @@ public sealed class EpisodeInfo
     public LevelContainer Container = null!;
     public List<LevelEntry> ScriptLevels = new();
     public List<LevelListItem> Levels = new();
+    public EpisodeScriptFile? Script;  // the whole levels%d.dat, for the level-flow graph
 }
 
 /// <summary>
@@ -30,6 +43,9 @@ public sealed class GameData
     private readonly Dictionary<char, CompShapes?> _newshCache = new();
     private readonly Dictionary<int, EnemyData> _enemyCache = new();
     private readonly Dictionary<int, WeaponData> _weaponCache = new();
+    private readonly Dictionary<int, EpisodeGraph> _graphCache = new();
+    private readonly Dictionary<int, List<DataCube>> _cubeCache = new();
+    private List<string>? _planetNames;
     private MainShapes? _main;
 
     // shapeFile[] from lvlmast.c: enemy shape-bank (1-based) -> newsh file char.
@@ -54,7 +70,11 @@ public sealed class GameData
             string scriptPath = Path.Combine(dataDir, $"levels{ep}.dat");
             if (File.Exists(scriptPath))
             {
-                try { info.ScriptLevels = EpisodeScript.ParseLevels(scriptPath); }
+                try
+                {
+                    info.ScriptLevels = EpisodeScript.ParseLevels(scriptPath);
+                    info.Script = EpisodeScriptFile.Load(scriptPath);
+                }
                 catch { /* tolerate a malformed script */ }
             }
 
@@ -72,11 +92,21 @@ public sealed class GameData
                 {
                     item.Name = e.Name;
                     item.BonusLevel = e.BonusLevel || e.NormalBonus;
+                    item.GalagaMode = e.GalagaMode;
                 }
                 info.Levels.Add(item);
             }
 
             Episodes.Add(info);
+        }
+
+        // Resolve the flow graphs now (~30ms for all five): they are what marks the secret
+        // levels in the level list, so leaving it lazy would make Display depend on whether
+        // anything had opened the tree yet.
+        foreach (var ep in Episodes)
+        {
+            try { GetGraph(ep); }
+            catch { /* an episode whose data won't resolve simply gets no secret marks */ }
         }
     }
 
@@ -108,6 +138,49 @@ public sealed class GameData
         cs = File.Exists(path) ? CompShapes.LoadFile(path) : null;
         _newshCache[c] = cs;
         return cs;
+    }
+
+    /// <summary>Galaxy-map planet names (1-based), shared by every episode.</summary>
+    public List<string> PlanetNameList => _planetNames ??= PlanetNames.Load(DataDir);
+
+    /// <summary>The episode's datacube readings, cached. Empty if cubetxt%d.dat is missing.</summary>
+    public List<DataCube> GetCubes(EpisodeInfo ep)
+    {
+        if (_cubeCache.TryGetValue(ep.Number, out var c)) return c;
+        string path = Path.Combine(DataDir, $"cubetxt{ep.Number}.dat");
+        try { c = File.Exists(path) ? DataCubes.Load(path) : new List<DataCube>(); }
+        catch { c = new List<DataCube>(); }
+        _cubeCache[ep.Number] = c;
+        return c;
+    }
+
+    /// <summary>
+    /// The episode's level-flow graph, cached. Building it parses every level in the episode
+    /// once, to find the secret-warp pickups that the script itself never mentions.
+    /// </summary>
+    public EpisodeGraph? GetGraph(EpisodeInfo ep)
+    {
+        if (_graphCache.TryGetValue(ep.Number, out var g)) return g;
+        if (ep.Script == null) return null;
+
+        var secrets = new Dictionary<int, List<int>>();
+        var ed = GetEnemyData(ep);
+        foreach (var item in ep.Levels)
+        {
+            try { secrets[item.FileNum] = EpisodeGraph.FindSecretTargets(LoadLevel(ep, item.FileNum), ed); }
+            catch { /* a level that won't parse simply contributes no secret exits */ }
+        }
+
+        g = EpisodeGraph.Build(ep.Script, PlanetNameList,
+            fileNum => secrets.TryGetValue(fileNum, out var t) ? t : Enumerable.Empty<int>());
+        _graphCache[ep.Number] = g;
+
+        foreach (var item in ep.Levels)
+        {
+            item.SecretLevel = g.IsSecretOnly(item.FileNum);
+            item.DifficultyGate = g.DifficultyGate(item.FileNum);
+        }
+        return g;
     }
 
     public WeaponData GetWeapons(EpisodeInfo ep)

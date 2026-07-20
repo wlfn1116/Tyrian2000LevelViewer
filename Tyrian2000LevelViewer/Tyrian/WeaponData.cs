@@ -13,6 +13,10 @@ public struct WeaponDat
     public ushort[] Sg;      // [8]
     public sbyte Acceleration, AccelerationX;
     public byte Sound;
+    /// <summary>Palette band a hit from this weapon recolours the enemy with for one frame —
+    /// Tyrian's damage flash (tyrian2.c writes it to enemy.filter, blit_sprite2_filter ORs it
+    /// over the sprite's value nibble).</summary>
+    public byte ShipBlastFilter;
     public bool Loaded;
 }
 
@@ -71,7 +75,7 @@ public sealed class WeaponData
             r.Pos += 1;                    // circlesize
             w.Sound = r.U8();
             r.Pos += 1;                    // trail
-            r.Pos += 1;                    // shipblastfilter
+            w.ShipBlastFilter = r.U8();
             wd.Weapons[i] = w;
         }
     }

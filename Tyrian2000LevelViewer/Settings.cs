@@ -17,6 +17,7 @@ public sealed class LayerState
 public sealed class AppSettings
 {
     public string? DataDir { get; set; }
+    public string? ExportDir { get; set; }             // where the last PNG/screenshot was saved
     public int EpisodeIdx { get; set; }
     public int LevelFileNum { get; set; } = 1;
     public int Palette { get; set; } = GamePalette;
@@ -28,12 +29,26 @@ public sealed class AppSettings
     public bool Widescreen { get; set; }               // true-widescreen playback (356px playfield)
     public bool ExpandedParallax { get; set; }         // widescreen sub-option: wider all-layer parallax sweep
     public bool MirrorLayers { get; set; } = true;     // widescreen sub-option: mirror layers past their side edges
+    public bool WideStarfield { get; set; } = true;    // the build's rewritten starfield (either mode)
     public bool ShowScreenFilter { get; set; } = true;
     public bool ShowSmoothies { get; set; } = true; // retained JSON name: terrain smoothies
     // Nullable so an older settings file can inherit its former broad smoothie toggle.
     public bool? ShowSpotlight { get; set; }
     public bool? ShowScreenFlip { get; set; }
     public bool ShowBossBars { get; set; } = true;
+    public bool ClickKill { get; set; }                 // left-click damages the enemy under the cursor
+    public bool ClickKillInstant { get; set; } = true;  // ... for all of its armor
+    public int ClickKillDamage { get; set; } = 10;      // ... or for this much
+    public bool ClickKillExplosions { get; set; } = true;
+    /// <summary>Bitmask of the unfolded playback-HUD sections (PbSec); -1 = never saved.</summary>
+    public int PbSections { get; set; } = -1;
+    public bool ShowTree { get; set; }                  // the episode level-tree window
+    public bool ShowCubes { get; set; }                 // the datacube reader window
+    public bool CubesByLevel { get; set; }              // ... listing cubes under their level
+    public float CubeListWidth { get; set; }            // ... width of its list column; 0 = default
+    public bool AllEpisodes { get; set; }               // browse every episode at once
+    /// <summary>Bitmask of the EdgeKinds the level tree draws; 0 = never saved.</summary>
+    public int TreeEdgeMask { get; set; }
 
     /// <summary>The palette gameplay always runs in: JE_loadPic(3) -> pcxpal[2] = 5.</summary>
     public const int GamePalette = 5;

@@ -49,6 +49,12 @@ public sealed unsafe class GameViewImage : IDisposable
             SdlNs.SDL.UpdateTexture(_tex, default, (nint)p, W * 4);
     }
 
+    /// <summary>
+    /// A copy of the pixels last uploaded, for saving a screenshot. Whatever crop the view is
+    /// showing (widescreen / extended) is what comes out, because this is that same frame.
+    /// </summary>
+    public uint[] Snapshot() => (uint[])_rgba.Clone();
+
     public void Draw(ImDrawListPtr dl, Vector2 pos, float scale)
     {
         if (!_created) return;

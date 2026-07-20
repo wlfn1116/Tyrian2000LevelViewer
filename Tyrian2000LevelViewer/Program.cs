@@ -48,6 +48,8 @@ internal static unsafe class Program
             return SimTest(args);
         if (Array.IndexOf(args, "--simshot") >= 0)
             return SimShot(args);
+        if (Array.IndexOf(args, "--tree") >= 0)
+            return DumpTree(args);
 
         PreloadBundledNativeLibraries();
         if (SdlNs.SDL.Init(SDL_INIT_VIDEO) != 0)
@@ -118,10 +120,26 @@ internal static unsafe class Program
         if (noSmoothies || Array.IndexOf(args, "--no-screen-flip") >= 0)
             settings.ShowScreenFlip = false;
         if (Array.IndexOf(args, "--no-boss-bars") >= 0) settings.ShowBossBars = false;
+        if (Array.IndexOf(args, "--vanilla-stars") >= 0) settings.WideStarfield = false;
+        if (Array.IndexOf(args, "--wide") >= 0) settings.Widescreen = true;
+        if (Array.IndexOf(args, "--click-kill") >= 0) settings.ClickKill = true;
+        if (Array.IndexOf(args, "--showtree") >= 0) settings.ShowTree = true;
+        if (Array.IndexOf(args, "--showcubes") >= 0) settings.ShowCubes = true;
+        if (Array.IndexOf(args, "--cubesbylevel") >= 0) { settings.ShowCubes = true; settings.CubesByLevel = true; }
+        if (Array.IndexOf(args, "--allepisodes") >= 0) settings.AllEpisodes = true;
         int pli = Array.IndexOf(args, "--player");
         int cliPlayerX = pli >= 0 && pli + 1 < args.Length && int.TryParse(args[pli + 1], out int pxv) ? pxv : -1;
         int cliPlayerY = pli >= 0 && pli + 2 < args.Length && int.TryParse(args[pli + 2], out int pyv) ? pyv : 150;
         var app = new App(renderer, settings, cliEp, cliLevel, window, cliPlaybackTick, cliPlayerX, cliPlayerY);
+
+        // "--showcubes N" / "--cubesbylevel N": open the reader on that cube of the started
+        // episode, so a screenshot can frame one particular outpost's shelf.
+        foreach (string flag in new[] { "--showcubes", "--cubesbylevel" })
+        {
+            int ci = Array.IndexOf(args, flag);
+            if (ci >= 0 && ci + 1 < args.Length && int.TryParse(args[ci + 1], out int cube))
+                app.ShowCube(Math.Max(0, cliEp), cube);
+        }
 
         int mi = Array.IndexOf(args, "--mouse");
         var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -129,6 +147,12 @@ internal static unsafe class Program
             ? new System.Numerics.Vector2(
                 float.Parse(args[mi + 1], inv), float.Parse(args[mi + 2], inv))
             : null;
+        // "--mousedown left|middle|right": hold that button from frame 3 on, so --uishot can
+        // capture drag-only state (the right-drag player aim). Late enough that the widget
+        // under --mouse is already hovered when ImGui sees the press, or the click is lost.
+        int mdi = Array.IndexOf(args, "--mousedown");
+        int fakeButton = mdi >= 0 && mdi + 1 < args.Length
+            ? args[mdi + 1] switch { "left" => 0, "right" => 1, "middle" => 2, _ => -1 } : -1;
 
         bool running = true;
         int frame = 0;
@@ -148,6 +172,7 @@ internal static unsafe class Program
             // hover-only UI (markers tooltip, hover readout) without a real mouse.
             // queued last, so it wins over the backend's own position event
             if (fakeMouse.HasValue) io.AddMousePosEvent(fakeMouse.Value.X, fakeMouse.Value.Y);
+            if (fakeButton >= 0 && frame >= 3) io.AddMouseButtonEvent(fakeButton, true);
             ImGui.NewFrame();
 
             app.Render();
@@ -375,6 +400,63 @@ internal static unsafe class Program
         Console.WriteLine($"Episode {epNum} level #{fileNum} '{(ep.Levels.Find(l => l.FileNum == fileNum)?.Name ?? "").Trim()}' shapes{char.ToLower(lv.ShapeChar)}.dat palette {pal}");
         Console.WriteLine($"Wrote {startPath} ({W}x{cropH}) and {thumbPath} ({W}x{dh})");
         img.Dispose();
+        return 0;
+    }
+
+    /// <summary>"--tree [ep]": print the resolved level-flow graph of one or every episode.</summary>
+    static int DumpTree(string[] args)
+    {
+        int gi = Array.IndexOf(args, "--tree");
+        int only = gi + 1 < args.Length && int.TryParse(args[gi + 1], out int e) ? e : -1;
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("Could not find Tyrian 2000 data files."); return 1; }
+        var gd = new T2LV.Tyrian.GameData(dir);
+        try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* redirected */ }
+
+        foreach (var ep in gd.Episodes)
+        {
+            if (only > 0 && ep.Number != only) continue;
+            var g = gd.GetGraph(ep);
+            if (g == null) { Console.WriteLine($"== Episode {ep.Number}: no script"); continue; }
+            Console.WriteLine($"== Episode {ep.Number}: {g.Nodes.Count} nodes, {g.Edges.Count} edges, " +
+                $"{g.MaxDepth + 1} rows, layout {g.Width}x{g.Height}");
+            foreach (var n in g.Nodes)
+            {
+                string flags = "";
+                if (n.Kind == T2LV.Tyrian.GraphNodeKind.Level)
+                {
+                    flags = $"  sec {n.Section}  lvl #{n.LvlFileNum}  song {n.Song}";
+                    if (n.Bonus) flags += "  [bonus]";
+                    if (n.Galaga) flags += "  [galaga]";
+                    if (n.Engage) flags += "  [engage]";
+                    if (n.Extra) flags += "  [extra]";
+                    if (n.SavePoint) flags += "  [savepoint]";
+                    if (n.Shop) flags += "  [outpost]";
+                }
+                Console.WriteLine($"  [{n.Depth}] {n.Title,-16}{flags}");
+                if (n.CubeStops.Count > 0)
+                {
+                    var cubes = gd.GetCubes(ep);
+                    string Title(int i) => i >= 1 && i <= cubes.Count ? cubes[i - 1].Title : "(missing)";
+                    for (int s = 0; s < n.CubeStops.Count; s++)
+                    {
+                        var stop = n.CubeStops[s];
+                        if (n.CubeStops.Count > 1) Console.WriteLine($"        outpost {s + 1}:");
+                        foreach (int idx in stop.Cubes)
+                            Console.WriteLine($"        cube {idx,3} [{(stop.IsFree(idx) ? "always " : "if found")}] {Title(idx)}");
+                        foreach (int idx in stop.Dropped)
+                            Console.WriteLine($"        cube {idx,3} [dropped  ] {Title(idx)}");
+                    }
+                }
+                foreach (int ei in n.Out)
+                {
+                    var edge = g.Edges[ei];
+                    string via = edge.Detail.Length > 0 ? $"  ({edge.Detail})" : "";
+                    Console.WriteLine($"        --{edge.Kind,-12}-> {g.Nodes[edge.To].Title}{via}");
+                }
+            }
+            Console.WriteLine();
+        }
         return 0;
     }
 
@@ -611,21 +693,66 @@ internal static unsafe class Program
                                     Array.IndexOf(args, "--no-terrain-smoothies") < 0;
         sim.ShowSpotlight = !noSmoothies && Array.IndexOf(args, "--no-spotlight") < 0;
         sim.ShowScreenFlip = !noSmoothies && Array.IndexOf(args, "--no-screen-flip") < 0;
+        // Widescreen playback and its sub-options, so the widescreen-only paths (parallax
+        // span, mirrored layers, starfield) are reproducible from the command line.
+        sim.Widescreen = Array.IndexOf(args, "--wide") >= 0;
+        sim.ExpandedParallax = sim.Widescreen && Array.IndexOf(args, "--parallax") >= 0;
+        sim.MirrorLayers = sim.Widescreen && Array.IndexOf(args, "--mirror") >= 0;
+        sim.WideStarfield = Array.IndexOf(args, "--vanilla-stars") < 0;
+        int plx = Array.IndexOf(args, "--player");
+        if (plx >= 0 && plx + 2 < args.Length)
+        { sim.PlayerX = int.Parse(args[plx + 1]); sim.PlayerY = int.Parse(args[plx + 2]); }
         ApplyHideList(sim, args);
         var pb = new T2LV.Tyrian.SimPlayback(sim, 21000);
         uint[] pal = gd.Palettes.Get(AppSettings.GamePalette);
 
         bool ext = Array.IndexOf(args, "--ext") >= 0;
         sim.ExtendedDraw = ext;
-        int W = ext ? T2LV.Tyrian.GameSim.BufW : T2LV.Tyrian.GameSim.ViewW;
+        int W = ext ? T2LV.Tyrian.GameSim.BufW : sim.PlayfieldWidth;
         int H = ext ? T2LV.Tyrian.GameSim.BufH : T2LV.Tyrian.GameSim.ViewH;
         int cx = ext ? 0 : T2LV.Tyrian.GameSim.OX + T2LV.Tyrian.GameSim.ViewX;
         int cy = ext ? 0 : T2LV.Tyrian.GameSim.OY;
+        // "--kill sx,sy [--kill-damage N] [--no-kill-explosions]": exercise the viewer's
+        // click-to-kill at a screen-space point, listing what was live at that tick first so a
+        // target is easy to name. Applied on the frame requested, then one tick is stepped so
+        // the result is what gets written — the same thing the GUI click does.
+        int ki = Array.IndexOf(args, "--kill");
+        int[] killAt = ki >= 0 && ki + 1 < args.Length
+            ? args[ki + 1].Split(',').Select(int.Parse).ToArray() : Array.Empty<int>();
+        int kdi = Array.IndexOf(args, "--kill-damage");
+        int killDamage = kdi >= 0 && kdi + 1 < args.Length
+            ? int.Parse(args[kdi + 1]) : T2LV.Tyrian.GameSim.InstantKillDamage;
+        bool killBoom = Array.IndexOf(args, "--no-kill-explosions") < 0;
+
         var rgba = new uint[W * H];
+        var live = new List<T2LV.Tyrian.GameSim.EnemyView>();
         foreach (int t in ticks)
         {
             pb.SeekTo(t);
             if (ext) pb.RedrawCurrent();
+            if (killAt.Length >= 2)
+            {
+                sim.CollectEnemies(live);
+                Console.WriteLine($"t={pb.CurrentTick}: {live.Count} enemies drawn");
+                foreach (var v in live)
+                    Console.WriteLine($"   slot {v.Slot,2} id {v.EnemyId,4} link {v.LinkNum,3} " +
+                        $"screen {v.ScreenX,4},{v.ScreenY,4} armor {v.ArmorLeft,3} " +
+                        $"{(v.Size == 1 ? "2x2" : "1x1")} {v.Category}");
+                int slot = sim.PickEnemyAt(killAt[0] + T2LV.Tyrian.GameSim.OX,
+                                           killAt[1] + T2LV.Tyrian.GameSim.OY);
+                Console.WriteLine(slot < 0
+                    ? $"   --kill {killAt[0]},{killAt[1]}: no enemy there"
+                    : $"   --kill {killAt[0]},{killAt[1]}: hit slot {slot} for {killDamage}" +
+                      (killBoom ? " (with explosions)" : " (silent)") +
+                      $", flash filter 0x{sim.HitFilter:x2}");
+                if (slot >= 0)
+                {
+                    sim.DamageEnemy(slot, killDamage, killBoom);
+                    pb.Advance(1);
+                    sim.CollectEnemies(live);
+                    Console.WriteLine($"   -> {live.Count} enemies left at t={pb.CurrentTick}");
+                }
+            }
             sim.PreparePresent();
             for (int y = 0; y < H; y++)
             {

@@ -3,12 +3,18 @@ using System.Runtime.Versioning;
 
 namespace T2LV;
 
-/// <summary>Windows folder chooser used by the data-folder Browse button.</summary>
+/// <summary>
+/// Windows common file dialogs: the folder chooser behind the data-folder Browse button,
+/// and the Save-As box behind the PNG export / playback screenshot. Both are IFileDialog
+/// derivatives, so they share the vtable slots below (3 = Show, 9/10 = Set/GetOptions,
+/// 12 = SetFolder, 15 = SetFileName, 17 = SetTitle, 20 = GetResult, 22 = SetDefaultExtension).
+/// </summary>
 [SupportedOSPlatform("windows")]
-internal static unsafe class NativeFolderDialog
+internal static unsafe class NativeFileDialog
 {
     private const uint CoinitApartmentThreaded = 0x2;
     private const uint ClsctxInprocServer = 0x1;
+    private const uint FosOverwritePrompt = 0x2;
     private const uint FosPickFolders = 0x20;
     private const uint FosForceFileSystem = 0x40;
     private const uint FosPathMustExist = 0x800;
@@ -17,12 +23,39 @@ internal static unsafe class NativeFolderDialog
 
     private static readonly Guid ClsidFileOpenDialog = new("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7");
     private static readonly Guid IidFileOpenDialog = new("D57C7288-D4AD-4768-BE02-9D969532D960");
+    private static readonly Guid ClsidFileSaveDialog = new("C0B4E2F3-BA21-4773-8DBA-335EC946EB8B");
+    private static readonly Guid IidFileSaveDialog = new("84BCCD23-5FDE-4CDB-AEA4-AF64B83D78AB");
     private static readonly Guid IidShellItem = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
+
+    /// <summary>One entry of the dialog's file-type dropdown (COMDLG_FILTERSPEC).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FilterSpec { public IntPtr Name; public IntPtr Spec; }
+
+    // Unmanaged for the process lifetime (never freed): SetFileTypes is not documented to copy
+    // the strings, and a `fixed` block would let the GC move them out from under the dialog.
+    private static readonly IntPtr PngTypeName = Marshal.StringToCoTaskMemUni("PNG image (*.png)");
+    private static readonly IntPtr PngTypeSpec = Marshal.StringToCoTaskMemUni("*.png");
 
     public static IntPtr ForegroundWindow() => GetForegroundWindow();
 
-    public static string? PickBlocking(string? initialDir, IntPtr owner,
+    public static string? PickFolderBlocking(string? initialDir, IntPtr owner,
         string title = "Select your Tyrian 2000 folder")
+    {
+        return RunDialog(in ClsidFileOpenDialog, in IidFileOpenDialog, initialDir, owner, title,
+            FosPickFolders | FosForceFileSystem | FosPathMustExist, null);
+    }
+
+    /// <summary>The Save-As box, pre-filled with <paramref name="defaultName"/> (".png" enforced).</summary>
+    public static string? SaveFileBlocking(string? initialDir, string defaultName, IntPtr owner,
+        string title = "Save PNG")
+    {
+        return RunDialog(in ClsidFileSaveDialog, in IidFileSaveDialog, initialDir, owner, title,
+            FosOverwritePrompt | FosForceFileSystem, defaultName);
+    }
+
+    /// <param name="saveName">null = folder chooser; otherwise the pre-filled PNG file name.</param>
+    private static string? RunDialog(in Guid classId, in Guid interfaceId, string? initialDir,
+        IntPtr owner, string title, uint extraOptions, string? saveName)
     {
         int initResult = CoInitializeEx(IntPtr.Zero, CoinitApartmentThreaded);
         ThrowIfFailed(initResult);
@@ -30,19 +63,20 @@ internal static unsafe class NativeFolderDialog
         try
         {
             IntPtr dialog = IntPtr.Zero;
-            ThrowIfFailed(CoCreateInstance(in ClsidFileOpenDialog, IntPtr.Zero, ClsctxInprocServer,
-                in IidFileOpenDialog, out dialog));
+            ThrowIfFailed(CoCreateInstance(in classId, IntPtr.Zero, ClsctxInprocServer,
+                in interfaceId, out dialog));
 
             try
             {
                 uint options;
                 ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, uint*, int>)Slot(dialog, 10))(dialog, &options));
-                options |= FosPickFolders | FosForceFileSystem | FosPathMustExist;
+                options |= extraOptions;
                 ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, uint, int>)Slot(dialog, 9))(dialog, options));
 
                 fixed (char* titlePtr = title)
                     ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, char*, int>)Slot(dialog, 17))(dialog, titlePtr));
 
+                if (saveName != null) SetUpSave(dialog, saveName);
                 SetInitialFolder(dialog, initialDir);
 
                 int showResult = ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int>)Slot(dialog, 3))(dialog, owner);
@@ -67,6 +101,18 @@ internal static unsafe class NativeFolderDialog
         {
             CoUninitialize();
         }
+    }
+
+    /// <summary>Offer only PNG, append the extension for a name typed without one, pre-fill the box.</summary>
+    private static void SetUpSave(IntPtr dialog, string fileName)
+    {
+        var spec = new FilterSpec { Name = PngTypeName, Spec = PngTypeSpec };
+        ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, uint, FilterSpec*, int>)Slot(dialog, 4))(
+            dialog, 1, &spec));
+        fixed (char* ext = "png")
+            ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, char*, int>)Slot(dialog, 22))(dialog, ext));
+        fixed (char* namePtr = fileName)
+            ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, char*, int>)Slot(dialog, 15))(dialog, namePtr));
     }
 
     private static void SetInitialFolder(IntPtr dialog, string? initialDir)
