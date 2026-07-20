@@ -123,7 +123,16 @@ public sealed class ItemData
     /// showing a table of noise.</summary>
     public bool Loaded { get; private set; }
 
-    public static ItemData Load(string dataDir, EpisodeInfo ep)
+    /// <summary>Whether the widescreen fork's post-load rewrites were applied to this copy.</summary>
+    public bool Fork { get; private set; }
+
+    /// <summary>
+    /// Read one episode's item block. <paramref name="fork"/> chooses which shop you are
+    /// looking at: false is the tables exactly as Tyrian 2000 shipped them, true adds the
+    /// widescreen build's post-load pass (see <see cref="ForkRestoration"/>) -- the restored
+    /// Charge-Laser Cannon, the Wobbley frame fix, placeholder icons and the rest.
+    /// </summary>
+    public static ItemData Load(string dataDir, EpisodeInfo ep, bool fork = true)
     {
         var it = new ItemData();
         var (raw, start) = EnemyData.LocateBlock(dataDir, ep);
@@ -146,7 +155,8 @@ public sealed class ItemData
             it.ReadOptions(new ByteReader(raw, options));
             it.ReadShields(new ByteReader(raw, shields));
             it.Weapons = WeaponData.Load(dataDir, ep);
-            ForkRestoration.Apply(it.Weapons, it, ep.Number);
+            it.Fork = fork;
+            if (fork) ForkRestoration.Apply(it.Weapons, it, ep.Number);
             it.Loaded = true;
         }
         catch (ArgumentException) { /* a truncated block leaves Loaded false */ }

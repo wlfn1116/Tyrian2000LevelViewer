@@ -2,6 +2,7 @@ using System.Numerics;
 using Hexa.NET.ImGui;
 using T2LV.Render;
 using T2LV.Tyrian;
+using T2LV.Tyrian.Audio;
 
 namespace T2LV;
 
@@ -10,6 +11,11 @@ namespace T2LV;
 /// the level list can't show — the outpost's route choices, the secret warps hidden in the
 /// level data, the boss-timer and difficulty forks. Built by <see cref="EpisodeGraph"/>;
 /// this half only draws it.
+///
+/// Two things make a seventy-node graph usable rather than merely correct: hovering anything
+/// dims everything it does not touch, and the search box dims everything it does not name. The
+/// canvas is otherwise a wall of boxes in which the level you actually came to find is
+/// indistinguishable from its sixty-nine neighbours.
 /// </summary>
 public sealed unsafe partial class App
 {
@@ -20,6 +26,7 @@ public sealed unsafe partial class App
     private bool _treeFitAll;                 // next fit frames the whole tree, not just its width
     private int _treeEdgeMask = DefaultEdgeMask;
     private bool _treeLabels = true;
+    private readonly byte[] _treeSearch = new byte[64];
 
     private const float TreeMinZoom = 0.25f, TreeMaxZoom = 2.5f;
     // Timed Battle is its own game mode picked off the title screen, not campaign
@@ -104,82 +111,107 @@ public sealed unsafe partial class App
     {
         if (!_showTree || _gd == null || CurEpisode == null) return;
 
-        ImGui.SetNextWindowSize(new Vector2(1020, 720), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSizeConstraints(new Vector2(420, 300), new Vector2(float.MaxValue, float.MaxValue));
-        bool open = _showTree;
-        if (!ImGui.Begin("Level tree###leveltree", ref open))
-        {
-            ImGui.End();
-            _showTree = open;
-            return;
-        }
-        _showTree = open;
+        if (!RefBegin("Level tree", "leveltree", ref _showTree, AcRoutes,
+                new Vector2(1100, 780), new Vector2(520, 360))) return;
 
         var panes = TreePanes(out float width, out float height);
         DrawTreeToolbar(panes);
-        if (panes.Count == 0) ImGui.TextWrapped("No episode here has a script to build a tree from.");
+        if (panes.Count == 0)
+            UiEmpty("No tree to draw", "No episode here has a script to build one from.", AcRoutes);
         else DrawTreeCanvas(panes, width, height);
-        ImGui.End();
+        RefEnd(AcRoutes);
     }
+
+    /// <summary>The legend's short form. The full name is in the tooltip: nine chips each
+    /// captioned "outpost route choice" will not fit any window anyone actually uses.</summary>
+    private static string EdgeShort(EdgeKind k) => k switch
+    {
+        EdgeKind.Continue    => "finish",
+        EdgeKind.MapChoice   => "route",
+        EdgeKind.Secret      => "secret",
+        EdgeKind.TimerFail   => "timer",
+        EdgeKind.PlayerDied  => "died",
+        EdgeKind.Difficulty  => "difficulty",
+        EdgeKind.TwoPlayer   => "2 players",
+        EdgeKind.SpecialShip => "Stalker",
+        EdgeKind.TimedBattle => "Timed Battle",
+        _                    => "start",
+    };
 
     private void DrawTreeToolbar(List<TreePane> panes)
     {
-        ImGui.SetNextItemWidth(140);
-        EpisodeCombo("##treeepisode");
-        ImGui.SameLine();
-        if (ImGui.Button("Fit width")) { _treeFitAll = false; _treeFitEpisode = -1; }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Frame the tree across the window and start at the top.\nDrag to pan, wheel to zoom.");
-        ImGui.SameLine();
-        if (ImGui.Button("Fit all")) { _treeFitAll = true; _treeFitEpisode = -1; }
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Squeeze everything shown into the window.");
-        ImGui.SameLine();
-        if (ImGui.Button("1:1")) { _treeZoom = 1f; _treeFitEpisode = TreeFitKey; }
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(110);
-        float z = _treeZoom;
-        if (ImGui.SliderFloat("##treezoom", &z, TreeMinZoom, TreeMaxZoom, "%.2fx", ImGuiSliderFlags.Logarithmic))
-            _treeZoom = Math.Clamp(z, TreeMinZoom, TreeMaxZoom);
-        ImGui.SameLine();
-        bool labels = _treeLabels;
-        if (ImGui.Checkbox("Labels", &labels)) _treeLabels = labels;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Caption each branch with what takes you down it.\n(Hidden automatically when zoomed far out.)");
-        ImGui.SameLine();
-        int levels = panes.Sum(p => p.Graph.Nodes.Count(n => n.Kind == GraphNodeKind.Level));
-        int routes = panes.Sum(p => p.Graph.Edges.Count);
-        ImGui.TextDisabled($"{levels} levels · {routes} routes");
-
-        // The legend doubles as the filter: click a swatch to drop that kind of branch.
+        // The legend is packed before the band opens, because the band's height has to cover
+        // however many rows it turns out to need.
+        var kinds = new List<EdgeKind>();
+        var labels = new List<string>();
         foreach (var kind in LegendKinds)
         {
             int count = panes.Sum(p => p.Graph.Edges.Count(e => e.Kind == kind));
             if (count == 0) continue;
-            bool on = KindShown(kind);
-            uint accent = EdgeColor(kind);
-
-            ImGui.PushStyleColor(ImGuiCol.Button, on ? Shade(accent, 0.34f, 235) : Gfx.Rgba(38, 40, 50, 220));
-            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, on ? Shade(accent, 0.50f, 245) : Gfx.Rgba(56, 60, 74, 235));
-            ImGui.PushStyleColor(ImGuiCol.ButtonActive, on ? Shade(accent, 0.66f) : Gfx.Rgba(72, 78, 94));
-            ImGui.PushStyleColor(ImGuiCol.Text, on ? Gfx.Rgba(240, 244, 252) : Gfx.Rgba(132, 138, 154));
-            ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3f);
-            if (ImGui.Button($"{EdgeName(kind)}  {count}##lg{(int)kind}"))
-                _treeEdgeMask ^= 1 << (int)kind;
-            ImGui.PopStyleVar();
-            ImGui.PopStyleColor(4);
-
-            var mn = ImGui.GetItemRectMin();
-            var mx = ImGui.GetItemRectMax();
-            ImGui.GetWindowDrawList().AddRectFilled(mn, new Vector2(mn.X + 3f, mx.Y), on ? accent : Shade(accent, 0.45f, 140), 2f);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip(on ? "Shown - click to hide these routes" : "Hidden - click to show");
-
-            // Wrap the chips instead of letting them run off the window.
-            float next = ImGui.GetItemRectMax().X + ImGui.GetStyle().ItemSpacing.X + 130f;
-            if (next < ImGui.GetWindowPos().X + ImGui.GetWindowSize().X) ImGui.SameLine();
+            kinds.Add(kind);
+            labels.Add($"{EdgeShort(kind)}  {count}");
         }
-        ImGui.NewLine();
-        ImGui.Separator();
+        // Whether the reset chip is part of this frame's layout has to be decided ONCE, here:
+        // a legend toggle below flips the mask mid-frame, and re-reading it afterwards asked
+        // PackChips's array for a row it was never sized for. Turning Timed Battle on is the
+        // shortest route to that -- it is the one kind the default mask has off.
+        bool resetChip = _treeEdgeMask != DefaultEdgeMask;
+        if (resetChip) labels.Add("reset");
+        var newRow = PackChips(labels, BandInnerWidth(), out int legendRows);
+
+        BandBegin("treeband", AcRoutes, 1 + Math.Max(1, legendRows));
+
+        BandLabel("episode");
+        ImGui.SetNextItemWidth(126);
+        EpisodeCombo("##treeepisode");
+
+        BandDivider();
+        if (UiButton("fit width", AcRoutes,
+                "Frame the tree across the window and start at the top.\nDrag to pan, wheel to zoom."))
+            { _treeFitAll = false; _treeFitEpisode = -1; }
+        ImGui.SameLine(0, 4);
+        if (UiButton("fit all", AcRoutes, "Squeeze everything shown into the window."))
+            { _treeFitAll = true; _treeFitEpisode = -1; }
+        ImGui.SameLine(0, 4);
+        if (UiButton("1:1", AcRoutes, "Back to actual size."))
+            { _treeZoom = 1f; _treeFitEpisode = TreeFitKey; }
+        ImGui.SameLine(0, 8);
+        ImGui.SetNextItemWidth(108);
+        float z = _treeZoom;
+        if (ImGui.SliderFloat("##treezoom", &z, TreeMinZoom, TreeMaxZoom, "%.2fx", ImGuiSliderFlags.Logarithmic))
+            _treeZoom = Math.Clamp(z, TreeMinZoom, TreeMaxZoom);
+
+        BandDivider();
+        UiToggle("labels", ref _treeLabels, AcRoutes,
+            "Caption each branch with what takes you down it.\n(Hidden automatically when zoomed far out.)");
+
+        BandDivider();
+        UiFilter("##treesearch", "find a level", _treeSearch, 190f, AcRoutes);
+
+        BandDivider();
+        ImGui.AlignTextToFramePadding();
+        int levels = panes.Sum(p => p.Graph.Nodes.Count(n => n.Kind == GraphNodeKind.Level));
+        int routes = panes.Sum(p => p.Graph.Edges.Count(e => KindShown(e.Kind)));
+        ImGui.TextColored(ColorOf(UiFaint), $"{levels} levels  ·  {routes} routes shown");
+
+        // --- Below: the legend, which doubles as the filter. ---
+        for (int i = 0; i < kinds.Count; i++)
+        {
+            if (i > 0 && !newRow[i]) ImGui.SameLine(0, 4);
+            bool on = KindShown(kinds[i]);
+            if (UiToggle(labels[i], ref on, EdgeColor(kinds[i]),
+                    $"{EdgeName(kinds[i])}\n" +
+                    (on ? "Shown - click to hide these routes" : "Hidden - click to show")))
+                _treeEdgeMask ^= 1 << (int)kinds[i];
+        }
+        if (resetChip)
+        {
+            if (kinds.Count > 0 && !newRow[kinds.Count]) ImGui.SameLine(0, 4);
+            if (UiButton("reset", AcRoutes, "Back to the default set of branches",
+                    ImGui.CalcTextSize("reset").X + 30f))
+                _treeEdgeMask = DefaultEdgeMask;
+        }
+        BandEnd();
     }
 
     /// <summary>Which episodes are framed, so switching the picker re-frames the view.</summary>
@@ -229,11 +261,14 @@ public sealed unsafe partial class App
 
         var dl = ImGui.GetWindowDrawList();
         dl.PushClipRect(canvasPos, canvasPos + avail, true);
-        dl.AddRectFilled(canvasPos, canvasPos + avail, Gfx.Rgba(16, 17, 22));
+        DrawTreeBackdrop(dl, canvasPos, avail);
 
         Vector2 origin = canvasPos + _treeScroll + new Vector2(0, PaneCaptionH * _treeZoom);
         float zoom = _treeZoom;
         float nodeH = EpisodeGraph.NodeH * zoom;
+
+        string query = BufText(_treeSearch).Trim();
+        bool searching = query.Length > 0;
 
         TreePane? hitPane = null;
         int hitNode = -1, hitEdge = -1;
@@ -297,12 +332,23 @@ public sealed unsafe partial class App
             geometry.Add((pane, shown, paths));
         }
 
+        // Boxes win over lines -- but the two hit tests run pane by pane, so an earlier pane
+        // can have claimed an edge before a later pane claims a node, and hitPane then names
+        // the later pane while hitEdge still indexes the earlier one's edge list. Side by side
+        // that really happens: a back edge bows ~60px sideways into its neighbour's column and
+        // the edge hit radius is 9px, so the cursor can be inside one pane's box and next to
+        // another's curve. Left alone it lights the wrong route, and indexes past the end of
+        // the shorter episode's edge list -- inside the pushed clip rect and before RefEnd, so
+        // the throw would take the whole frame's ImGui state with it.
+        if (hitNode >= 0) hitEdge = -1;
+
         // Read the clicks here, while the invisible button is still the last item: the
         // tooltips below open their own windows. A press that moved was a pan, not a click.
         bool moved = ImGui.GetMouseDragDelta(ImGuiMouseButton.Left).LengthSquared() >= 25f;
         bool clicked = hitNode >= 0 && ImGui.IsItemDeactivated() && !moved;
         bool rightClicked = hitNode >= 0 && hovered && ImGui.IsMouseReleased(ImGuiMouseButton.Right);
         bool focus = hitNode >= 0 || hitEdge >= 0;
+        int found = 0;
 
         foreach (var (pane, shown, paths) in geometry)
         {
@@ -311,17 +357,24 @@ public sealed unsafe partial class App
             int localNode = inFocusPane ? hitNode : -1;
             int localEdge = inFocusPane ? hitEdge : -1;
 
-            // --- Edges. When something is hovered, everything unrelated fades back. ---
+            bool NodeFound(GraphNode n) =>
+                searching && n.Kind == GraphNodeKind.Level &&
+                Matches(query, n.Title, n.Subtitle, n.LvlFileNum.ToString());
+
+            // --- Edges. When something is hovered, everything unrelated fades back; when the
+            //     search box has something in it, so does everything it does not reach. ---
             for (int i = 0; i < graph.Edges.Count; i++)
             {
                 if (paths[i] == null) continue;
                 var edge = graph.Edges[i];
                 bool lit = !focus || i == localEdge || edge.From == localNode || edge.To == localNode;
-                uint col = Shade(EdgeColor(edge.Kind), lit ? 1f : 0.55f, lit ? (byte)235 : (byte)55);
+                if (searching && !NodeFound(graph.Nodes[edge.From]) && !NodeFound(graph.Nodes[edge.To]))
+                    lit = false;
+                uint col = Shade(EdgeColor(edge.Kind), lit ? 1f : 0.55f, lit ? (byte)235 : (byte)45);
 
                 for (int k = 1; k < paths[i].Count; k++) dl.PathLineTo(paths[i][k - 1]);
                 dl.PathLineTo(paths[i][^1]);
-                dl.PathStroke(col, ImDrawFlags.None, Math.Max(1f, (lit && focus ? 2.6f : 1.7f) * zoom));
+                dl.PathStroke(col, ImDrawFlags.None, Math.Max(1f, (lit && (focus || searching) ? 2.6f : 1.7f) * zoom));
                 Arrow(dl, paths[i][^2], paths[i][^1], col, Math.Max(4f, 7f * zoom));
             }
 
@@ -334,38 +387,71 @@ public sealed unsafe partial class App
                 bool lit = !focus || (inFocusPane && (node.Id == localNode ||
                     (localNode >= 0 && Touches(graph, localNode, node.Id)) ||
                     (localEdge >= 0 && (graph.Edges[localEdge].From == node.Id || graph.Edges[localEdge].To == node.Id))));
+                bool hitSearch = NodeFound(node);
+                if (searching && !hitSearch) lit = false;
+                if (hitSearch) { lit = true; found++; }
                 bool current = node.Kind == GraphNodeKind.Level &&
                     node.LvlFileNum == _levelFileNum && pane.EpisodeIdx == _episodeIdx;
 
                 uint accent = NodeAccent(graph, node);
-                byte alpha = lit ? (byte)255 : (byte)90;
+                byte alpha = lit ? (byte)255 : (byte)80;
                 float round = node.Kind == GraphNodeKind.Level ? 5f * zoom : nodeH * 0.5f;
 
-                dl.AddRectFilled(p, q, Shade(accent, current ? 0.42f : 0.20f, alpha), round);
+                FlatRect(dl, p, q, Shade(accent, current ? 0.40f : 0.20f, alpha),
+                    Shade(accent, current ? 0.70f : 0.42f, alpha), round);
                 dl.AddRect(p, q, Shade(accent, current ? 1.15f : 0.80f, alpha),
                     round, ImDrawFlags.None, (current ? 2.4f : 1.2f) * Math.Max(0.8f, zoom));
+
+                // The level in the viewer gets a slow breathing ring, so it is findable in a
+                // wall of boxes without hunting for a slightly brighter outline.
+                if (current)
+                {
+                    float pulse = 0.5f + 0.5f * MathF.Sin((float)ImGui.GetTime() * 2.2f);
+                    dl.AddRect(p - new Vector2(2.5f, 2.5f), q + new Vector2(2.5f, 2.5f),
+                        Shade(accent, 1.1f, (byte)(70 + 120 * pulse)), round + 2f, ImDrawFlags.None,
+                        1.6f * Math.Max(0.8f, zoom));
+                }
+                if (hitSearch)
+                    dl.AddRect(p - new Vector2(3.5f, 3.5f), q + new Vector2(3.5f, 3.5f),
+                        Gfx.Rgba(255, 240, 170, 230), round + 3f, ImDrawFlags.None,
+                        2f * Math.Max(0.8f, zoom));
+
                 if (node.Bonus)
                     dl.AddRectFilled(p, new Vector2(p.X + 3f * zoom, q.Y), Shade(Gfx.Rgba(255, 205, 90), 1f, alpha), round);
-                if (node.CubeStops.Count > 0) CubeBadge(dl, q, node, zoom, alpha);
+                if (zoom >= 0.55f)
+                {
+                    // The badge carries a caption at the base size whatever the zoom, so below
+                    // this it would stand taller than the box it hangs off.
+                    if (node.CubeStops.Count > 0) CubeBadge(dl, q, node, zoom, alpha);
+                    NodeMarks(dl, p, q, node, zoom, alpha);
+                }
 
-                if (zoom < 0.42f) continue;      // below this the text is unreadable anyway
-                float fs = ImGui.GetFontSize() * Math.Min(1f, zoom);
-                var size = Measure(node.Title, fs);
-                var textAt = new Vector2(p.X + (q.X - p.X - size.X) * 0.5f, p.Y + (nodeH - size.Y) * 0.5f - fs * 0.22f);
-                ScaledText(dl, textAt, Shade(Gfx.Rgba(238, 242, 250), 1f, alpha), fs, node.Title);
-
+                // Captions hold the base size however far out the tree is zoomed. They used to
+                // shrink with it, which meant they were baked at a fractional size at every
+                // step but 1.00x and read soft the whole way down -- see UiFontSize. Constant
+                // size the way a map labels its towns: clipped to the box when the box gets
+                // narrow, and dropped once the box is shorter than the line itself.
+                float lh = ImGui.GetTextLineHeight();
+                if (nodeH < lh + 4f) continue;
+                float boxW = q.X - p.X - 6f;
                 string sub = TreeSubtitle(node);
-                if (sub.Length == 0) continue;
-                float sfs = fs * 0.82f;
-                var ssize = Measure(sub, sfs);
-                ScaledText(dl, new Vector2(p.X + (q.X - p.X - ssize.X) * 0.5f, textAt.Y + size.Y - fs * 0.05f),
-                    Shade(accent, 1.05f, (byte)(alpha * 0.85f)), sfs, sub);
+                bool twoLine = sub.Length > 0 && nodeH >= lh * 2f + 5f;
+                float ty = p.Y + (nodeH - (twoLine ? lh * 2f : lh)) * 0.5f;
+
+                var size = ImGui.CalcTextSize(node.Title);
+                ClipText(dl, new Vector2(p.X + 3f + Math.Max(0f, (boxW - size.X) * 0.5f), ty), boxW,
+                    Shade(Gfx.Rgba(240, 244, 252), 1f, alpha), node.Title);
+
+                if (!twoLine) continue;
+                var ssize = ImGui.CalcTextSize(sub);
+                ClipText(dl, new Vector2(p.X + 3f + Math.Max(0f, (boxW - ssize.X) * 0.5f), ty + lh), boxW,
+                    Shade(accent, 1.05f, (byte)(alpha * 0.85f)), sub);
             }
 
             // --- Branch captions, on top of everything so they stay readable. Rarer
             // branches are captioned first and a caption that would land on one already
             // placed is dropped, so a fan of outpost picks can't bury a secret warp. ---
-            if (_treeLabels && zoom >= 0.55f)
+            if (_treeLabels && zoom >= 0.55f && !searching)
             {
                 var placed = new List<(Vector2 Min, Vector2 Max)>();
                 foreach (int i in Enumerable.Range(0, graph.Edges.Count)
@@ -385,7 +471,7 @@ public sealed unsafe partial class App
                     foreach (float t in new[] { t0, t0 + 0.16f, t0 - 0.12f, t0 + 0.34f, 0.5f })
                     {
                         var at = paths[i][Math.Clamp((int)(paths[i].Count * t), 0, paths[i].Count - 1)];
-                        if (LabelChip(dl, at, edge.Label, EdgeColor(edge.Kind), zoom, placed)) break;
+                        if (LabelChip(dl, at, edge.Label, EdgeColor(edge.Kind), placed)) break;
                     }
                 }
             }
@@ -394,13 +480,27 @@ public sealed unsafe partial class App
             if (panes.Count > 1 || _allEpisodes)
             {
                 string cap = $"EPISODE {pane.Ep.Number}";
-                float cfs = ImGui.GetFontSize() * Math.Clamp(zoom * 1.4f, 0.9f, 1.8f);
-                var csz = Measure(cap, cfs);
+                // 2x once the reserved band is tall enough to hold it, 1x under that: the two
+                // crisp sizes, in place of the 0.9x-1.8x ramp this used to ride.
+                int cm = zoom >= 1f ? 2 : 1;
+                var csz = Measure(cap, cm);
                 ScaledText(dl, new Vector2(origin.X + (pane.X + pane.Graph.Width * 0.5f) * zoom - csz.X * 0.5f,
-                        origin.Y - (PaneCaptionH - 6f) * zoom),
-                    Gfx.Rgba(150, 190, 245, 235), cfs, cap);
+                        origin.Y - csz.Y - 4f * zoom),
+                    Gfx.Rgba(150, 190, 245, 235), cm, cap);
             }
         }
+
+        // Inside the clip rect: on a narrow window the hint is wider than the canvas, and
+        // outside it the text would run over the window's own edge.
+        var hintAt = new Vector2(canvasPos.X + 9f, canvasPos.Y + avail.Y - ImGui.GetTextLineHeight() - 13f);
+        if (searching)
+            UiHint(dl, hintAt, found > 0
+                ? $"{found} level{(found == 1 ? "" : "s")} match \"{query}\""
+                : $"nothing matches \"{query}\"", AcRoutes);
+        else if (hovered && hitNode < 0 && hitEdge < 0)
+            UiHint(dl, hintAt,
+                "drag to pan  ·  wheel to zoom  ·  click a level to open it  ·  right-click for its datacubes",
+                AcRoutes);
 
         dl.PopClipRect();
 
@@ -415,10 +515,56 @@ public sealed unsafe partial class App
             if (rightClicked && node.CubeStops.Count > 0)
                 OpenCubes(hitPane.EpisodeIdx, node.CubeStops[0].Cubes[0]);
         }
+    }
 
-        if (hovered && hitNode < 0 && hitEdge < 0)
-            dl.AddText(new Vector2(canvasPos.X + 8, canvasPos.Y + avail.Y - 20), Gfx.Rgba(120, 128, 148),
-                "drag to pan · wheel to zoom · click a level to open it · right-click for its datacubes");
+    /// <summary>
+    /// The canvas floor: a faint grid that makes panning and zooming legible as motion, and a
+    /// darkening at the edges so the graph reads as sitting in a space rather than being
+    /// clipped by one.
+    /// </summary>
+    private void DrawTreeBackdrop(ImDrawListPtr dl, Vector2 at, Vector2 size)
+    {
+        var max = at + size;
+        dl.AddRectFilled(at, max, Gfx.Rgba(15, 16, 21));
+
+        float step = 48f * _treeZoom;
+        if (step >= 14f)
+        {
+            uint grid = Gfx.Rgba(255, 255, 255, 8);
+            for (float x = at.X + ((_treeScroll.X % step) + step) % step; x < max.X; x += step)
+                dl.AddLine(new Vector2(x, at.Y), new Vector2(x, max.Y), grid);
+            for (float y = at.Y + ((_treeScroll.Y % step) + step) % step; y < max.Y; y += step)
+                dl.AddLine(new Vector2(at.X, y), new Vector2(max.X, y), grid);
+        }
+
+        // Four edge fades. Square-cornered, but they sit inside a clipped rectangle so the
+        // corners never show.
+        const float v = 46f;
+        uint dark = Gfx.Rgba(8, 9, 12, 190), clear = Gfx.Rgba(8, 9, 12, 0);
+        dl.AddRectFilledMultiColor(at, new Vector2(max.X, at.Y + v), dark, dark, clear, clear);
+        dl.AddRectFilledMultiColor(new Vector2(at.X, max.Y - v), max, clear, clear, dark, dark);
+        dl.AddRectFilledMultiColor(at, new Vector2(at.X + v, max.Y), dark, clear, clear, dark);
+        dl.AddRectFilledMultiColor(new Vector2(max.X - v, at.Y), max, clear, dark, dark, clear);
+    }
+
+    /// <summary>
+    /// The small facts a node carries that its caption has no room for: an outpost before it,
+    /// a savepoint on the way in. Two dots at the top-left, which is the one corner nothing
+    /// else uses (the cube tally sits bottom-right, the bonus stripe on the left edge).
+    /// </summary>
+    private static void NodeMarks(ImDrawListPtr dl, Vector2 p, Vector2 q, GraphNode node, float zoom, byte alpha)
+    {
+        if (node.Kind != GraphNodeKind.Level) return;
+        float r = Math.Clamp(2.4f * zoom, 1.6f, 3.2f);
+        float x = q.X - r - 3f * zoom;
+        float y = p.Y + r + 3f * zoom;
+        if (node.Shop)
+        {
+            dl.AddCircleFilled(new Vector2(x, y), r, Shade(Gfx.Rgba(150, 190, 245), 1f, alpha));
+            x -= r * 2.6f;
+        }
+        if (node.SavePoint)
+            dl.AddCircleFilled(new Vector2(x, y), r, Shade(Gfx.Rgba(120, 220, 140), 1f, alpha));
     }
 
     /// <summary>A small tally on the box: how many readings the outpost before this level
@@ -429,8 +575,7 @@ public sealed unsafe partial class App
     {
         int total = node.AllCubes.Count(), locked = node.CubesLocked;
         string text = locked > 0 && locked < total ? $"{total - locked}/{total}" : total.ToString();
-        float fs = ImGui.GetFontSize() * Math.Clamp(zoom * 0.8f, 0.55f, 0.85f);
-        var size = Measure(text, fs);
+        var size = ImGui.CalcTextSize(text);
         var pad = new Vector2(3f, 0f);
         var q = boxMax + new Vector2(2f * zoom, 1f * zoom);
         var p = q - size - pad * 2f;
@@ -439,7 +584,7 @@ public sealed unsafe partial class App
             : Gfx.Rgba(190, 180, 230);                           // some of each
         dl.AddRectFilled(p, q, Shade(accent, 0.30f, (byte)(alpha * 0.92f)), 2f);
         dl.AddRect(p, q, Shade(accent, 0.75f, (byte)(alpha * 0.85f)), 2f);
-        if (fs >= 6f) ScaledText(dl, p + pad, Shade(accent, 1.15f, alpha), fs, text);
+        dl.AddText(p + pad, Shade(accent, 1.15f, alpha), text);
     }
 
     // =====================================================================
@@ -558,11 +703,10 @@ public sealed unsafe partial class App
     };
 
     /// <summary>Draw a caption unless it would land on one already placed. False if skipped.</summary>
-    private static bool LabelChip(ImDrawListPtr dl, Vector2 at, string text, uint accent, float zoom,
+    private static bool LabelChip(ImDrawListPtr dl, Vector2 at, string text, uint accent,
         List<(Vector2 Min, Vector2 Max)> placed)
     {
-        float fs = ImGui.GetFontSize() * Math.Clamp(zoom, 0.7f, 1f);
-        var size = Measure(text, fs);
+        var size = ImGui.CalcTextSize(text);
         var pad = new Vector2(4f, 1f);
         var p = at - new Vector2(size.X * 0.5f, size.Y * 0.5f) - pad;
         var q = p + size + pad * 2f;
@@ -571,24 +715,10 @@ public sealed unsafe partial class App
             if (p.X < mx.X && q.X > mn.X && p.Y < mx.Y && q.Y > mn.Y) return false;
         placed.Add((p, q));
 
-        dl.AddRectFilled(p, q, Gfx.Rgba(16, 17, 22, 226), 3f);
+        dl.AddRectFilled(p, q, Gfx.Rgba(16, 17, 22, 232), 3f);
         dl.AddRect(p, q, Shade(accent, 0.75f, 190), 3f);
-        ScaledText(dl, p + pad, Shade(accent, 1.1f), fs, text);
+        dl.AddText(p + pad, Shade(accent, 1.1f), text);
         return true;
-    }
-
-    /// <summary>The default font measured at an arbitrary size — the atlas scales uniformly,
-    /// so the ratio to the current size is exact.</summary>
-    private static Vector2 Measure(string text, float size) =>
-        ImGui.CalcTextSize(text) * (size / ImGui.GetFontSize());
-
-    /// <summary>Draw text at an arbitrary size, so node captions shrink with the tree.</summary>
-    private static void ScaledText(ImDrawListPtr dl, Vector2 pos, uint col, float size, string text)
-    {
-        Span<byte> buf = stackalloc byte[192];
-        int n = System.Text.Encoding.UTF8.GetBytes(text.AsSpan(0, Math.Min(text.Length, 180)), buf);
-        fixed (byte* p = buf)
-            dl.AddText(ImGui.GetFont(), size, pos, col, p, p + n);
     }
 
     private static float SegDistSq(Vector2 p, Vector2 a, Vector2 b)
@@ -603,12 +733,21 @@ public sealed unsafe partial class App
     {
         var g = pane.Graph;
         ImGui.BeginTooltip();
-        ImGui.TextColored(ColorOf(NodeAccent(g, node)), node.Title);
+        ImGui.PushTextWrapPos(430f);
+        uint accent = NodeAccent(g, node);
+        UiTitle(node.Title, accent, "", 1, 430f);
         if (node.Kind == GraphNodeKind.Level)
         {
-            ImGui.Separator();
-            ImGui.Text($"episode {pane.Ep.Number}    level file  #{node.LvlFileNum}    script section  {node.Section}");
-            ImGui.Text($"song  {node.Song}");
+            Badge($"file #{node.LvlFileNum:00}", accent);
+            ImGui.SameLine(0, 4f);
+            Badge($"section {node.Section}", Gfx.Rgba(150, 162, 185));
+            ImGui.SameLine(0, 4f);
+            // The number is what the script says; the title is what anyone would recognise.
+            // (This is inside a tooltip, so it names the song rather than linking to it.)
+            Badge(node.Song > 0
+                ? $"song {node.Song}  {MusicBank.Titles[Math.Min(node.Song - 1, MusicBank.Titles.Length - 1)]}"
+                : "no song", node.Song > 0 ? AcMusic : Gfx.Rgba(150, 162, 185));
+
             var tags = new List<string>();
             if (node.Bonus) tags.Add("bonus level (a death here doesn't cost the run)");
             if (node.Galaga) tags.Add("Galaga mode");
@@ -616,17 +755,20 @@ public sealed unsafe partial class App
             if (node.Extra) tags.Add("extra game");
             if (node.SavePoint) tags.Add("savepoint on the way in");
             if (node.Shop) tags.Add("outpost before it");
-            foreach (var t in tags) ImGui.BulletText(t);
+            if (tags.Count > 0)
+            {
+                ImGui.Dummy(new Vector2(0, 2f));
+                foreach (var t in tags) ImGui.BulletText(t);
+            }
 
             if (node.CubeStops.Count > 0)
             {
                 var cubes = _gd!.GetCubes(pane.Ep);
                 for (int s = 0; s < node.CubeStops.Count; s++)
                 {
-                    ImGui.Separator();
-                    ImGui.TextDisabled(node.CubeStops.Count > 1
-                        ? $"datacubes at the outpost before it (route {s + 1} of {node.CubeStops.Count})"
-                        : "datacubes at that outpost");
+                    UiSection(node.CubeStops.Count > 1
+                        ? $"datacubes at that outpost (route {s + 1} of {node.CubeStops.Count})"
+                        : "datacubes at that outpost", Gfx.Rgba(185, 150, 255));
                     var stop = node.CubeStops[s];
                     foreach (int idx in stop.Cubes)
                     {
@@ -641,21 +783,21 @@ public sealed unsafe partial class App
                 }
             }
 
-            ImGui.Separator();
-            ImGui.TextDisabled("gets here by");
+            UiSection("gets here by", AcRoutes);
             if (node.In.Count == 0) ImGui.BulletText("nothing - unreachable in the campaign");
             foreach (int ei in node.In)
                 RouteLine(g.Edges[ei], g.Nodes[g.Edges[ei].From].Title);
-            ImGui.TextDisabled("leads to");
+            UiSection("leads to", AcRoutes);
             if (node.Out.Count == 0) ImGui.BulletText("nothing - the route ends here");
             foreach (int ei in node.Out)
                 RouteLine(g.Edges[ei], g.Nodes[g.Edges[ei].To].Title);
 
-            ImGui.Separator();
-            ImGui.TextDisabled(node.CubeStops.Count > 0
+            ImGui.Dummy(new Vector2(0, 3f));
+            ImGui.TextColored(ColorOf(UiFaint), node.CubeStops.Count > 0
                 ? "click to open this level  ·  right-click to read its datacubes"
                 : "click to open this level in the viewer");
         }
+        ImGui.PopTextWrapPos();
         ImGui.EndTooltip();
     }
 
@@ -674,10 +816,9 @@ public sealed unsafe partial class App
     private void TreeEdgeTooltip(EpisodeGraph g, GraphEdge edge)
     {
         ImGui.BeginTooltip();
-        ImGui.TextColored(ColorOf(EdgeColor(edge.Kind)), EdgeName(edge.Kind));
-        ImGui.Separator();
+        UiTitle(EdgeName(edge.Kind), EdgeColor(edge.Kind), "", 1, 430f);
         ImGui.Text($"{g.Nodes[edge.From].Title}   ->   {g.Nodes[edge.To].Title}");
-        if (edge.Detail.Length > 0) ImGui.TextDisabled(edge.Detail);
+        if (edge.Detail.Length > 0) ImGui.TextColored(ColorOf(UiDim), edge.Detail);
         ImGui.EndTooltip();
     }
 

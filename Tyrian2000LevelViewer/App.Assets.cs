@@ -65,6 +65,25 @@ public readonly record struct SpriteSource(SpriteStore Store, int Index, bool Xm
         _ => $"shapes{char.ToLowerInvariant(FileChar)}",
     };
 
+    /// <summary>The two halves a two-line list row wants: what the bank IS, then where it
+    /// lives on disk. <see cref="Title"/> runs them together for headings and tooltips.</summary>
+    public string ListTitle => Store switch
+    {
+        SpriteStore.Newsh => $"Bank {Index:00}",
+        SpriteStore.NewshFile => "Shop & HUD icons",
+        SpriteStore.MainSheet => MainSheetName(Index),
+        SpriteStore.MainBank => MainBankName(Index),
+        _ => $"Tile set {char.ToUpperInvariant(FileChar)}",
+    };
+
+    public string ListNote => Store switch
+    {
+        SpriteStore.Newsh => $"newsh{char.ToLowerInvariant(GameData.ShapeBankChar(Index))}.shp",
+        SpriteStore.NewshFile => $"newsh{char.ToLowerInvariant(FileChar)}.shp",
+        SpriteStore.MainSheet or SpriteStore.MainBank => $"{ShapeFile} #{Index}",
+        _ => $"shapes{char.ToLowerInvariant(FileChar)}.dat",
+    };
+
     // sprite.h:29-36 -- the Sprite_array sub-tables.
     private static string MainBankName(int i) => i switch
     {
@@ -153,8 +172,12 @@ public sealed unsafe partial class App
         _appearances = null;
         _appearancesFor = -1;
         _statsCache.Clear();
+        _peerRows.Clear();
+        _peerKey = "";
         _enemySelected = -1;
         _sprSelected = -1;
+        _usage = null;              // song/sound cross-references belong to the old data set
+        _seqCache.Clear();
     }
 
     /// <summary>

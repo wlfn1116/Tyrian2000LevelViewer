@@ -216,12 +216,15 @@ public sealed class GameData
 
     /// <summary>The episode's shop tables (ships, ports, sidekicks, shields, generators,
     /// specials), cached. Never null; check <see cref="ItemData.Loaded"/>.</summary>
-    public ItemData GetItems(EpisodeInfo ep)
+    public ItemData GetItems(EpisodeInfo ep, bool fork = true)
     {
-        if (_itemCache.TryGetValue(ep.Number, out var it)) return it;
-        try { it = ItemData.Load(DataDir, ep); }
+        // Keyed on the fork flag too: the two are different tables, and the browser flips
+        // between them, so one cache slot per episode would keep handing back the wrong shop.
+        int key = ep.Number * 2 + (fork ? 1 : 0);
+        if (_itemCache.TryGetValue(key, out var it)) return it;
+        try { it = ItemData.Load(DataDir, ep, fork); }
         catch { it = new ItemData(); }
-        _itemCache[ep.Number] = it;
+        _itemCache[key] = it;
         return it;
     }
 

@@ -18,6 +18,7 @@ internal static unsafe class NativeFileDialog
     private const uint FosPickFolders = 0x20;
     private const uint FosForceFileSystem = 0x40;
     private const uint FosPathMustExist = 0x800;
+    private const uint FosFileMustExist = 0x1000;
     private const uint SigdnFileSystemPath = 0x80058000;
     private const int ErrorCancelled = unchecked((int)0x800704C7);
 
@@ -46,11 +47,19 @@ internal static unsafe class NativeFileDialog
     }
 
     /// <summary>The Save-As box, pre-filled with <paramref name="defaultName"/> (".png" enforced).</summary>
+    /// <summary>The file type offered follows <paramref name="defaultName"/>'s extension.</summary>
     public static string? SaveFileBlocking(string? initialDir, string defaultName, IntPtr owner,
         string title = "Save PNG")
     {
         return RunDialog(in ClsidFileSaveDialog, in IidFileSaveDialog, initialDir, owner, title,
             FosOverwritePrompt | FosForceFileSystem, defaultName);
+    }
+
+    /// <summary>The Open box, for choosing a file that must already exist (the SoundFont picker).</summary>
+    public static string? OpenFileBlocking(string? initialDir, IntPtr owner, string title)
+    {
+        return RunDialog(in ClsidFileOpenDialog, in IidFileOpenDialog, initialDir, owner, title,
+            FosFileMustExist | FosForceFileSystem | FosPathMustExist, null);
     }
 
     /// <param name="saveName">null = folder chooser; otherwise the pre-filled PNG file name.</param>
@@ -103,16 +112,40 @@ internal static unsafe class NativeFileDialog
         }
     }
 
-    /// <summary>Offer only PNG, append the extension for a name typed without one, pre-fill the box.</summary>
+    /// <summary>
+    /// Offer one file type, append its extension for a name typed without one, pre-fill the
+    /// box. The type is taken from the default name's own extension, so the same Save-As
+    /// serves the PNG exports, the audio ones and the datacube readings.
+    /// </summary>
     private static void SetUpSave(IntPtr dialog, string fileName)
     {
-        var spec = new FilterSpec { Name = PngTypeName, Spec = PngTypeSpec };
-        ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, uint, FilterSpec*, int>)Slot(dialog, 4))(
-            dialog, 1, &spec));
-        fixed (char* ext = "png")
-            ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, char*, int>)Slot(dialog, 22))(dialog, ext));
-        fixed (char* namePtr = fileName)
-            ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, char*, int>)Slot(dialog, 15))(dialog, namePtr));
+        string ext = Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant();
+        if (ext.Length == 0) ext = "png";
+        string label = ext switch
+        {
+            "wav" => "WAVE audio (*.wav)",
+            "mid" => "MIDI file (*.mid)",
+            "md" => "Markdown document (*.md)",
+            _ => "PNG image (*.png)",
+        };
+
+        IntPtr namePtr2 = Marshal.StringToCoTaskMemUni(label);
+        IntPtr specPtr = Marshal.StringToCoTaskMemUni("*." + ext);
+        try
+        {
+            var spec = new FilterSpec { Name = namePtr2, Spec = specPtr };
+            ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, uint, FilterSpec*, int>)Slot(dialog, 4))(
+                dialog, 1, &spec));
+            fixed (char* extPtr = ext)
+                ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, char*, int>)Slot(dialog, 22))(dialog, extPtr));
+            fixed (char* namePtr = fileName)
+                ThrowIfFailed(((delegate* unmanaged[Stdcall]<IntPtr, char*, int>)Slot(dialog, 15))(dialog, namePtr));
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(namePtr2);
+            Marshal.FreeCoTaskMem(specPtr);
+        }
     }
 
     private static void SetInitialFolder(IntPtr dialog, string? initialDir)

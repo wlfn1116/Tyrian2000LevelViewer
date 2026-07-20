@@ -69,6 +69,7 @@ public sealed unsafe partial class App
     private bool _simFire = true;
     private int _simMaxMinutes = 10;
     private int _simLoopCycles = 2;          // boss-gate / route-loop repeats kept in the preview
+    private int _simHoldSeconds = 20;        // enemy-gated hold watched (and kept) for this long
     private float _playZoom;                 // 0 = fit to the panel automatically
     private Vector2 _playPan;                // manual pan offset, screen px
     private bool _fitAroundHud;              // "UI fit": fit the slice the controls HUD leaves free
@@ -99,7 +100,7 @@ public sealed unsafe partial class App
     private ImGuiMouseButton _playerDragButton = ImGuiMouseButton.Left;
     // Which HUD sections are unfolded, indexed by PbSec. The HUD window is NoSavedSettings
     // (it is placed over the view, not by the .ini), so this is ours to keep and persist.
-    private readonly bool[] _pbOpen = { true, false, false, false, true, false, true };
+    private readonly bool[] _pbOpen = { true, false, false, false, true, false, true, true };
     // Playfield crop width for the current mode (widescreen 299 / vanilla 264) and the phantom-
     // player X range derived from it. Vanilla keeps the viewer's historical 36..260; widescreen
     // uses the widescreen build's ACTUAL ship clamp [SHIP_LEFT_MARGIN, PLAYFIELD_WIDTH -
@@ -169,24 +170,35 @@ public sealed unsafe partial class App
         _showEnemies = settings.ShowEnemies;
         _showItems = settings.ShowItems;
         _showAnalysis = settings.ShowAnalysis;
+        _analysisDifficulty = Math.Clamp(settings.AnalysisDifficulty, 0, 10);
         _enemyMode = Math.Clamp(settings.EnemyBrowseMode, 0, 1);
         _asmUnique = settings.AssembliesUnique ?? true;
         _sprGapless = settings.SpritesGapless;
         _sprCols = Math.Clamp(settings.SpritesColumns, 0, 40);
         _sprCheckerboard = settings.SpritesCheckerboard ?? true;
+        _sprNumbers = settings.SpritesNumbers;
+        _enemyMotion = settings.EnemyMotion ?? true;
+        _itemFork = settings.ItemsFork ?? true;
         if (settings.SpriteListWidth > 100f) _sprListW = settings.SpriteListWidth;
         if (settings.EnemyListWidth > 100f) _enemyListW = settings.EnemyListWidth;
         if (settings.ItemListWidth > 100f) _itemListW = settings.ItemListWidth;
         _allEpisodes = settings.AllEpisodes;
         if (settings.TreeEdgeMask != 0) _treeEdgeMask = settings.TreeEdgeMask;   // 0 = never saved
         if (settings.PbSections >= 0)   // -1 = never saved: keep the defaults above
-            for (int i = 0; i < _pbOpen.Length; i++)
+        {
+            // Only as many bits as the build that wrote them had sections; a section added
+            // since then keeps its own default rather than reading a 0 that means "absent".
+            int saved = settings.PbSectionCount > 0 ? settings.PbSectionCount : 7;
+            for (int i = 0; i < Math.Min(saved, _pbOpen.Length); i++)
                 _pbOpen[i] = (settings.PbSections & (1 << i)) != 0;
+        }
+        LoadAudioSettings(settings);
         _hudPinRight = settings.PbPinRight;
         _fitAroundHud = settings.PbFitAroundHud;
         _levelsHeight = settings.LevelsHeight > 30 ? settings.LevelsHeight : 170f;
         _layersHeight = settings.LayersHeight > 30 ? settings.LayersHeight : 0f;  // 0 = fit to content
         ApplyLayerSettings(settings.Layers);
+        LoadRefWindows(settings.RefWindows);
 
         _episodeIdx = cliEp >= 0 ? cliEp : settings.EpisodeIdx;
         // --start names a level by its index within one episode, so it implies that episode.
@@ -216,6 +228,7 @@ public sealed unsafe partial class App
             _gd = new GameData(dir);
             _dataDir = dir;
             SetDirBuf(dir);
+            InitAudio(dir);
             _episodeIdx = Math.Clamp(_episodeIdx, 0, Math.Max(0, _gd.Episodes.Count - 1));
             _status = $"Loaded {_gd.Episodes.Count} episodes.";
             _showDirInput = false;
@@ -284,6 +297,7 @@ public sealed unsafe partial class App
         s.ShowEnemies = _showEnemies;
         s.ShowItems = _showItems;
         s.ShowAnalysis = _showAnalysis;
+        s.AnalysisDifficulty = _analysisDifficulty;
         s.SpriteListWidth = _sprListW;
         s.EnemyListWidth = _enemyListW;
         s.ItemListWidth = _itemListW;
@@ -292,11 +306,16 @@ public sealed unsafe partial class App
         s.SpritesGapless = _sprGapless;
         s.SpritesColumns = _sprCols;
         s.SpritesCheckerboard = _sprCheckerboard;
+        s.SpritesNumbers = _sprNumbers;
+        s.EnemyMotion = _enemyMotion;
+        s.ItemsFork = _itemFork;
         s.AllEpisodes = _allEpisodes;
         s.TreeEdgeMask = _treeEdgeMask;
         int secBits = 0;
         for (int i = 0; i < _pbOpen.Length; i++) if (_pbOpen[i]) secBits |= 1 << i;
         s.PbSections = secBits;
+        s.PbSectionCount = _pbOpen.Length;
+        SaveAudioSettings(s);
         s.PbPinRight = _hudPinRight;
         s.PbFitAroundHud = _fitAroundHud;
         s.LevelsHeight = _levelsHeight;
@@ -304,6 +323,7 @@ public sealed unsafe partial class App
         s.HasView = _viewInitialized;
         s.Zoom = _zoom; s.ScrollX = _scroll.X; s.ScrollY = _scroll.Y;
         s.Layers = _layers.Select(l => new LayerState { Id = l.Id, Visible = l.Visible, Alpha = l.Alpha }).ToList();
+        s.RefWindows = SaveRefWindows();
     }
 
     /// <summary>A full-height vertical splitter bar; drag it to resize the column at its left.
@@ -508,8 +528,23 @@ public sealed unsafe partial class App
         // Ahead of the playback branch's early return, so search is reachable in either mode.
         if (io.KeyCtrl && ImGui.IsKeyPressed(ImGuiKey.F)) OpenSearch();
 
-        if (ImGui.IsKeyPressed(ImGuiKey.DownArrow, true)) SelectLevelStep(1);
-        if (ImGui.IsKeyPressed(ImGuiKey.UpArrow, true)) SelectLevelStep(-1);
+        // A focused audio browser owns space and the arrows: they are that window's transport
+        // and its own list. Ahead of the level stepping below, which would otherwise scroll
+        // the level list out from under it. The focus flag is a frame stale, which is fine --
+        // focus does not change between key repeats.
+        if (_audioWindowFocused)
+        {
+            HandleAudioWindowKeys();
+            return;
+        }
+
+        // The search palette walks its own results with the arrows while it holds the focus,
+        // so stepping the level here as well would scroll the list out from under it.
+        if (!(_showSearch && _searchOwnsKeys))
+        {
+            if (ImGui.IsKeyPressed(ImGuiKey.DownArrow, true)) SelectLevelStep(1);
+            if (ImGui.IsKeyPressed(ImGuiKey.UpArrow, true)) SelectLevelStep(-1);
+        }
 
         if (_playbackMode && _playback != null)
         {
@@ -559,11 +594,13 @@ public sealed unsafe partial class App
                 ShowScreenFlip = _showScreenFlip,
                 ShowBossBars = _showBossBars,
                 PreviewLoopCycles = _simLoopCycles,   // boss-gate / route-loop repeats kept
+                PreviewHoldSeconds = _simHoldSeconds, // enemy-gated hold watched and kept
                 PlayerX = _simPlayerX,   // sticky: the phantom player keeps its last position
                 PlayerY = _simPlayerY,   // whether or not the drag marker is currently shown
 
             };
             _playback = new SimPlayback(sim, Math.Max(1, _simMaxMinutes) * 60 * 35);
+            _playback.OnLiveTick = OnSimAudioTick;
             _playback.SeekTo(Math.Clamp(keepTick, 1, _playback.Duration));
             _status = $"Playback ready: {SimPlayback.FormatTime(_playback.Duration)} " +
                 (_playback.EndedNaturally ? _playback.LoopDetected
@@ -623,6 +660,7 @@ public sealed unsafe partial class App
         if (_playback == null) return;
         if (_pendingJump is { } jump) { _pendingJump = null; SeekPlaybackTo(jump); }
         SyncPlaybackVisibility();
+        UpdateGameAudio();
         if (_playing)
         {
             _playAccum += ImGui.GetIO().DeltaTime * (float)GameSim.TicksPerSecond * _playSpeed;
@@ -633,7 +671,7 @@ public sealed unsafe partial class App
                 n = Math.Min(n, (int)GameSim.TicksPerSecond * 8);   // avoid catch-up spirals
                 if (_playDirection > 0)
                 {
-                    _playback.Advance(n);
+                    _playback.Advance(n, audio: true);
                     if (_playback.AtEnd) _playing = false;
                 }
                 else
@@ -787,6 +825,7 @@ public sealed unsafe partial class App
         }
 
         if (_exportDone != null) { _status = _exportDone; _exportDone = null; }
+        PumpSpriteExportAll();   // one bank's sheet a frame, once its folder has been chosen
 
         HandleKeys();
 
@@ -801,6 +840,7 @@ public sealed unsafe partial class App
         }
         _img.Upload(_renderer);
 
+        SyncAudioVolumes();
         if (_playbackMode && _playback != null)
             UpdatePlayback();
 
@@ -843,6 +883,11 @@ public sealed unsafe partial class App
         DrawEnemyWindow();
         DrawItemWindow();
         DrawAnalysisWindow();
+        DrawMusicWindow();
+        DrawSoundWindow();
+        // Space and the arrows belong to whichever audio browser has the focus; HandleKeys
+        // reads this next frame, before either window has drawn.
+        _audioWindowFocused = _musicFocused || _soundFocused;
         DrawSearchWindow();
     }
 
@@ -888,9 +933,169 @@ public sealed unsafe partial class App
                 "per segment, and how the levels rank against each other."))
             _showAnalysis = !_showAnalysis;
 
+        if (Chip("Music", _showMusic, AcMusic, w,
+                "Every song in music.mus laid out like a DAW clip: all nine Loudness\n" +
+                "channels, their notes, where each song is used, and a choice of\n" +
+                "AdLib, SoundFont or the OS synthesizer to hear it through."))
+            _showMusic = !_showMusic;
+        ImGui.SameLine(0, 5);
+        if (Chip("Sounds", _showSounds, AcSound, w,
+                "All forty clips -- the thirty-one effects and the nine announcer\n" +
+                "lines -- with their waveforms and every weapon and level event\n" +
+                "that fires them."))
+            _showSounds = !_showSounds;
+
         if (Chip("Search  (Ctrl+F)", _showSearch, AcPlayer, -1f,
                 "One box over levels, enemies, items, datacubes and sprites."))
             OpenSearch();
+    }
+
+    /// <summary>
+    /// The playback launch. Every other switch in this column changes how the level is
+    /// <em>drawn</em>; this one hands the level to the engine and lets it run, which is a
+    /// different order of thing entirely -- and as a checkbox filed between the object display
+    /// mode and the palette it read as one more of them. So it is a slab instead: the column's
+    /// one big key, sized and lit to say that pressing it changes what the viewer <em>is</em>.
+    ///
+    /// Armed, it keeps carrying the run -- transport state, speed, position in the timeline --
+    /// so the column still reports what the simulation is doing with the playback HUD closed.
+    /// </summary>
+    private void DrawPlaybackLaunch()
+    {
+        bool ready = _level != null && _shapes != null;
+        float w = ImGui.GetContentRegionAvail().X;
+        float h = ImGui.GetTextLineHeight() * 3f + 22f;   // a 2x title row, a caption row, padding
+
+        ImGui.Dummy(new Vector2(0, 2f));
+        var p = ImGui.GetCursorScreenPos();
+        // Hit-tested by hand rather than through BeginDisabled, the way the rest of this UI's
+        // own controls are: a slab that cannot be pressed still has to say why, and
+        // BeginDisabled swallows the hover the tooltip hangs off.
+        bool hit = ImGui.InvisibleButton("##pblaunch", new Vector2(w, h)) && ready;
+        bool hot = ready && ImGui.IsItemHovered();
+        bool held = ready && ImGui.IsItemActive();
+        if (hit)
+        {
+            _playbackMode = !_playbackMode;
+            _playing = false;
+            if (_playbackMode && _playback == null) BuildPlayback();   // may clear the flag again
+        }
+
+        bool on = _playbackMode && ready;
+        var pb = on ? _playback : null;
+        var q = p + new Vector2(w, h);
+        var dl = ImGui.GetWindowDrawList();
+        float t = (float)ImGui.GetTime();
+        uint ac = AcSim;
+
+        // Flat, not a gradient: the house rule is that a surface this big shades into a smear.
+        // What makes it feel live is the rail, the ring and the sweep, not the fill.
+        float lit = !ready ? 0f : on ? 0.34f : hot ? 0.15f : 0.06f;
+        FlatRect(dl, p, q, Mix(ready ? UiPanel : Gfx.Rgba(21, 23, 30), ac, lit),
+            Mix(UiPanelHi, ac, lit + (on ? 0.24f : 0.10f)), 7f);
+        dl.AddRect(p, q, !ready ? Gfx.Rgba(36, 40, 51) : on ? Shade(ac, 1.0f, 225)
+            : hot ? Shade(ac, 0.78f, 195) : Mix(UiLineSoft, ac, 0.20f), 7f, ImDrawFlags.None,
+            on ? 1.8f : 1f);
+        if (held) dl.AddRectFilled(p, q, Gfx.Rgba(255, 255, 255, 16), 7f);
+
+        // Armed, a slow breathing ring; running, it breathes at twice the rate. The same cue
+        // the level tree puts on the level you are looking at, turned up for the one control
+        // that puts the whole viewer in another mode.
+        if (on)
+        {
+            float pulse = 0.5f + 0.5f * MathF.Sin(t * (_playing ? 4.4f : 2.0f));
+            dl.AddRect(p - new Vector2(2.5f, 2.5f), q + new Vector2(2.5f, 2.5f),
+                Shade(ac, 1.1f, (byte)(45 + 105 * pulse)), 9f, ImDrawFlags.None, 1.7f);
+        }
+
+        // A light running along the top lip while the simulation is actually advancing, so a
+        // running panel never looks identical to a paused one.
+        if (on && _playing)
+        {
+            float k = (t * 0.5f) % 1f;
+            float x = p.X + 6f + (w - 12f) * k;
+            uint glow = Shade(ac, 1.2f, 200), clear = Shade(ac, 1.2f, 0);
+            float y0 = p.Y + 1f, y1 = p.Y + 3f;
+            float a0 = Math.Max(p.X + 6f, x - 34f), a1 = Math.Min(q.X - 6f, x + 34f);
+            if (x > a0) dl.AddRectFilledMultiColor(new Vector2(a0, y0), new Vector2(x, y1),
+                clear, glow, glow, clear);
+            if (a1 > x) dl.AddRectFilledMultiColor(new Vector2(x, y0), new Vector2(a1, y1),
+                glow, clear, clear, glow);
+        }
+
+        // The lit left edge every toggle chip in this column carries, at this one's size.
+        dl.AddRectFilled(p, new Vector2(p.X + 3.5f, q.Y),
+            !ready ? Gfx.Rgba(46, 50, 62) : Shade(ac, on ? 1.05f : hot ? 0.75f : 0.40f),
+            3f, ImDrawFlags.RoundCornersLeft);
+
+        // The play glyph, and while the run is live an expanding ring off it -- the one thing
+        // on this panel that moves because the simulation is moving.
+        var c = new Vector2(p.X + 27f, (p.Y + q.Y) * 0.5f);
+        dl.AddCircleFilled(c, 13f, on ? Shade(ac, 0.40f, 245) : Gfx.Rgba(28, 32, 41), 28);
+        dl.AddCircle(c, 13f, !ready ? Gfx.Rgba(44, 48, 60) : on ? Shade(ac, 1.15f, 235)
+            : hot ? Shade(ac, 0.80f, 200) : UiLine, 28, 1.5f);
+        if (on && _playing)
+        {
+            float k = (t * 1.15f) % 1f;
+            dl.AddCircle(c, 13f + k * 10f, Shade(ac, 1.1f, (byte)(140 * (1f - k))), 28, 1.6f);
+        }
+        dl.AddTriangleFilled(new Vector2(c.X - 3.6f, c.Y - 6.6f), new Vector2(c.X - 3.6f, c.Y + 6.6f),
+            new Vector2(c.X + 6.8f, c.Y),
+            // Amber even at rest -- idle, this is a launch key waiting, not a dead one.
+            !ready ? Gfx.Rgba(64, 69, 84) : on ? Gfx.Rgba(255, 248, 232)
+            : hot ? Shade(ac, 1.05f) : Shade(ac, 0.72f));
+
+        float line = ImGui.GetTextLineHeight();
+        float tx = p.X + 48f, rx = q.X - 11f;
+        float titleY = p.Y + 9f, capY = titleY + line * 2f + 4f;
+
+        // The clock rides the title row, right-aligned, and the title is clipped to whatever
+        // that leaves -- a narrowed column loses letters off "PLAYBACK" rather than running
+        // the two into each other.
+        string time = pb != null
+            ? $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.Duration)}"
+            : "";
+        float timeW = time.Length > 0 ? ImGui.CalcTextSize(time).X + 10f : 0f;
+        ClipScaled(dl, new Vector2(tx, titleY), Math.Max(16f, rx - tx - timeW),
+            !ready ? Gfx.Rgba(72, 78, 94) : on ? Gfx.Rgba(255, 246, 228)
+            : hot ? UiText : Gfx.Rgba(178, 185, 202), 2, "PLAYBACK");
+        if (time.Length > 0)
+            dl.AddText(new Vector2(rx - timeW + 10f, titleY + line * 0.5f), Shade(ac, 1.12f), time);
+
+        if (pb != null)
+        {
+            // What the run is doing and how far through the level it is, so the column reports
+            // the simulation whether or not the HUD is open.
+            string state = _playing ? _playDirection > 0 ? "running" : "rewind"
+                : pb.AtEnd ? "at end" : "paused";
+            dl.AddText(new Vector2(tx, capY),
+                _playing ? AcGo : pb.AtEnd ? AcStatus : Shade(ac, 1.05f), state);
+            float used = ImGui.CalcTextSize(state).X + 9f;
+            if (_playing && Math.Abs(_playSpeed - 1f) > 0.01f)
+            {
+                string sp = $"{_playSpeed:0.##}x";
+                dl.AddText(new Vector2(tx + used, capY), Alpha(UiDim, 220), sp);
+                used += ImGui.CalcTextSize(sp).X + 9f;
+            }
+            if (rx - tx - used > 24f)
+                MeterBar(dl, new Vector2(tx + used, capY + 4.5f), new Vector2(rx, capY + 9f),
+                    pb.Duration > 0 ? pb.CurrentTick / (float)pb.Duration : 0f, ac);
+        }
+        else
+        {
+            ClipText(dl, new Vector2(tx, capY), rx - tx,
+                !ready ? Gfx.Rgba(74, 80, 96) : hot ? Alpha(UiText, 235) : UiFaint,
+                !ready ? "load a level to enable" : on ? "no timeline - see status"
+                : hot ? "click to engage the simulation" : "simulate this level like the game");
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip(ready
+                ? "Simulate the level exactly like in-game: enemies move, fire and\n" +
+                  "launch, all level events run, camera locked to the player's view.\n" +
+                  "Space = play/pause, Left/Right = step (Shift = 1 s)."
+                : "Playback runs the level the viewer has open -- load one first.");
+        ImGui.Dummy(new Vector2(0, 2f));
     }
 
     private void DrawControls()
@@ -921,6 +1126,7 @@ public sealed unsafe partial class App
         EpisodeCombo("##episode");
 
         DrawReferenceButtons();
+        DrawPlaybackLaunch();
 
         // --- Levels (resizable) ---
         ImGui.SeparatorText($"Levels ({_browse.Count})");
@@ -976,17 +1182,9 @@ public sealed unsafe partial class App
         if (ImGui.IsItemHovered() && _playbackMode)
             ImGui.SetTooltip("Markers: category dots instead of sprites, live from the simulation.\nOff hides both. Hovering the game view reports whatever is under the\ncursor in any mode.");
 
-        // --- Playback (in-game simulation) ---
-        ImGui.SeparatorText("Playback");
-        bool pb = _playbackMode;
-        if (ImGui.Checkbox("Playback mode", &pb))
-        {
-            _playbackMode = pb;
-            _playing = false;
-            if (pb && _playback == null) BuildPlayback();
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Simulate the level exactly like in-game: enemies move, fire and\nlaunch, all level events run, camera locked to the player's view.\nSpace = play/pause, Left/Right = step (Shift = 1 s).");
+        // Playback itself is launched from the slab under the Reference chips, not from here:
+        // it is not a display option, and sitting between two of them is what made it look
+        // like one.
 
         // --- Palette ---
         ImGui.SeparatorText("Palette");
@@ -1391,7 +1589,9 @@ public sealed unsafe partial class App
     //  symbols, so the play / step / skip icons are drawn straight into the
     //  button rect from simple triangles and bars.
     // =====================================================================
-    private enum Glyph { JumpStart, Rewind, Play, Pause, FastFwd, JumpEnd }
+    // Stop / Loop / MarkA / MarkB were added for the music player's transport; the first six
+    // are the playback bar's and are unchanged.
+    private enum Glyph { JumpStart, Rewind, Play, Pause, FastFwd, JumpEnd, Stop, Loop, MarkA, MarkB }
 
     private static void TriRight(ImDrawListPtr dl, Vector2 c, float r, uint col)
         => dl.AddTriangleFilled(
@@ -1407,6 +1607,77 @@ public sealed unsafe partial class App
 
     private static void VBar(ImDrawListPtr dl, float cx, float cy, float halfH, float halfW, uint col)
         => dl.AddRectFilled(new Vector2(cx - halfW, cy - halfH), new Vector2(cx + halfW, cy + halfH), col, 1f);
+
+    /// <summary>
+    /// Paint one transport mark, centred on <paramref name="c"/> with half-height
+    /// <paramref name="r"/>. Shared by the playback bar's <see cref="TransportBtn"/> and the
+    /// music player's accent-coloured keys, so both speak the same shapes.
+    /// <paramref name="tint"/> colours the one part of a mark that is not plain ink -- the
+    /// pennant on a loop flag.
+    /// </summary>
+    private static void PaintGlyph(ImDrawListPtr dl, Vector2 c, float r, float tk, uint col,
+        uint tint, Glyph g)
+    {
+        switch (g)
+        {
+            case Glyph.JumpStart:
+                VBar(dl, c.X - r * 1.02f, c.Y, r, tk, col);
+                TriLeft(dl, new Vector2(c.X + r * 0.42f, c.Y), r, col);
+                break;
+            case Glyph.Rewind:
+                TriLeft(dl, new Vector2(c.X - r * 0.52f, c.Y), r, col);
+                TriLeft(dl, new Vector2(c.X + r * 0.78f, c.Y), r, col);
+                break;
+            case Glyph.Play:
+                TriRight(dl, new Vector2(c.X + r * 0.14f, c.Y), r * 1.14f, col);
+                break;
+            case Glyph.Pause:
+                VBar(dl, c.X - r * 0.46f, c.Y, r, MathF.Max(1.5f, r * 0.32f), col);
+                VBar(dl, c.X + r * 0.46f, c.Y, r, MathF.Max(1.5f, r * 0.32f), col);
+                break;
+            case Glyph.FastFwd:
+                TriRight(dl, new Vector2(c.X - r * 0.78f, c.Y), r, col);
+                TriRight(dl, new Vector2(c.X + r * 0.52f, c.Y), r, col);
+                break;
+            case Glyph.JumpEnd:
+                TriRight(dl, new Vector2(c.X - r * 0.42f, c.Y), r, col);
+                VBar(dl, c.X + r * 1.02f, c.Y, r, tk, col);
+                break;
+
+            case Glyph.Stop:
+                dl.AddRectFilled(new Vector2(c.X - r * 0.86f, c.Y - r * 0.86f),
+                    new Vector2(c.X + r * 0.86f, c.Y + r * 0.86f), col, 1.5f);
+                break;
+
+            case Glyph.Loop:
+            {
+                // An open ring with an arrowhead on the break: a closed circle would read as
+                // a record button.
+                float rr = r * 0.95f;
+                dl.PathArcTo(c, rr, 0.62f * MathF.PI, 2.28f * MathF.PI, 24);
+                dl.PathStroke(col, ImDrawFlags.None, MathF.Max(1.5f, tk));
+                var tip = new Vector2(c.X + rr * MathF.Cos(0.62f * MathF.PI),
+                    c.Y + rr * MathF.Sin(0.62f * MathF.PI));
+                float a = r * 0.62f;
+                dl.AddTriangleFilled(tip + new Vector2(-a * 0.9f, -a * 0.1f),
+                    tip + new Vector2(a * 0.45f, -a * 0.8f), tip + new Vector2(a * 0.2f, a * 0.7f), col);
+                break;
+            }
+
+            case Glyph.MarkA:
+            case Glyph.MarkB:
+            {
+                // A loop-point flag: an upright with a pennant leaning the way the point cuts.
+                bool isA = g == Glyph.MarkA;
+                float x = isA ? c.X - r * 0.45f : c.X + r * 0.45f;
+                VBar(dl, x, c.Y, r, tk, col);
+                float d = isA ? r * 1.05f : -r * 1.05f;
+                dl.AddTriangleFilled(new Vector2(x, c.Y - r), new Vector2(x + d, c.Y - r * 0.34f),
+                    new Vector2(x, c.Y + r * 0.22f), tint);
+                break;
+            }
+        }
+    }
 
     /// <summary>A transport button with a vector-drawn icon; returns true on click.</summary>
     private bool TransportBtn(string id, Glyph g, string tip, Vector2 size,
@@ -1437,33 +1708,7 @@ public sealed unsafe partial class App
         float r = MathF.Max(3f, MathF.Round((mx.Y - mn.Y) * 0.22f));
         float tk = MathF.Max(1.5f, r * 0.28f);
         uint col = Gfx.Rgba(241, 241, 247);
-        var dl = ImGui.GetWindowDrawList();
-        switch (g)
-        {
-            case Glyph.JumpStart:
-                VBar(dl, c.X - r * 1.02f, c.Y, r, tk, col);
-                TriLeft(dl, new Vector2(c.X + r * 0.42f, c.Y), r, col);
-                break;
-            case Glyph.Rewind:
-                TriLeft(dl, new Vector2(c.X - r * 0.52f, c.Y), r, col);
-                TriLeft(dl, new Vector2(c.X + r * 0.78f, c.Y), r, col);
-                break;
-            case Glyph.Play:
-                TriRight(dl, new Vector2(c.X + r * 0.14f, c.Y), r * 1.14f, col);
-                break;
-            case Glyph.Pause:
-                VBar(dl, c.X - r * 0.46f, c.Y, r, MathF.Max(1.5f, r * 0.32f), col);
-                VBar(dl, c.X + r * 0.46f, c.Y, r, MathF.Max(1.5f, r * 0.32f), col);
-                break;
-            case Glyph.FastFwd:
-                TriRight(dl, new Vector2(c.X - r * 0.78f, c.Y), r, col);
-                TriRight(dl, new Vector2(c.X + r * 0.52f, c.Y), r, col);
-                break;
-            case Glyph.JumpEnd:
-                TriRight(dl, new Vector2(c.X - r * 0.42f, c.Y), r, col);
-                VBar(dl, c.X + r * 1.02f, c.Y, r, tk, col);
-                break;
-        }
+        PaintGlyph(ImGui.GetWindowDrawList(), c, r, tk, col, col, g);
 
         if (pushed > 0) ImGui.PopStyleColor(pushed);
         ImGui.SameLine(0, gap);
@@ -1481,7 +1726,8 @@ public sealed unsafe partial class App
     //  of a column of checkboxes. Which sections are open is ours to remember
     //  (the window is NoSavedSettings) and persists across runs.
     // =====================================================================
-    private enum PbSec { Sim, Build, Player, Enemies, Display, Routes, Status }
+    // Appended, never reordered: the persisted fold state is a bitmask indexed by this.
+    private enum PbSec { Sim, Build, Player, Enemies, Display, Routes, Status, Audio }
 
     private const float HudW = 258f;      // fixed content width, so the chip grid comes out even
     // Pinned, the HUD is a column: its content width plus the padding either side and room for
@@ -1589,6 +1835,12 @@ public sealed unsafe partial class App
 
         ImGui.SetNextWindowPos(new Vector2(viewPos.X + viewSize.X - 12f, viewPos.Y + 12f),
             ImGuiCond.FirstUseEver, new Vector2(1f, 0f));
+        // Anchored by its right edge, so on a window too narrow to hold it the HUD's own left
+        // edge is pushed off the viewport -- and ImGui's own clamp allows that, it only keeps a
+        // sliver of a window on screen. Put it back whenever it has ended up outside.
+        var hudEdge = ImGui.GetMainViewport().WorkPos;
+        if (_hudSize.X > 0f && (_hudPos.X < hudEdge.X || _hudPos.Y < hudEdge.Y))
+            ImGui.SetNextWindowPos(Vector2.Max(_hudPos, hudEdge));
         // Auto-sized, but never taller than the view it floats over: unfold every section on a
         // short window and the HUD scrolls instead of running off the bottom of the screen.
         ImGui.SetNextWindowSizeConstraints(Vector2.Zero,
@@ -1598,8 +1850,8 @@ public sealed unsafe partial class App
         ImGui.PushStyleColor(ImGuiCol.Border, Gfx.Rgba(92, 104, 140, 210));
         ImGui.PushStyleColor(ImGuiCol.TitleBg, Gfx.Rgba(28, 36, 56, 235));
         ImGui.PushStyleColor(ImGuiCol.TitleBgActive, Gfx.Rgba(44, 60, 92, 245));
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 7f);
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1f);
+        // Shape comes from the house style (ApplyGlobalStyle) so the HUD matches every other
+        // movable window; only its own metrics are pushed here.
         PushHudMetrics();
 
         bool hudOpen = ImGui.Begin("Playback controls##pbhud",
@@ -1612,7 +1864,6 @@ public sealed unsafe partial class App
         if (hudOpen) DrawHudBody(pb);
         ImGui.End();
         PopHudMetrics();
-        ImGui.PopStyleVar(2);
         ImGui.PopStyleColor(4);
     }
 
@@ -1673,6 +1924,9 @@ public sealed unsafe partial class App
 
         if (Section(PbSec.Display, "DISPLAY", AcDisplay, $"{FxCount()}/6 on"))
             DrawDisplaySection();
+
+        if (Section(PbSec.Audio, "AUDIO", AcMusic, AudioBadge()))
+            DrawAudioSection();
 
         if (Section(PbSec.Routes, "ROUTES & GATES", AcRoutes, $"{pb.LoopRegions.Count}"))
             DrawRoutesAndGates(pb);
@@ -1748,6 +2002,13 @@ public sealed unsafe partial class App
         if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("How many times each boss gate / route loop repeats in the\npreview before it continues as if the gate was cleared. The\nloop still plays once on the way in. Higher = watch more\nrepeats, but a longer build and timeline.");
+
+        int hold = _simHoldSeconds;
+        if (ImGui.SliderInt("enemy hold", &hold, 1, 120, "%d s"))
+            _simHoldSeconds = hold;
+        if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("The other kind of gate: the map stops with live enemies on it\nand no script left to release them -- it waits for the player to\nkill them. Nothing repeats, so this is simply how long that\nstandoff is watched before the preview destroys them and moves\non, and how much of it the timeline keeps to inspect.");
         ImGui.PopItemWidth();
 
         if (Chip("enemy fire", _simFire, AcSim, HudW,
@@ -2079,7 +2340,11 @@ public sealed unsafe partial class App
                     ("boss gate", $"x{n} kept (until destroyed)", Gfx.Rgba(255, 150, 90)),
                 SimPlayback.HoldLoopKind.RouteLoop =>
                     ("route loop", $"x{n} cycles", Gfx.Rgba(120, 200, 255)),
-                _ => ("enemy hold", "holds until destroyed", Gfx.Rgba(230, 120, 210)),
+                // A hold shorter than the slider asked for is one the run stopped inside.
+                _ => ("enemy hold", SimPlayback.RegionSeconds(r) < pb.Sim.PreviewHoldSeconds
+                        ? $"{SimPlayback.RegionSeconds(r)}s watched (cap reached)"
+                        : $"{SimPlayback.RegionSeconds(r)}s kept (until destroyed)",
+                    Gfx.Rgba(230, 120, 210)),
             };
 
             // colour swatch (boss = orange, route = blue, hold = magenta), then the row.
@@ -2255,11 +2520,21 @@ public sealed unsafe partial class App
         int damage = _clickKillInstant ? GameSim.InstantKillDamage : _clickKillDamage;
         if (!_playback.Sim.DamageEnemy(slot, damage, _clickKillExplosions)) return;
 
+        // The hit queued its own sound (the short boom, or the low one for a big enemy).
+        // Drain it here: the tick below clears the queue before it runs. Sounds only --
+        // the music events of whatever tick ran last are still latched.
+        DrainSimAudio(music: false);
+
         // Nothing of this shows in the frame already on screen: the sprite goes away and the
-        // explosion is spawned for the next drawn tick either way. Stepping one is also what
-        // the hit would have cost in-game. RedrawCurrent is deliberately NOT used — it re-seeks
-        // from the nearest keyframe, which would put the enemy straight back.
-        _playback.Advance(1);
+        // explosion is spawned for the next drawn tick either way. Paused, that tick has to be
+        // asked for, or the shot looks like it did nothing until playback is resumed.
+        // RedrawCurrent is deliberately NOT used — it re-seeks from the nearest keyframe,
+        // which would put the enemy straight back.
+        //
+        // Running, the tick is already coming: UpdatePlayback steps the clock every frame, so
+        // stepping one here as well was a tick the timeline gained out of nowhere — the frame
+        // the shot landed on jumped forward by one and the scroll skipped with it.
+        if (!_playing) _playback.Advance(1, audio: true);
     }
 
     /// <summary>A reticle + ship glyph marking the draggable phantom player. The ship
@@ -2677,7 +2952,10 @@ public sealed unsafe partial class App
                     ? $"\nhatched = enemy-gated script: repeats until the boss/linked enemies die;\n{hoverGate.CycleEnds.Length} cycles are retained, separated by bright lines"
                     : hoverGate.Kind == SimPlayback.HoldLoopKind.RouteLoop
                         ? $"\nhatched = conditional route loop; {hoverGate.CycleEnds.Length} cycles are retained, then playback continues"
-                        : "\nhatched = enemy-gated hold: gameplay waits until the boss/linked enemies die;\n20 seconds are retained for inspection"
+                        : $"\nhatched = enemy-gated hold: gameplay waits until the boss/linked enemies die;\n{SimPlayback.RegionSeconds(hoverGate)} seconds " +
+                          (SimPlayback.RegionSeconds(hoverGate) < pb.Sim.PreviewHoldSeconds
+                              ? "of it were watched before the cap ended the run"
+                              : "are retained for inspection")
                 : "";
             ImGui.SetTooltip($"{SimPlayback.FormatTime(t)}  (tick {t})\n" +
                 "cyan = scroll speed  red = map stop  orange = jump/flow\nwhite = level end  magenta = boss bar" +
@@ -2945,5 +3223,6 @@ public sealed unsafe partial class App
         _img.Dispose();
         _gameView.Dispose();
         _cubeFace.Dispose();
+        ShutdownAudio();
     }
 }

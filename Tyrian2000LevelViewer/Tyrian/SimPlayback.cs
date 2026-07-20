@@ -43,10 +43,23 @@ public sealed class SimPlayback
         1 when _loopRegions[0].Kind == HoldLoopKind.ScriptedLoop =>
             $"enemy-gated loop, {_loopRegions[0].CycleEnds.Length} cycles kept",
         1 when _loopRegions[0].Kind == HoldLoopKind.EnemyHold =>
-            "enemy-gated hold, 20 s preview",
+            $"enemy-gated hold, {RegionSeconds(_loopRegions[0])} s preview",
         1 => $"conditional route loop, {_loopRegions[0].CycleEnds.Length} cycles kept",
         _ => $"{_loopRegions.Count} loop/hold sections previewed",
     };
+
+    /// <summary>How long a retained region runs, in whole seconds — an enemy hold has no
+    /// cycle count to report, so its span is what there is to say about it.</summary>
+    public static int RegionSeconds(LoopRegion r) =>
+        (int)Math.Round((r.EndTick - r.StartTick) / GameSim.TicksPerSecond);
+
+    /// <summary>
+    /// Called after each tick that was stepped live and forward, so the caller can drain
+    /// <see cref="GameSim.SoundQueue"/> and act on a music change. Deliberately not fired
+    /// while seeking: a scrub restores a keyframe and re-runs up to 120 ticks as fast as it
+    /// can, and every one of those would otherwise shout.
+    /// </summary>
+    public Action? OnLiveTick;
 
     /// <summary>Executed events (tick, type, index, backward-jump), for timeline markers.</summary>
     public List<GameSim.EventExec> Events = new();
@@ -100,7 +113,10 @@ public sealed class SimPlayback
         }
 
         if (!EndedNaturally)
+        {
             DetectHoldingLoop();
+            NoteStandingHold(sim);
+        }
 
         PrecomputeMs = sw.ElapsedMilliseconds;
         SeekTo(1);
@@ -184,13 +200,42 @@ public sealed class SimPlayback
         // enough of that state to inspect and seek without fabricating a loop count.
         int lastEv = 1;
         foreach (var e in Events) lastEv = Math.Max(lastEv, e.Tick);
+        // Releasing a hold is not an event: GameSim.PreviewQuietEnemyHold logs its gate and
+        // moves the map on without writing to the event list. Measuring dead air from the last
+        // EVENT therefore re-reports the FIRST standoff of a level that stood through several,
+        // and the Trim below then cut the run back to it -- taking every later hold with it.
+        // Dead air is time since the last thing that happened, of either kind.
+        foreach (var r in _loopRegions) lastEv = Math.Max(lastEv, r.EndTick);
+        int holdTicks = (int)(Math.Max(1, Sim.PreviewHoldSeconds) * GameSim.TicksPerSecond);
+        // Thirty seconds of dead air is the "this run is stuck" test, and stays fixed: the
+        // hold setting says how much of a standoff to keep, not what counts as one. Scaling
+        // this too would make the section vanish from the timeline as the slider went up.
         if (Duration - lastEv > (int)(30 * GameSim.TicksPerSecond))
         {
-            int end = Math.Min(Duration, lastEv + (int)(20 * GameSim.TicksPerSecond));
+            int end = Math.Min(Duration, lastEv + holdTicks);
             _loopRegions.Add(new LoopRegion(lastEv, end, Array.Empty<int>(),
                 HoldLoopKind.EnemyHold, EventIndex: -1));
             Trim(end);
         }
+    }
+
+    /// <summary>
+    /// A hold is logged as a gate when the preview releases it, so a run that stops while
+    /// one is still standing — the tick cap landed inside the standoff, or the hold is set
+    /// longer than the run had left to give it — records nothing, and the section that
+    /// actually ended the run would show as bare timeline. Hatch what was watched of it.
+    /// Whatever the detector above already found takes precedence.
+    /// </summary>
+    private void NoteStandingHold(GameSim sim)
+    {
+        if (_loopRegions.Any(r => r.EndTick >= Duration - 1)) return;
+
+        int start = sim.PendingHoldStartTick;
+        // Two seconds of standoff before it is worth drawing: backMove parks at 0 during
+        // ordinary map-stop events too, and a cap landing on one of those is not a hold.
+        if (start > 0 && Duration - start >= (int)(2 * GameSim.TicksPerSecond))
+            _loopRegions.Add(new LoopRegion(start, Duration, Array.Empty<int>(),
+                HoldLoopKind.EnemyHold, EventIndex: -1));
     }
 
     private void Trim(int newDuration)
@@ -201,6 +246,23 @@ public sealed class SimPlayback
         int lastKey = Duration / KeyInterval;
         if (_keys.Count > lastKey + 1)
             _keys.RemoveRange(lastKey + 1, _keys.Count - lastKey - 1);
+
+        // Regions already added were clamped against the duration the run had BEFORE this
+        // trim. Anything now past the end is unreachable, and the timeline does not skip it --
+        // it clamps both ends of the hatch to the last tick and draws a hairline at the
+        // right-hand edge (App.DrawTimelineBar), which is how a hold that really was found
+        // came to look like one that had gone. Clip what straddles the new end, drop the rest.
+        for (int i = _loopRegions.Count - 1; i >= 0; i--)
+        {
+            var r = _loopRegions[i];
+            if (r.StartTick >= Duration) { _loopRegions.RemoveAt(i); continue; }
+            if (r.EndTick <= Duration) continue;
+            _loopRegions[i] = r with
+            {
+                EndTick = Duration,
+                CycleEnds = r.CycleEnds.Where(t => t <= Duration).ToArray(),
+            };
+        }
     }
 
     /// <summary>Position on frame <paramref name="tick"/> (1..Duration) and draw it.</summary>
@@ -212,7 +274,7 @@ public sealed class SimPlayback
         // Continue live when the target is just ahead of the current frame.
         if (CurrentTick >= 0 && tick > CurrentTick && tick - CurrentTick <= KeyInterval)
         {
-            Advance(tick - CurrentTick);
+            Advance(tick - CurrentTick, audio: false);
             return;
         }
 
@@ -228,15 +290,22 @@ public sealed class SimPlayback
         CurrentTick = tick;
     }
 
-    /// <summary>Step forward from the current frame; draws only the trailing ticks.</summary>
-    public void Advance(int n)
+    /// <summary>
+    /// Step forward from the current frame; draws only the trailing ticks. With
+    /// <paramref name="audio"/> set, <see cref="OnLiveTick"/> fires once per tick so the
+    /// sound queue is drained at the engine's own rate rather than in one burst.
+    /// </summary>
+    public void Advance(int n, bool audio = false)
     {
         if (n <= 0) return;
         int target = Math.Min(CurrentTick + n, Duration);
         n = target - CurrentTick;
         if (n <= 0) return;
         for (int i = 1; i <= n && !Sim.Finished; i++)
+        {
             Sim.Tick(draw: i > n - WarmupDraw);
+            if (audio) OnLiveTick?.Invoke();
+        }
         CurrentTick = target;
     }
 

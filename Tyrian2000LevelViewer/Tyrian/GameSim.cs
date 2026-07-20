@@ -53,6 +53,12 @@ public sealed class GameSim
     /// once on the way in, so the retained region spans this many marked cycles.
     /// Settable per run (the viewer exposes it); a change needs a rebuild.</summary>
     public int PreviewLoopCycles = 2;
+    /// <summary>How long (seconds) an enemy-gated hold — a stopped map with live enemies and
+    /// no further events, which no script will ever release — is watched before the preview
+    /// destroys those enemies and moves on. Also the length of the retained hold region, and
+    /// the tail <see cref="SimPlayback"/> keeps when it finds the same stall without a gate.
+    /// Settable per run (the viewer exposes it); a change needs a rebuild.</summary>
+    public int PreviewHoldSeconds = 20;
 
     // --- static level data (not part of snapshots) ---
     private readonly Level _lv;
@@ -62,6 +68,10 @@ public sealed class GameSim
     private readonly byte[]?[][] _map = new byte[]?[3][];   // [layer][row*cols] -> 672b tile
     private readonly int _maxEvent;
     private readonly CompShapes? _explosionSheet;
+    /// <summary>Last authored event time that addresses each link number, so the parked-above
+    /// recycler below can tell a structure the script is still staging from one it has
+    /// abandoned. Index 0 is unused: dat4 0 means "no link" and appears on most events.</summary>
+    private readonly int[] _lastLinkEvent = new int[256];
 
     // --- sim parameters (fixed per run; changing them requires a rebuild) ---
     public int Difficulty = 2;          // 0 wimp .. 10; 2 = normal
@@ -74,6 +84,10 @@ public sealed class GameSim
     public bool GalagaMode;
     public float ScrollMult = 1f;       // terrain speed what-if multiplier
     public bool FireEnabled = true;     // simulate enemy turrets
+    /// <summary>Set to have the run report what it throws at the player — see
+    /// <see cref="LevelThreat"/>. Null (the default) costs the simulation nothing; the analysis
+    /// window attaches one for the length of a measuring run and detaches it again.</summary>
+    public LevelThreat? Threat;
     public bool PreviewEnemyGates = true; // keep PreviewLoopCycles boss loops, then continue as if defeated
     public int PlayerX = 100, PlayerY = 180;   // phantom player (aim/chase target)
     public uint RngSeed = 5489;
@@ -259,6 +273,69 @@ public sealed class GameSim
             if (_avail[i] == 0) into.Add(i);
     }
 
+    /// <summary>
+    /// Hand the frame just simulated to the attached <see cref="Threat"/>: how much enemy fire
+    /// is in the air, how many enemies are on screen, and how much destructible armour is
+    /// standing in front of the player. Called by the measuring driver after each completed
+    /// tick; a no-op when nothing is measuring.
+    /// </summary>
+    /// <summary>Armour at which a destructible enemy counts half as much as an indestructible
+    /// one in the presence tally. Roughly what a mid-campaign ship clears in the moment an
+    /// enemy spends in front of it: below this the thing is gone before it matters, well above
+    /// it the thing is effectively scenery that happens to be shootable.</summary>
+    private const float Stickiness = 25f;
+
+    public void SampleThreat()
+    {
+        var t = Threat;
+        if (t == null) return;
+
+        int bullets = 0;
+        for (int z = 0; z < _shotAvail.Length; z++)
+            if (_shotAvail[z] == 0) bullets++;
+
+        int armor = 0, hulks = 0;
+        float presence = 0;
+        for (int i = 0; i < _enemy.Length; i++)
+        {
+            if (_avail[i] != 0) continue;               // free, or an already-dropped pickup
+            ref var e = ref _enemy[i];
+            // armorleft 0 is a pickup or pure decoration -- deliberately not counted, which is
+            // why this does not simply reuse the engine's enemyOnScreen: that tally includes
+            // every coin and powerup on screen, and a level raining money is not a hard level.
+            if (e.armorleft == 0) continue;
+            int sx = e.ex + e.mapoffset;
+            bool onScreen = Widescreen ? (sx > WsDrawGateL && sx < WsDrawGateR)
+                                       : (sx > -29 && sx < 300);
+            if (!onScreen) continue;
+
+            // Everything here is a contact hazard: JE_playerCollide (mainint.c:7784) tests every
+            // live slot and charges the player damageRate on touch, and the enemyDat entries the
+            // levels are built from are all on the side of that test that collides. Boss plating,
+            // gauntlet walls and a passing fighter alike -- flying into any of them hurts.
+            //
+            // What separates them is whether shooting makes them go away. 255 is the engine's
+            // indestructible marker, and those never stop being in the way however good the
+            // player is; a six-armour drone is gone the instant it is looked at. So presence is
+            // weighted by how long the thing survives being shot at rather than counted flat --
+            // that is the one correction for there being no player here to clear the screen.
+            if (e.armorleft == 255)
+            {
+                presence += 1f;
+                // ... but only counts as a *wall* if its enemyDat entry was authored
+                // indestructible. Levels routinely make an ordinary enemy invulnerable for a
+                // while with event 25 -- ASSASSIN does it to its boss links at t=1900 and undoes
+                // it at t=2200 -- and taking the live value at face value turns that entrance
+                // into seventeen indestructible walls, outscoring a real gauntlet. Something
+                // that will be shootable again in ten seconds is not scenery.
+                if (DatFor(e.enemytype).Armor == 255) hulks++;
+            }
+            else { armor += e.armorleft; presence += e.armorleft / (e.armorleft + Stickiness); }
+        }
+
+        t.OnTick(bullets, presence, armor, hulks, _s.difficultyLevel);
+    }
+
     private readonly List<EnemyView> _pickScratch = new();
 
     /// <summary>
@@ -346,6 +423,10 @@ public sealed class GameSim
     private void DamageEnemySurvived(int slot, int damage, int link, int armorleft, bool explosions)
     {
         ref Enemy hit = ref _enemy[slot];
+        // Outside the armour test, as in tyrian2.c:2930: hitting indestructible plating still
+        // clicks, it just does not take anything off.
+        Queue(5, 3);   // S_ENEMY_HIT — it took the hit and lived
+
         if (hit.armorleft != 255)
         {
             hit.armorleft = B8(hit.armorleft - damage);
@@ -433,6 +514,9 @@ public sealed class GameSim
                 e.edamaged = true; e.enemycycle = 1;
             }
             else _avail[i] = 1;
+
+            // A big enemy goes with a low boom, anything else with the short one.
+            if (DatFor(e.enemytype).Esize == 1) Queue(6, 9); else Queue(6, 8);
 
             if (!explosions) continue;
             if (DatFor(e.enemytype).Esize == 1)
@@ -589,6 +673,9 @@ public sealed class GameSim
         public int levelFilter, levelFilterNew, levelBrightness, levelBrightnessChg;
         public int superEnemy254Jump;
         public int previewLastEventTick;
+        /// <summary>Last tick on which a standoff was actually standing. Observation only —
+        /// nothing in the simulation reads it. See <see cref="PendingHoldStartTick"/>.</summary>
+        public int previewHoldSeenTick;
         public Bool10 globalFlags;
         public Byte10 newPL;
         public Byte9 smoothies, smoothieData;
@@ -692,6 +779,23 @@ public sealed class GameSim
             _map[layer] = m;
         }
         _maxEvent = lv.Events.Length;
+
+        void MarkLink(int link, int time)
+        {
+            if (link > 0 && link < 256) _lastLinkEvent[link] = Math.Max(_lastLinkEvent[link], time);
+        }
+        foreach (var ev in lv.Events)
+        {
+            // Only events that command enemies already on the field. A spawn's dat4 merely
+            // stamps a number on the new one, and levels recycle the low numbers all the way
+            // through -- counting those would let a stream of fighters on link 3 protect
+            // something the script forgot above the top edge hours earlier.
+            if (ObjectPlacer.IsSpawn(ev.Type, out _, out _)) continue;
+            MarkLink(ev.Dat4, ev.Time);
+            // Event 39 names its links in dat/dat2 instead: the group it renames is still being
+            // handled at that moment, and so is the number it renames them to.
+            if (ev.Type == 39) { MarkLink(ev.Dat, ev.Time); MarkLink(ev.Dat2, ev.Time); }
+        }
 
         // The ']g' that JE_loadMap reads out of the episode script belongs to the level, not
         // to the caller, so resolve it here — the viewer, --simshot and --simtest all get it
@@ -934,9 +1038,35 @@ public sealed class GameSim
     // =====================================================================
     //  One engine tick (the level_loop body, sim-relevant parts in order).
     // =====================================================================
+    /// <summary>
+    /// The engine's <c>soundQueue[8]</c> — one slot per mixer channel, filled during a tick
+    /// and drained after it, so the last write in a tick wins. Channel 3 is the announcer
+    /// channel and plays at full volume. Deliberately outside the snapshot: it is a single
+    /// tick's worth of intent, and re-simulating for a seek must not replay old noise.
+    /// </summary>
+    public readonly byte[] SoundQueue = new byte[8];
+
+    /// <summary>varz.c's randomEnemyLaunchSounds: one of these three plays when an enemy launches another.</summary>
+    private static readonly byte[] RandomEnemyLaunchSounds = { 13, 6, 26 };
+
+    /// <summary>Set by event 35 during a tick: the 1-based song to switch to. 0 = no change.</summary>
+    public int SongChange { get; private set; }
+
+    /// <summary>Set by event 34 during a tick: start fading the music out.</summary>
+    public bool MusicFade { get; private set; }
+
+    /// <summary>Queues a 1-based sound number on one of the eight channels (JE_playSampleNum's queue).</summary>
+    private void Queue(int channel, int sound)
+    {
+        if (sound > 0 && sound <= 40) SoundQueue[channel & 7] = (byte)sound;
+    }
+
     public void Tick(bool draw)
     {
         if (_s.finished) return;
+        Array.Clear(SoundQueue);
+        SongChange = 0;
+        MusicFade = false;
         _s.tickCount++;
         LogTick = _s.tickCount;
 
@@ -1744,7 +1874,18 @@ public sealed class GameSim
             // tiles, and one parked slot alone stalls SURFACE and MACES on a sky-bank map stop.
             // Cull on the watchdog's own 210-tick dwell, so an enemy a later event starts
             // moving is never taken.
-            if (skyBank && e.ey <= (e.size == 1 ? -26 : -13) &&
+            //
+            // Except while the script still has the link on its list. Parked is not the same as
+            // stuck: TIME WAR hangs a 30-part machine over the top edge at t=120 and then walks
+            // it down ten pixels per wave, so two thirds of it stands frozen above -26 for
+            // eighteen hundred ticks at a time and the plain dwell reclaimed it long before the
+            // level brought it back into view. The exemption lapses the moment a map stop is
+            // actually waiting on the thing, which is the only case that can hang playback and
+            // the one the engine's own watchdog covers (tyrian2.c:3921).
+            bool scriptOwns = (uint)e.linknum < 256 && e.linknum != 0 &&
+                              _s.curLoc <= _lastLinkEvent[e.linknum] &&
+                              !(_s.stopBackgrounds && !_s.forceEvents);
+            if (skyBank && !scriptOwns && e.ey <= (e.size == 1 ? -26 : -13) &&
                 e.eyc <= 0 && e.eycc == 0 && e.fixedmovey <= 0 && e.yaccel == 0)
             {
                 if (++e.parkedTicks >= ParkedAboveLimit) { _avail[i] = 1; continue; }
@@ -1821,12 +1962,13 @@ public sealed class GameSim
                                     MidpointRounding.AwayFromZero));
                                 l.eyc = S8((int)MathF.Round((float)aimY / mag * l.launchtype,
                                     MidpointRounding.AwayFromZero));
+                                Threat?.OnAimedLaunch();
                             }
                         }
 
                         uint t;
                         do { t = _rng.Next() % 8; } while (t == 3);
-                        _ = _rng.Next() % 3;   // randomEnemyLaunchSounds pick
+                        Queue((int)t, RandomEnemyLaunchSounds[_rng.Next() % 3]);
 
                         if (e.launchspecial == 1 && e.linknum < 100)
                             l.linknum = e.linknum;
@@ -1891,7 +2033,10 @@ public sealed class GameSim
                         for (b = 0; b < _shotAvail.Length; b++)
                             if (_shotAvail[b] == 1) break;
                         if (b == _shotAvail.Length)
+                        {
+                            Threat?.OnShotBlocked();
                             return true;   // goto draw_enemy_end
+                        }
 
                         _shotAvail[b] = 0;
 
@@ -1899,6 +2044,7 @@ public sealed class GameSim
                         {
                             uint t;
                             do { t = _rng.Next() % 8; } while (t == 3);
+                            Queue((int)t, w.Sound);
                         }
 
                         if (e.aniactive == 2) e.aniactive = 1;
@@ -1944,6 +2090,8 @@ public sealed class GameSim
                             sh.sxm = (int)MathF.Round((float)aimX / mag * aim, MidpointRounding.AwayFromZero);
                             sh.sym = (int)MathF.Round((float)aimY / mag * aim, MidpointRounding.AwayFromZero);
                         }
+
+                        Threat?.OnShotCreated(w.Attack[pos], w.Aim, w.Tx, w.Ty);
                     }
                     break;
                 }
@@ -2071,12 +2219,16 @@ public sealed class GameSim
             if (r.big)
             {
                 SetupExplosionLarge(false, 2, tx, ty);
-                if (r.ttl != 1) _ = _rng.Next() % 5;   // sound pick parity
+                // The last blast of a cascade, and one in five before it, is the big one.
+                if (r.ttl == 1) Queue(7, 11);
+                else if (_rng.Next() % 5 == 1) Queue(7, 11);
+                else Queue(6, 9);
                 r.delay = 4 + (int)(_rng.Next() % 3);
             }
             else
             {
                 SetupExplosion(tx, ty, 0, 1);
+                Queue(5, 4);
                 r.delay = 3;
             }
             r.ttl--;
@@ -2636,15 +2788,39 @@ public sealed class GameSim
             _gateLoopTicks[slot], LogTick, cycleEnds, kind, eventIndex));
     }
 
+    /// <summary>The map cannot advance on its own from here: it is stopped, or is waiting
+    /// on the level-end condition. With live enemies aboard and no script left to run, only
+    /// the player clears it.</summary>
+    private bool ProgressBlocked =>
+        PreviewEnemyGates && _s.enemyOnScreen != 0 && !_s.previewGateTimerPause &&
+        (_s.stopBackgrounds || _s.stopBackgroundNum is > 0 and < 9 ||
+         _s.readyToEndLevel || _s.backMove == 0);
+
+    /// <summary>Tick an enemy-gated hold has been standing since, or -1 if nothing is held
+    /// right now. A hold is only logged as a gate when it is released, so a run that stops
+    /// mid-standoff — the tick cap landed inside it, or <see cref="PreviewHoldSeconds"/> is
+    /// longer than the run had left — leaves no record of the very thing that ended it.
+    /// <see cref="SimPlayback"/> reads this afterwards to hatch it anyway.
+    ///
+    /// Deliberately NOT <see cref="ProgressBlocked"/> sampled on the final tick. One of that
+    /// property's disjuncts is <c>backMove == 0</c>, and in any slow-scrolling section
+    /// (map1YDelayMax &gt; 1) backMove is rewritten to 0 on two ticks in three before the map
+    /// even moves, so the answer depended on which phase of that the tick cap happened to land
+    /// on — and a standoff plainly on screen reported nothing for a one-second nudge of the
+    /// hold slider. What matters is that a standoff was standing recently, not on that
+    /// particular tick.</summary>
+    public int PendingHoldStartTick =>
+        _s.previewHoldSeenTick > 0 && _s.tickCount - _s.previewHoldSeenTick <= (int)TicksPerSecond
+            ? Math.Max(1, _s.previewLastEventTick)
+            : -1;
+
     private void PreviewQuietEnemyHold()
     {
-        if (!PreviewEnemyGates || _s.enemyOnScreen == 0 || _s.previewGateTimerPause)
-            return;
+        bool blocked = ProgressBlocked;
+        if (blocked) _s.previewHoldSeenTick = _s.tickCount;
 
-        bool blocksProgress = _s.stopBackgrounds || _s.stopBackgroundNum is > 0 and < 9 ||
-                              _s.readyToEndLevel || _s.backMove == 0;
-        const int holdTicks = (int)(20 * TicksPerSecond);
-        if (!blocksProgress || _s.tickCount - _s.previewLastEventTick < holdTicks)
+        int holdTicks = (int)(Math.Max(1, PreviewHoldSeconds) * TicksPerSecond);
+        if (!blocked || _s.tickCount - _s.previewLastEventTick < holdTicks)
             return;
 
         int start = Math.Max(1, _s.tickCount - holdTicks);
@@ -2745,7 +2921,11 @@ public sealed class GameSim
 
             case 15: CreateNewEventEnemy(0, 0, 0); break;
 
-            case 16: break;   // text window (not shown)
+            // The window's text is not drawn, but it speaks: sndmast.c's windowTextSamples
+            // pairs each of the nine slots with an announcer line ("Large enemy approaching").
+            case 16:
+                if (ev.Dat is >= 1 and <= 9) Queue(3, Audio.SoundBank.WindowTextSamples[ev.Dat - 1]);
+                break;
 
             case 17:
                 CreateNewEventEnemy(0, 25, 0);
@@ -2915,8 +3095,8 @@ public sealed class GameSim
                 break;
             }
 
-            case 34: break;  // music fade
-            case 35: break;  // play song
+            case 34: MusicFade = true; break;          // start music fade
+            case 35: SongChange = ev.Dat; break;       // play song (1-based)
 
             case 36: _s.readyToEndLevel = true; break;
 
@@ -3144,7 +3324,7 @@ public sealed class GameSim
                     _s.eventLoc += ev.Dat3;
                 break;
 
-            case 62: break;  // sound effect
+            case 62: Queue(3, ev.Dat); break;  // play sound effect
 
             case 63:  // skip events if not 2-player
                 _s.eventLoc += ev.Dat;

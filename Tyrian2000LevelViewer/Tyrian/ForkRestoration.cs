@@ -11,14 +11,20 @@ namespace T2LV.Tyrian;
 /// could name, and playback is validated against the unpatched behaviour.
 ///
 /// Not reproduced: the Zica Laser sx/bx reshaping (episodes.c:136-210) and the superspark sg
-/// tagging (212-295), because nothing here renders a bolt in flight; and the placeholder-icon
-/// fill (631-644), which is an endless-mode nicety -- a browser of the shipped data should
-/// show a blank item as blank.
+/// tagging (212-295), because nothing here renders a bolt in flight.
+///
+/// Applying it is optional, because "what does the shop actually offer" has two honest answers
+/// depending on which build you play: the browser carries a vanilla/widescreen switch and this
+/// is what the switch turns on.
 /// </summary>
 public static class ForkRestoration
 {
     /// <summary>Six scratch weapon slots in the 819..999 gap the data files never use.</summary>
     public const int ChargeLaserWeaponBase = 900;
+
+    /// <summary>The icon the fork hands to a named item that shipped without one
+    /// (episodes.c:631-644).</summary>
+    private const ushort PlaceholderIcon = 167;
 
     public static void Apply(WeaponData wd, ItemData it, int episodeNum)
     {
@@ -26,6 +32,7 @@ public static class ForkRestoration
         ApplyEpisodeDiffs(wd, episodeNum);
         LabelAmmoSidekicks(it);
         FixWobbley(it);
+        FillBlankIcons(it);
     }
 
     /// <summary>
@@ -211,4 +218,26 @@ public static class ForkRestoration
                 o.Gr[0] = o.Gr[1];
     }
 
+    /// <summary>
+    /// Give every named item that shipped without an icon the placeholder, so it stops drawing
+    /// as an empty box (episodes.c:631-644). The "None" rows keep their blank icon: theirs is
+    /// deliberate, and so are the empty slots between real entries.
+    /// </summary>
+    private static void FillBlankIcons(ItemData it)
+    {
+        static bool Named(string n) => n.Length > 0 && !n.StartsWith("None", StringComparison.Ordinal);
+
+        for (int i = 1; i < it.Ports.Length; i++)
+            if (it.Ports[i] != null && it.Ports[i].ItemGraphic == 0 && Named(it.Ports[i].Name))
+                it.Ports[i].ItemGraphic = PlaceholderIcon;
+        for (int i = 1; i < it.Powers.Length; i++)
+            if (it.Powers[i] != null && it.Powers[i].ItemGraphic == 0 && Named(it.Powers[i].Name))
+                it.Powers[i].ItemGraphic = PlaceholderIcon;
+        for (int i = 1; i < it.Options.Length; i++)
+            if (it.Options[i] != null && it.Options[i].ItemGraphic == 0 && Named(it.Options[i].Name))
+                it.Options[i].ItemGraphic = PlaceholderIcon;
+        for (int i = 1; i < it.Shields.Length; i++)
+            if (it.Shields[i] != null && it.Shields[i].ItemGraphic == 0 && Named(it.Shields[i].Name))
+                it.Shields[i].ItemGraphic = PlaceholderIcon;
+    }
 }

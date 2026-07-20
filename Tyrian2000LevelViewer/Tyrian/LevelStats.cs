@@ -7,8 +7,10 @@ namespace T2LV.Tyrian;
 /// where it piles on -- falls out of the data without a simulation.
 ///
 /// The numbers are a reading of the authored content, not of a playthrough: an enemy that
-/// scrolls past untouched still counts. Treat <see cref="Difficulty"/> as a way to sort
-/// levels against each other, not as an absolute.
+/// scrolls past untouched still counts, and every one of them is assumed to fire forever.
+/// That last assumption is why this no longer scores difficulty -- see <see cref="LevelThreat"/>,
+/// which runs the level and measures what actually arrives. This class answers "what is in
+/// it", which is the same question at every difficulty and costs nothing to answer.
 /// </summary>
 public sealed class LevelStats
 {
@@ -37,13 +39,6 @@ public sealed class LevelStats
     public float PeakArmor { get; private set; }
     public float PeakSpawn { get; private set; }
     public float PeakFire { get; private set; }
-
-    /// <summary>
-    /// A composite of the three pressures per unit of level time, scaled so a typical level
-    /// lands near 1. It is a heuristic ranking key -- the components are shown beside it so
-    /// the number never has to be taken on trust.
-    /// </summary>
-    public double Difficulty { get; private set; }
 
     public double ArmorRate => Duration > 0 ? TotalArmor / (double)Duration : 0;
     public double SpawnRate => Duration > 0 ? SpawnCount / (double)Duration : 0;
@@ -113,9 +108,6 @@ public sealed class LevelStats
             .Select(kv => (Id: kv.Key, kv.Value.Count, kv.Value.Armor))
             .OrderByDescending(t => t.Count).ThenByDescending(t => t.Armor).Take(12));
 
-        // Scale factors picked so an ordinary campaign level lands near 1.0 and the hardest
-        // sit near 3; they are presentation, and the three rates below are the real content.
-        st.Difficulty = st.ArmorRate * 0.9 + st.FireRate * 260 + st.SpawnRate * 24;
         return st;
     }
 

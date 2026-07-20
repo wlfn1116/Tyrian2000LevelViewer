@@ -9,6 +9,11 @@ namespace T2LV;
 /// The enemy browser: every enemyDat entry animated the way the engine animates it, plus the
 /// multi-part groups the levels assemble out of them -- formations and bosses, which exist
 /// nowhere in the data as single objects. See <see cref="EnemyAssembly"/>.
+///
+/// The controls sit where what they change is: the window band picks the episode, the mode and
+/// the filter, and everything about the preview -- zoom, animation, the damaged form, the frame
+/// being held -- lives on a strip attached to the preview stage itself. The old single toolbar
+/// carried nine unrelated widgets and made you hunt for the one you wanted.
 /// </summary>
 public sealed unsafe partial class App
 {
@@ -22,9 +27,13 @@ public sealed unsafe partial class App
     private float _enemyZoom = 3f;
     private bool _enemyAnimate = true;
     private float _enemyAnimSpeed = 1f;
+    /// <summary>Whether the trigger is held. Only <c>animate 2</c> entries care: they animate
+    /// on a shot and rest between shots, exactly as an option-2 sidekick does.</summary>
+    private bool _enemyFiring = true;
     private double _enemyClock;
     private int _enemyFrameHold = -1;       // a scrubbed frame, -1 = follow the clock
     private bool _enemyDamaged;             // preview the damaged/wreck graphic instead
+    private bool _enemyMotion = true;       // draw the entry's own velocity over the stage
     private bool _enemyScrollToSelection;
     private bool _asmScrollToSelection;
     private bool _asmUnique = true;         // fold repeats of one body into one row
@@ -100,93 +109,75 @@ public sealed unsafe partial class App
     {
         if (!_showEnemies || _gd == null || EnemyEpisode == null) return;
 
-        ImGui.SetNextWindowSize(new Vector2(1060, 720), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSizeConstraints(new Vector2(620, 380), new Vector2(float.MaxValue, float.MaxValue));
-        bool open = _showEnemies;
-        if (!ImGui.Begin("Enemies###enemies", ref open)) { ImGui.End(); _showEnemies = open; return; }
-        _showEnemies = open;
+        if (!RefBegin("Enemies", "enemies", ref _showEnemies, AcEnemy,
+                new Vector2(1100, 760), new Vector2(660, 420))) return;
 
         if (_enemyAnimate) _enemyClock += ImGui.GetIO().DeltaTime * 35.0 * _enemyAnimSpeed;
 
-        DrawEnemyToolbar();
-        ImGui.Separator();
+        DrawEnemyBand();
 
-        float maxList = Math.Max(180f, ImGui.GetContentRegionAvail().X - 340f);
-        _enemyListW = Math.Clamp(_enemyListW, 180f, maxList);
+        float maxList = Math.Max(190f, ImGui.GetContentRegionAvail().X - 360f);
+        _enemyListW = Math.Clamp(_enemyListW, 190f, maxList);
 
-        ImGui.BeginChild("enlist", new Vector2(_enemyListW, 0), ImGuiChildFlags.Borders);
+        WellBegin("enlist", new Vector2(_enemyListW, ImGui.GetContentRegionAvail().Y), AcEnemy);
         if (_enemyMode == 0) DrawEnemyList(); else DrawAssemblyList();
-        ImGui.EndChild();
-        ImGui.SameLine(0, 2);
-        VSplitter("##ensplit", ref _enemyListW, 180f, maxList);
-        ImGui.SameLine(0, 2);
+        WellEnd();
+
+        ImGui.SameLine(0, 3);
+        VSplitter("##ensplit", ref _enemyListW, 190f, maxList);
+        ImGui.SameLine(0, 3);
 
         ImGui.BeginChild("endetail", new Vector2(0, 0));
         if (_enemyMode == 0) DrawEnemyDetail(); else DrawAssemblyDetail();
         ImGui.EndChild();
 
-        ImGui.End();
+        RefEnd(AcEnemy);
     }
 
-    private void DrawEnemyToolbar()
+    /// <summary>What is being browsed -- episode, mode, filter. Nothing about how the preview
+    /// is drawn: that belongs to the preview, and lives on its own strip.</summary>
+    private void DrawEnemyBand()
     {
-        ImGui.SetNextItemWidth(130);
+        BandBegin("enband", AcEnemy);
+        BandLabel("episode");
+        ImGui.SetNextItemWidth(126);
         int before = _episodeIdx;
         EpisodeCombo("##enepisode");
         if (before != _episodeIdx) { _enemyEpisodeIdx = _episodeIdx; _enemySelected = -1; _asmSelected = 0; }
 
-        ImGui.SameLine(0, 12);
-        if (ImGui.RadioButton("Entries", _enemyMode == 0)) _enemyMode = 0;
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Every enemyDat entry on its own.");
-        ImGui.SameLine();
-        if (ImGui.RadioButton("Assemblies", _enemyMode == 1)) _enemyMode = 1;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("The multi-part groups the levels build out of those entries:\n" +
-                "formations, and the bosses that are really a dozen linked\nenemies tiled on the sprite grid.");
+        BandDivider();
+        SegBar("##enmode", ref _enemyMode, AcEnemy, 230f,
+            ("Entries", "Every enemyDat entry on its own."),
+            ("Assemblies", "The multi-part groups the levels build out of those entries:\n" +
+                           "formations, and the bosses that are really a dozen linked\n" +
+                           "enemies tiled on the sprite grid."));
 
-        ImGui.SameLine(0, 12);
-        FilterBox("##enfilter", _enemyMode == 0 ? "filter by id / bank" : "search levels", _enemyFilter, 150f);
-        if (_enemyMode == 1) { ImGui.SameLine(0, 6); DrawAssemblyLevelPicker(); }
+        BandDivider();
+        UiFilter("##enfilter", _enemyMode == 0 ? "id, bank or category" : "search levels",
+            _enemyFilter, 200f, AcEnemy);
 
-        ImGui.SameLine(0, 12);
-        ImGui.SetNextItemWidth(90);
-        ImGui.SliderFloat("zoom", ref _enemyZoom, 1f, 8f, "%.0fx");
+        if (_enemyMode != 1) { BandEnd(); return; }
 
-        ImGui.SameLine(0, 12);
-        if (ImGui.Checkbox("animate", ref _enemyAnimate)) _enemyFrameHold = -1;
+        BandDivider();
+        DrawAssemblyLevelPicker();
         ImGui.SameLine(0, 6);
-        ImGui.SetNextItemWidth(80);
-        ImGui.SliderFloat("##enspeed", ref _enemyAnimSpeed, 0.1f, 3f, "x%.2f");
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("The engine steps one frame per 35Hz tick; this scales that.");
-
-        if (_enemyMode == 1)
+        if (UiToggle("unique", ref _asmUnique, AcEnemy,
+                "Levels re-spawn the same body over and over -- GYGES hangs one\n" +
+                "eight-part chain nine times. List each of those once, marked xN,\n" +
+                "instead of once per spawn. Same pieces in the same arrangement\n" +
+                "counts as the same body; link numbers and map position do not."))
         {
-            ImGui.SameLine(0, 12);
-            if (ImGui.Checkbox("unique", ref _asmUnique))
-            {
-                // Stay on the same body across the toggle, since the row count changes under
-                // it: folding moves the selection onto the row that stands for the run,
-                // unfolding leaves it on the first spawn of that run.
-                var was = ShownAssemblies(!_asmUnique);
-                var sel = was.Count > 0 ? was[Math.Clamp(_asmSelected, 0, was.Count - 1)] : null;
-                if (_asmUnique) sel = sel?.RepeatOf ?? sel;
-                int at = sel == null ? -1 : ShownAssemblies().IndexOf(sel);
-                if (at >= 0) _asmSelected = at;
-                _asmScrollToSelection = true;
-            }
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Levels re-spawn the same body over and over -- GYGES hangs one\n" +
-                    "eight-part chain nine times. List each of those once, marked xN,\n" +
-                    "instead of once per spawn. Same pieces in the same arrangement\n" +
-                    "counts as the same body; link numbers and map position do not.");
+            // Stay on the same body across the toggle, since the row count changes under
+            // it: folding moves the selection onto the row that stands for the run,
+            // unfolding leaves it on the first spawn of that run.
+            var was = ShownAssemblies(!_asmUnique);
+            var sel = was.Count > 0 ? was[Math.Clamp(_asmSelected, 0, was.Count - 1)] : null;
+            if (_asmUnique) sel = sel?.RepeatOf ?? sel;
+            int at = sel == null ? -1 : ShownAssemblies().IndexOf(sel);
+            if (at >= 0) _asmSelected = at;
+            _asmScrollToSelection = true;
         }
-
-        if (_enemyMode != 0) return;
-        ImGui.SameLine(0, 12);
-        ImGui.Checkbox("damaged", ref _enemyDamaged);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Show the damaged form instead. An entry with dani != 0 loops a\n" +
-                "different span of its own frames; with dani == 0 it swaps in the\nsingle sprite dgr names.");
+        BandEnd();
     }
 
     // ================= entries =================
@@ -231,7 +222,8 @@ public sealed unsafe partial class App
             _enemySelected = pickId;
         }
 
-        const float rowH = 32f;
+        // UiRow consumes exactly its height, so the stride below is exact.
+        const float rowH = 34f;
         float viewH = ImGui.GetWindowSize().Y;
 
         // Keep the selection reachable when it was set from another window.
@@ -245,35 +237,41 @@ public sealed unsafe partial class App
         float scrollY = ImGui.GetScrollY();
         int from = Math.Clamp((int)(scrollY / rowH) - 1, 0, rows.Count - 1);
         int to = Math.Clamp((int)((scrollY + viewH) / rowH) + 1, 0, rows.Count - 1);
+
+        // Zero vertical spacing for the whole list: the two spacers stand in for the rows that
+        // were skipped, and any spacing added after them would shift every visible row down by
+        // that much -- but only while a leading spacer exists, so the list would jump as it
+        // scrolled past the first screen.
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(ImGui.GetStyle().ItemSpacing.X, 0f));
         if (from > 0) ImGui.Dummy(new Vector2(1, from * rowH));
 
-        var dl = ImGui.GetWindowDrawList();
         for (int k = from; k <= to; k++)
         {
             var (epIdx, id) = rows[k];
             var e = EnemyDatOf(epIdx, id);
-            var mn = ImGui.GetCursorScreenPos();
-
-            bool sel = id == _enemySelected && epIdx == _enemyEpisodeIdx;
-            if (ImGui.Selectable($"##en{epIdx}_{id}", sel, ImGuiSelectableFlags.None,
-                    new Vector2(0, rowH - 2f)))
-            { _enemyEpisodeIdx = epIdx; _enemySelected = id; _enemyFrameHold = -1; }
-
             var cat = ObjectPlacer.Classify(e.Armor, e.Value, 0);
             uint col = ObjectPlacer.CategoryColor(cat);
-            dl.AddRectFilled(mn, new Vector2(mn.X + 2.5f, mn.Y + rowH - 4f), col, 1f);
 
+            bool sel = id == _enemySelected && epIdx == _enemyEpisodeIdx;
+            var box = UiRow($"##en{epIdx}_{id}", sel, col, rowH);
+            if (box.Clicked) { _enemyEpisodeIdx = epIdx; _enemySelected = id; _enemyFrameHold = -1; }
+
+            var dl = ImGui.GetWindowDrawList();
             var atlas = Atlas(EnemySpriteSource(e.ShapeBank), AppSettings.GamePalette);
             if (atlas != null)
                 DrawEnemyFrameCentered(dl, atlas, e.EGraphic[0], e.Esize == 1,
-                    new Vector2(mn.X + 6f, mn.Y), new Vector2(mn.X + 40f, mn.Y + rowH - 4f), 1f);
+                    new Vector2(box.Min.X + 7f, box.Min.Y + 1f),
+                    new Vector2(box.Min.X + 41f, box.Max.Y - 1f), 1f);
 
-            dl.AddText(new Vector2(mn.X + 44f, mn.Y + 1f), Gfx.Rgba(226, 230, 240),
-                _allEpisodes ? $"ep{_gd!.Episodes[epIdx].Number}  #{id}" : $"#{id}");
-            dl.AddText(new Vector2(mn.X + 44f, mn.Y + 15f), Shade(col, 1f, 190),
-                e.Armor > 0 ? $"armor {e.Armor}" : ObjectPlacer.CategoryName(cat).ToLowerInvariant());
+            string trail = e.Armor > 0 ? $"{e.Armor}" : "";
+            RowText(box, 46f,
+                _allEpisodes ? $"ep{_gd!.Episodes[epIdx].Number}  #{id}" : $"#{id}",
+                ObjectPlacer.CategoryName(cat).ToLowerInvariant(), col, sel,
+                trail.Length > 0 ? TrailRoom(trail) : 12f);
+            if (trail.Length > 0) RowTrail(box, trail, Shade(col, 1.1f));
         }
         if (to < rows.Count - 1) ImGui.Dummy(new Vector2(1, (rows.Count - 1 - to) * rowH));
+        ImGui.PopStyleVar();
     }
 
     private EnemyDat EnemyDatOf(int episodeIdx, int id)
@@ -341,6 +339,74 @@ public sealed unsafe partial class App
     /// actually has that combination, but the engine's branch is there).</summary>
     private static bool PartSurvivesFlip(in EnemyDat e) => e.Dgr > 0 || e.DAni != 0;
 
+    /// <summary>
+    /// How often the entry pulls a trigger, in 35Hz ticks: the shortest of its three turret
+    /// reloads and its launch reload, each of which is a countdown reloaded with freq /
+    /// elaunchfreq (tyrian2.c:1352, 1591-1595). A launch arms the animation before the
+    /// launchtype == 0 test, so an elaunchfreq counts whether or not anything is launched.
+    /// 0 means the entry never fires at all. The engine halves a turret reload above Normal
+    /// (tyrian2.c:1356-1359); the browser shows the Normal rate.
+    /// </summary>
+    private static int EnemyFirePeriod(in EnemyDat e)
+    {
+        int p = 0;
+        void Take(int freq, bool armed) { if (armed && freq > 0 && (p == 0 || freq < p)) p = freq; }
+        Take(e.Freq0, e.Tur0 != 0);
+        Take(e.Freq1, e.Tur1 != 0);
+        Take(e.Freq2, e.Tur2 != 0);
+        Take(e.ELaunchFreq, true);
+        return p;
+    }
+
+    /// <summary>
+    /// Which of the run's frames the engine would be showing on this tick.
+    ///
+    /// The frame table steps once per tick, but only while the entry's animation is ARMED, and
+    /// that is what the browser used to leave out. <c>animate 1</c> is armed forever;
+    /// <c>animate 2</c> is "When Firing Only" (episodes.h:143) — the spawn leaves aniactive at
+    /// 2, which the stepper ignores, a shot or a launch sets it to 1 (tyrian2.c:1461, 1604),
+    /// and reaching the last frame turns it back off, because animax == ani for these entries
+    /// (tyrian2.c:1186-1188). So one shot buys exactly one pass and the body then sits on that
+    /// last frame until the next one.
+    ///
+    /// Free-running an animate-2 table is what made the stage look nothing like the game: those
+    /// entries are gun flashes two or three frames long, not idle loops, and repeating one
+    /// forever at 35Hz is a strobe. It is the same mistake the sidekick stage used to make with
+    /// an option-2 body, and the same cure.
+    /// </summary>
+    private static int EnemyFrameIndex(in EnemyDat e, int frames, int firePeriod,
+        long tick, bool firing)
+    {
+        if (frames <= 1 || e.Animate == 0) return 0;
+        if (e.Animate != 2) return (int)(tick % frames);      // animate 1: always running
+        // Never armed: an entry with no weapon and no launch holds the spawn frame for good,
+        // and so does one whose trigger the strip has up.
+        if (!firing || firePeriod <= 0) return 0;
+        // Steady state: the shot lands with the body still parked on the last frame, the table
+        // resets on the tick after it, walks to the end and parks there again. A weapon that
+        // reloads faster than the table is long simply never gets to rest.
+        long phase = tick % Math.Max(firePeriod, frames + 1);
+        return phase >= 1 && phase <= frames ? (int)phase - 1 : frames - 1;
+    }
+
+    /// <summary>Which frame of the run the clock is on, ignoring the entry browser's hold.</summary>
+    private int RunningFrameIndex(in EnemyDat e, int frames, bool damaged)
+    {
+        if (frames <= 0) return 0;
+        // The damaged flip arms the animation itself and clears aniwhenfire (tyrian2.c:2961-
+        // 2965, 2985), so a dani span runs free whatever the entry's animate field says.
+        if (damaged) return (int)(((long)_enemyClock) % frames);
+        return EnemyFrameIndex(e, frames, EnemyFirePeriod(e), (long)_enemyClock, _enemyFiring);
+    }
+
+    /// <summary>Which frame of the run is live right now, honouring a scrubbed hold. Only the
+    /// entry browser has one to honour — the assembly stage draws whole groups and reads
+    /// <see cref="RunningFrameIndex"/> straight.</summary>
+    private int LiveFrameIndex(in EnemyDat e, int frames, bool damaged) =>
+        frames > 0 && _enemyFrameHold >= 0
+            ? Math.Clamp(_enemyFrameHold, 0, frames - 1)
+            : RunningFrameIndex(e, frames, damaged);
+
     /// <summary>The sprite number to draw this instant.</summary>
     private int CurrentSprite(in EnemyDat e, bool damaged)
     {
@@ -349,61 +415,185 @@ public sealed unsafe partial class App
 
         var run = FrameRun(e, damaged);
         if (run.Count == 0) return e.EGraphic[0];
-        int at = _enemyFrameHold >= 0
-            ? Math.Clamp(_enemyFrameHold, 0, run.Count - 1)
-            : (int)(((long)_enemyClock) % run.Count);
-        return e.EGraphic[Math.Clamp(run[at] - 1, 0, 19)];
+        return e.EGraphic[Math.Clamp(run[LiveFrameIndex(e, run.Count, damaged)] - 1, 0, 19)];
     }
 
     private void DrawEnemyDetail()
     {
         var ed = TryEnemyData();
-        if (ed == null || _enemySelected < 0) { ImGui.TextDisabled("Pick an enemy."); return; }
+        if (ed == null || _enemySelected < 0)
+        {
+            UiEmpty("Pick an enemy", "Every enemyDat entry, animated the way the engine does it.", AcEnemy);
+            return;
+        }
         var e = ed.Get(_enemySelected);
-        if (!e.Loaded) { ImGui.TextDisabled("Empty enemyDat slot."); return; }
+        if (!e.Loaded) { UiEmpty("Empty enemyDat slot", "Nothing is stored at this index.", AcEnemy); return; }
 
         var cat = ObjectPlacer.Classify(e.Armor, e.Value, 0);
-        DrawGameHeader($"ENEMY {_enemySelected}", ObjectPlacer.CategoryColor(cat));
-
+        uint catCol = ObjectPlacer.CategoryColor(cat);
         var src = EnemySpriteSource(e.ShapeBank);
         var atlas = Atlas(src, AppSettings.GamePalette);
         bool damaged = _enemyDamaged && (e.Dgr > 0 || e.DAni != 0);
 
+        UiTitle($"ENEMY {_enemySelected}", catCol);
+        Badge(ObjectPlacer.CategoryName(cat).ToLowerInvariant(), catCol);
+        ImGui.SameLine(0, 5f);
+        Badge(e.Armor > 0 ? $"armour {e.Armor}" : "no armour", AcBoss);
+        ImGui.SameLine(0, 5f);
+        Badge(e.IsGround ? "ground" : "air", Gfx.Rgba(150, 162, 185));
+        ImGui.SameLine(0, 5f);
+        Badge(e.Esize == 1 ? "2x2 metasprite" : "single sprite", Gfx.Rgba(150, 162, 185));
+        if (e.Value != 0)
+        {
+            ImGui.SameLine(0, 5f);
+            Badge($"value {e.Value}", Gfx.Rgba(255, 210, 120));
+        }
+
+        ImGui.Dummy(new Vector2(0, 4f));
+        DrawEnemyStageStrip(e);
+
         // --- Stage ---
-        const float stageH = 190f;
+        const float stageH = 196f;
         var stageMin = ImGui.GetCursorScreenPos();
         var stageMax = new Vector2(stageMin.X + ImGui.GetContentRegionAvail().X, stageMin.Y + stageH);
         var dl = ImGui.GetWindowDrawList();
-        DrawStarStage(dl, stageMin, stageMax);
+        StageBegin(dl, stageMin, stageMax);
         if (atlas != null)
+        {
+            float zoom = MathF.Round(_enemyZoom);
             DrawEnemyFrameCentered(dl, atlas, CurrentSprite(e, damaged), e.Esize == 1,
-                stageMin, stageMax, MathF.Round(_enemyZoom));
+                stageMin, stageMax, zoom);
+            if (_enemyMotion) DrawMotionOverlay(dl, e, stageMin, stageMax);
+        }
         else
-            dl.AddText(stageMin + new Vector2(10f, 10f), Gfx.Rgba(200, 150, 150),
+            dl.AddText(stageMin + new Vector2(10f, 10f), Gfx.Rgba(230, 170, 170),
                 $"shape bank {e.ShapeBank} has no sheet of its own -\n" +
                 "in-game this entry draws with whatever bank was loaded last.");
-        ImGui.Dummy(new Vector2(0, stageH + 4f));
+        StageEnd(dl);
+        ImGui.Dummy(new Vector2(0, stageH + 5f));
 
         // --- Frame strip ---
         DrawFrameStrip(e, atlas, damaged);
 
-        ImGui.Separator();
-        if (ImGui.BeginTable("enstats", 2, ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.SizingStretchSame))
+        // --- Facts, side by side. ---
+        ImGui.Dummy(new Vector2(0, 4f));
+        float half = (ImGui.GetContentRegionAvail().X - 10f) * 0.5f;
+        float bodyH = Math.Max(160f, ImGui.GetContentRegionAvail().Y);
+
+        ImGui.BeginChild("enstats", new Vector2(half, bodyH));
+        DrawEnemyStats(e, cat, src);
+        ImGui.EndChild();
+        ImGui.SameLine(0, 10f);
+        ImGui.BeginChild("enright", new Vector2(0, bodyH));
+        DrawEnemyLinks(e, ed);
+        ImGui.Dummy(new Vector2(0, 4f));
+        DrawEnemyAppearances(_enemySelected);
+        ImGui.EndChild();
+    }
+
+    /// <summary>The preview's own controls, on a strip attached to the stage.</summary>
+    private void DrawEnemyStageStrip(in EnemyDat e)
+    {
+        BandBegin("enstage", AcEnemy);
+        BandLabel("zoom");
+        ImGui.SetNextItemWidth(96);
+        ImGui.SliderFloat("##enzoom", ref _enemyZoom, 1f, 8f, "%.0fx");
+
+        BandDivider(9f);
+        if (UiToggle("animate", ref _enemyAnimate, AcEnemy,
+                "Run the clock at the engine's 35Hz. Whether the entry steps on every one\n" +
+                "of those ticks is its own business -- see \"animate\" in the stats."))
+            _enemyFrameHold = -1;
+        ImGui.SameLine(0, 5);
+        ImGui.SetNextItemWidth(84);
+        ImGui.SliderFloat("##enspeed", ref _enemyAnimSpeed, 0.1f, 3f, "x%.2f");
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip("The engine runs at 35 ticks a second; this scales that.");
+
+        // An animate-2 entry is idle unless it is shooting, so the trigger is the control that
+        // decides whether it animates at all -- the same gate the sidekick stage has.
+        if (e.Animate == 2)
         {
-            ImGui.TableNextColumn(); DrawEnemyStats(e, cat, src);
-            ImGui.TableNextColumn(); DrawEnemyLinks(e, ed);
-            ImGui.EndTable();
+            int period = EnemyFirePeriod(e);
+            ImGui.SameLine(0, 5);
+            UiToggle("holding fire", ref _enemyFiring, AcEnemy, period > 0
+                ? $"This one only animates while it is shooting. Firing, it pulls a\n" +
+                  $"trigger every {period} tick{(period == 1 ? "" : "s")}, and each shot plays its frames once\n" +
+                  "and parks on the last of them; let go and it holds frame 1."
+                : "animate 2 with no turret and no launch: nothing ever arms the\n" +
+                  "animation, so in game it holds frame 1 forever.",
+                0f, period <= 0);
         }
 
-        ImGui.Separator();
-        DrawEnemyAppearances(_enemySelected);
+        BandDivider(9f);
+        bool canFlip = e.Dgr > 0 || e.DAni != 0;
+        UiToggle("damaged", ref _enemyDamaged, AcBoss,
+            canFlip
+                ? "Show the damaged form instead. An entry with dani != 0 loops a\n" +
+                  "different span of its own frames; with dani == 0 it swaps in the\nsingle sprite dgr names."
+                : "This entry has no damaged form.", 0f, !canFlip);
+        ImGui.SameLine(0, 5);
+        UiToggle("motion", ref _enemyMotion, AcLink,
+            "Draw the entry's own per-frame velocity and acceleration over the stage.");
+        BandEnd();
     }
+
+    /// <summary>
+    /// The entry's movement, drawn on the stage: an arrow along xmove/ymove from the sprite's
+    /// anchor, and a second, fainter one for the acceleration. It is the one field group that
+    /// cannot be read off a still picture, and it is what decides whether a thing dives at you
+    /// or drifts past.
+    /// </summary>
+    private static void DrawMotionOverlay(ImDrawListPtr dl, in EnemyDat e, Vector2 mn, Vector2 mx)
+    {
+        var c = new Vector2((mn.X + mx.X) * 0.5f, (mn.Y + mx.Y) * 0.5f);
+        float room = Math.Min(mx.X - mn.X, mx.Y - mn.Y) * 0.42f;
+
+        void Ray(float dx, float dy, uint col, float thick, string label)
+        {
+            if (dx == 0f && dy == 0f) return;
+            var v = new Vector2(dx, dy);
+            float len = v.Length();
+            // Scaled against the largest component the table ever holds, so two entries can
+            // be compared by eye rather than each being normalised to its own arrow.
+            var dir = v / len;
+            var end = c + dir * Math.Min(room, 10f + len * 9f);
+            dl.AddLine(c, end, col, thick);
+            var side = new Vector2(-dir.Y, dir.X) * 4.5f;
+            dl.AddTriangleFilled(end, end - dir * 9f + side, end - dir * 9f - side, col);
+            var lsz = ImGui.CalcTextSize(label);
+            var at = end + dir * 6f - lsz * 0.5f;
+            dl.AddRectFilled(at - new Vector2(3f, 1f), at + lsz + new Vector2(3f, 1f),
+                Gfx.Rgba(10, 11, 16, 200), 3f);
+            dl.AddText(at, col, label);
+        }
+
+        Ray(e.XAccel, e.YAccel, Gfx.Rgba(255, 190, 90, 190), 1.5f, $"accel {e.XAccel},{e.YAccel}");
+        Ray(e.XMove, e.YMove, Shade(AcLink, 1.05f), 2f, $"{e.XMove},{e.YMove}");
+        dl.AddCircleFilled(c, 2.5f, Gfx.Rgba(255, 255, 255, 210));
+        if (e.XMove == 0 && e.YMove == 0 && e.XAccel == 0 && e.YAccel == 0)
+            dl.AddText(new Vector2(mn.X + 9f, mx.Y - ImGui.GetTextLineHeight() - 7f),
+                Gfx.Rgba(150, 158, 176), "holds still (no move, no accel)");
+    }
+
+    /// <summary>
+    /// Open a preview stage: the starfield, and a clip rect just inside it. The clip is the
+    /// point -- a sprite is drawn centred at whatever zoom is set, and a big boss part at 8x is
+    /// larger than the stage, so without it the sprite spills over the frame and out across
+    /// whatever the pane draws next.
+    /// </summary>
+    private static void StageBegin(ImDrawListPtr dl, Vector2 mn, Vector2 mx)
+    {
+        DrawStarStage(dl, mn, mx);
+        dl.PushClipRect(mn + new Vector2(WellInset, WellInset), mx - new Vector2(WellInset, WellInset), true);
+    }
+
+    private static void StageEnd(ImDrawListPtr dl) => dl.PopClipRect();
 
     /// <summary>A dark backdrop with a scatter of stars, so a sprite reads against something
     /// that looks like the game rather than against a flat panel.</summary>
     private static void DrawStarStage(ImDrawListPtr dl, Vector2 mn, Vector2 mx)
     {
-        dl.AddRectFilled(mn, mx, Gfx.Rgba(8, 9, 14), 4f);
+        dl.AddRectFilled(mn, mx, Gfx.Rgba(8, 9, 14), 6f);
         // A fixed hash, so the field is stable frame to frame instead of twinkling randomly.
         for (int i = 0; i < 90; i++)
         {
@@ -413,7 +603,7 @@ public sealed unsafe partial class App
             byte b = (byte)(70 + (h >> 20) % 130);
             dl.AddRectFilled(new Vector2(x, y), new Vector2(x + 1f, y + 1f), Gfx.Rgba(b, b, (byte)Math.Min(255, b + 30)));
         }
-        dl.AddRect(mn, mx, Gfx.Rgba(70, 80, 108, 190), 4f);
+        dl.AddRect(mn, mx, Gfx.Rgba(70, 80, 108, 190), 6f);
     }
 
     private void DrawFrameStrip(in EnemyDat e, SpriteAtlas? atlas, bool damaged)
@@ -421,32 +611,25 @@ public sealed unsafe partial class App
         var run = FrameRun(e, damaged);
         if (damaged && e.DAni == 0)
         {
-            ImGui.TextDisabled(e.Dgr > 0
+            ImGui.TextColored(ColorOf(UiFaint), e.Dgr > 0
                 ? $"damaged: sprite {e.Dgr} replaces frame 1, animation stops"
                 : "this entry has no damaged form");
             return;
         }
-        if (run.Count == 0)
-        {
-            ImGui.TextDisabled("this entry has no damaged form");
-            return;
-        }
+        if (run.Count == 0) { ImGui.TextColored(ColorOf(UiFaint), "this entry has no damaged form"); return; }
         if (run.Count == 1 && damaged && e.Dgr > Math.Abs((int)e.DAni))
-        {
             // dgr past |dani|: the cycle wraps on its first step and parks there.
-            ImGui.TextDisabled($"damaged: parks on frame {e.Dgr}, animation stops");
-        }
+            ImGui.TextColored(ColorOf(UiFaint), $"damaged: parks on frame {e.Dgr}, animation stops");
         if (run.Count == 1 && !damaged)
         {
-            ImGui.TextDisabled(e.Animate == 0 ? "static (animate 0): frame 1 only" : "single frame");
+            ImGui.TextColored(ColorOf(UiFaint),
+                e.Animate == 0 ? "static (animate 0): frame 1 only" : "single frame");
             return;
         }
 
-        int live = _enemyFrameHold >= 0
-            ? Math.Clamp(_enemyFrameHold, 0, run.Count - 1)
-            : (int)(((long)_enemyClock) % run.Count);
+        int live = LiveFrameIndex(e, run.Count, damaged);
 
-        const float cell = 30f;
+        const float cell = 32f;
         var dl = ImGui.GetWindowDrawList();
         for (int k = 0; k < run.Count; k++)
         {
@@ -456,47 +639,80 @@ public sealed unsafe partial class App
             bool hit = ImGui.InvisibleButton($"##fr{k}", new Vector2(cell, cell));
             bool hot = ImGui.IsItemHovered();
 
-            dl.AddRectFilled(mn, mx, Gfx.Rgba(20, 22, 30), 2f);
+            dl.AddRectFilled(mn, mx, k == live ? Gfx.Rgba(30, 34, 46) : Gfx.Rgba(20, 22, 30), 4f);
             if (atlas != null)
                 DrawEnemyFrameCentered(dl, atlas, e.EGraphic[Math.Clamp(run[k] - 1, 0, 19)],
                     e.Esize == 1, mn, mx, 1f);
-            dl.AddRect(mn, mx, k == live ? AcLink : hot ? Gfx.Rgba(255, 255, 255, 110) : Gfx.Rgba(60, 66, 84), 2f);
-            if (hot) ImGui.SetTooltip($"frame {run[k]}  ·  sprite {e.EGraphic[Math.Clamp(run[k] - 1, 0, 19)]}");
+            dl.AddRect(mn, mx, k == live ? Shade(AcLink, 1.1f) : hot ? Gfx.Rgba(255, 255, 255, 120)
+                : UiLineSoft, 4f, ImDrawFlags.None, k == live ? 1.8f : 1f);
+            if (k == live)
+                dl.AddRectFilled(new Vector2(mn.X + 4f, mx.Y - 2.5f), new Vector2(mx.X - 4f, mx.Y - 0.5f),
+                    Shade(AcLink, 1.15f), 1f);
+            if (hot) ImGui.SetTooltip($"frame {run[k]}  ·  sprite {e.EGraphic[Math.Clamp(run[k] - 1, 0, 19)]}" +
+                "\nclick to hold this frame");
             if (hit) { _enemyFrameHold = k; _enemyAnimate = false; }
         }
         ImGui.SameLine(0, 10);
-        if (_enemyFrameHold >= 0 && ImGui.SmallButton("resume##fr")) { _enemyFrameHold = -1; _enemyAnimate = true; }
-        else if (_enemyFrameHold < 0) ImGui.TextDisabled("click a frame to hold it");
+        ImGui.AlignTextToFramePadding();
+        if (_enemyFrameHold >= 0)
+        {
+            if (UiButton("resume", AcEnemy, "back to the running animation"))
+                { _enemyFrameHold = -1; _enemyAnimate = true; }
+        }
+        else ImGui.TextColored(ColorOf(UiFaint), $"{run.Count} frames  ·  click one to hold it");
     }
 
     private void DrawEnemyStats(in EnemyDat e, ObjCategory cat, SpriteSource src)
     {
-        ImGui.TextColored(ColorOf(ObjectPlacer.CategoryColor(cat)), ObjectPlacer.CategoryName(cat));
-        ImGui.TextDisabled($"armor {e.Armor}   ·   value {e.Value}");
-        ImGui.TextDisabled($"move {e.XMove},{e.YMove}   accel {e.XAccel},{e.YAccel}");
+        UiSection("movement", AcLink);
+        KV("velocity", $"{e.XMove}, {e.YMove}");
+        KV("acceleration", $"{e.XAccel}, {e.YAccel}");
         if (e.XCAccel != 0 || e.YCAccel != 0)
-            ImGui.TextDisabled($"cyclic accel {e.XCAccel},{e.YCAccel}  reverse at {e.XRev},{e.YRev}");
-        ImGui.TextDisabled($"start {e.StartX},{e.StartY}" +
-            (e.StartXC != 0 || e.StartYC != 0 ? $"  ± {e.StartXC},{e.StartYC}" : ""));
-        ImGui.TextDisabled($"animate {e.Animate} ({AnimateName(e.Animate)}), {e.Ani} frames");
-        ImGui.TextDisabled($"{(e.Esize == 1 ? "2x2 metasprite (24x28)" : "single sprite (12px wide)")}");
-        ImGui.TextDisabled($"explosion {e.ExplosionType >> 1}, {(e.IsGround ? "ground" : "air")}");
+            KV("cyclic accel", $"{e.XCAccel}, {e.YCAccel}   reverses at {e.XRev}, {e.YRev}");
+        KV("start", $"{e.StartX}, {e.StartY}" +
+            (e.StartXC != 0 || e.StartYC != 0 ? $"   ± {e.StartXC}, {e.StartYC}" : ""));
 
-        if (ImGui.SmallButton($"bank {e.ShapeBank}##gobank")) OpenSprite(src, e.EGraphic[0]);
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip($"open {src.Title} in the sprite browser");
+        UiSection("shape", AcSprite);
+        KV("animate", $"{e.Animate} ({AnimateName(e.Animate)}), {e.Ani} frames");
+        KV("size", e.Esize == 1 ? "2x2 metasprite (24x28)" : "single sprite (12px wide)");
+        KV("explosion", $"type {e.ExplosionType >> 1}");
+        ImGui.Dummy(new Vector2(0, 3f));
+        if (UiButton($"open bank {e.ShapeBank}", AcSprite, $"open {src.Title} in the sprite browser"))
+            OpenSprite(src, e.EGraphic[0]);
 
         // --- Turrets ---
-        var turrets = new[] { (e.Tur0, e.Freq0, "down"), (e.Tur1, e.Freq1, "rotated right"), (e.Tur2, e.Freq2, "rotated left") };
-        bool any = turrets.Any(t => t.Item1 != 0 && t.Item2 != 0);
-        ImGui.Dummy(new Vector2(0, 3));
-        ImGui.TextColored(ColorOf(AcSim), any ? "turrets" : "no turrets");
-        for (int k = 0; k < 3; k++)
+        var turrets = new[]
         {
-            var (id, freq, dir) = turrets[k];
+            (e.Tur0, e.Freq0, "fires down"),
+            (e.Tur1, e.Freq1, "rotated right"),
+            (e.Tur2, e.Freq2, "rotated left"),
+        };
+        bool any = turrets.Any(t => t.Item1 != 0 && t.Item2 != 0);
+        UiSection("turrets", AcSim, any ? "" : "none");
+        if (!any) return;
+
+        // The reload is drawn as a rate rather than a period, so the fastest gun has the
+        // longest bar -- "every 4 ticks" and "every 90 ticks" otherwise sort backwards.
+        int fastest = turrets.Where(t => t.Item1 != 0 && t.Item2 != 0).Min(t => (int)t.Item2);
+        var dl = ImGui.GetWindowDrawList();
+        foreach (var (id, freq, dir) in turrets)
+        {
             if (id == 0 || freq == 0) continue;
-            ImGui.BulletText($"{TurretName(id)}   every {freq} ticks   ({dir})");
-            if (ImGui.IsItemHovered() && id < 251)
-                ImGui.SetTooltip($"weapons[{id}] - the same table the shop's guns come from");
+            float w = ImGui.GetContentRegionAvail().X;
+            float lh = ImGui.GetTextLineHeight();
+            float h = lh * 2f + 12f;
+            var p = ImGui.GetCursorScreenPos();
+            ImGui.InvisibleButton($"##tur{id}_{freq}_{dir}", new Vector2(w, h));
+            bool hot = ImGui.IsItemHovered();
+            Card(dl, p, p + new Vector2(w, h), AcSim, hot ? 0.14f : 0.07f);
+            dl.AddRectFilled(new Vector2(p.X, p.Y + 4f), new Vector2(p.X + 2.5f, p.Y + h - 4f),
+                Shade(AcSim, 1f, 210), 2f);
+            ClipText(dl, new Vector2(p.X + 10f, p.Y + 5f), w - 20f, UiText, TurretName(id));
+            ClipText(dl, new Vector2(p.X + 10f, p.Y + 5f + lh + 1f), w - 112f, UiFaint,
+                $"every {freq} ticks  ·  {dir}");
+            var bar = new Vector2(p.X + w - 96f, p.Y + h - 11f);
+            MeterBar(dl, bar, bar + new Vector2(86f, 6f), fastest / (float)freq, AcSim);
+            if (hot && id < 251) ImGui.SetTooltip($"weapons[{id}] - the same table the shop's guns come from");
         }
     }
 
@@ -537,10 +753,9 @@ public sealed unsafe partial class App
 
     private void DrawEnemyLinks(in EnemyDat e, EnemyData ed)
     {
-        // The right-hand table cell is narrow, so let the prose wrap inside it rather than
-        // running under the window edge.
+        UiSection("links", AcLink);
+        // The pane is narrow, so let the prose wrap inside it rather than run under the edge.
         ImGui.PushTextWrapPos(0f);
-        ImGui.TextColored(ColorOf(AcLink), "links");
 
         // launchtype splits into a type and a "special" above 1000 for entries under 1000.
         int launch = e.ELaunchType;
@@ -551,38 +766,44 @@ public sealed unsafe partial class App
             EnemyLinkRow("launches", type, ed,
                 $"every {e.ELaunchFreq} ticks" + (special > 0 ? $", launch mode {special}" : ""));
         }
-        else ImGui.TextDisabled("launches nothing");
+        else ImGui.TextColored(ColorOf(UiFaint), "launches nothing");
 
         if (e.EEnemyDie > 0) EnemyLinkRow("dies into", e.EEnemyDie, ed, "spawned where the corpse fell");
-        else ImGui.TextDisabled("leaves nothing behind");
+        else ImGui.TextColored(ColorOf(UiFaint), "leaves nothing behind");
 
         if (e.DLevel == -1)
-            ImGui.TextDisabled($"leaves a wreck (sprite {e.Dgr}): drifts on, cannot be shot");
+            ImGui.TextColored(ColorOf(UiDim), $"leaves a wreck (sprite {e.Dgr}): drifts on, cannot be shot");
         else if (e.Dgr > 0 || e.DAni != 0)
-            ImGui.TextDisabled(e.DAni < 0
-                ? $"starts dormant; wakes at armor <= {e.DLevel}"
-                : $"gets wrecked at armor <= {e.DLevel}");
+            ImGui.TextColored(ColorOf(UiDim), e.DAni < 0
+                ? $"starts dormant; wakes at armour <= {e.DLevel}"
+                : $"gets wrecked at armour <= {e.DLevel}");
         ImGui.PopTextWrapPos();
     }
 
     private void EnemyLinkRow(string label, int enemyId, EnemyData ed, string note)
     {
         var target = ed.Get(enemyId);
+        float w = ImGui.GetContentRegionAvail().X;
+        float lh = ImGui.GetTextLineHeight();
+        float h = lh * 2f + 10f;
+        var p = ImGui.GetCursorScreenPos();
+        bool hit = ImGui.InvisibleButton($"##lnk{label}{enemyId}", new Vector2(w, h));
+        bool hot = ImGui.IsItemHovered();
+
         var dl = ImGui.GetWindowDrawList();
-        var mn = ImGui.GetCursorScreenPos();
-        ImGui.Dummy(new Vector2(26f, 26f));
+        Card(dl, p, p + new Vector2(w, h), AcLink, hot ? 0.16f : 0.07f);
         if (target.Loaded)
         {
             var atlas = Atlas(EnemySpriteSource(target.ShapeBank), AppSettings.GamePalette);
             if (atlas != null)
                 DrawEnemyFrameCentered(dl, atlas, target.EGraphic[0], target.Esize == 1,
-                    mn, mn + new Vector2(26f, 26f), 1f);
+                    new Vector2(p.X + 5f, p.Y + 3f), new Vector2(p.X + 37f, p.Y + h - 3f), 1f);
         }
-        ImGui.SameLine(0, 4);
-        ImGui.BeginGroup();
-        if (ImGui.SmallButton($"{label} #{enemyId}##lnk{label}{enemyId}")) OpenEnemy(_enemyEpisodeIdx, enemyId);
-        ImGui.TextDisabled(note);
-        ImGui.EndGroup();
+        ClipText(dl, new Vector2(p.X + 42f, p.Y + 4f), w - 50f,
+            hot ? Gfx.Rgba(248, 250, 255) : UiText, $"{label} #{enemyId}");
+        ClipText(dl, new Vector2(p.X + 42f, p.Y + 4f + lh + 1f), w - 50f, UiFaint, note);
+        if (hot) ImGui.SetTooltip("open this enemyDat entry");
+        if (hit) OpenEnemy(_enemyEpisodeIdx, enemyId);
     }
 
     /// <summary>Which levels spawn this entry, and when. Built once per episode.</summary>
@@ -592,29 +813,47 @@ public sealed unsafe partial class App
         if (_gd == null || ep == null) return;
         if (_appearances == null || _appearancesFor != ep.Number) BuildAppearances(ep);
 
-        if (_appearances!.TryGetValue(enemyId, out var sites) && sites.Count > 0)
+        if (!_appearances!.TryGetValue(enemyId, out var sites) || sites.Count == 0)
         {
-            ImGui.TextColored(ColorOf(AcRoutes), $"spawned in {sites.Select(s => s.FileNum).Distinct().Count()} level(s)");
-            ImGui.BeginChild("enwhere", new Vector2(0, 0));
-            foreach (var g in sites.GroupBy(s => s.FileNum))
-            {
-                var first = g.First();
-                ushort firstTime = g.Min(s => s.Time);
-                if (ImGui.SmallButton($"{first.Name} #{first.FileNum}##app{first.FileNum}"))
-                {
-                    SelectLevelFile(_enemyEpisodeIdx < 0 ? _episodeIdx : _enemyEpisodeIdx, first.FileNum);
-                    // One entry, and it is the earliest spawn of it that the button names.
-                    _pendingJump = new MapJump(firstTime, new[] { enemyId });
-                }
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("open this level at its first spawn of this entry\n" +
-                        "(in playback, seek to the frame it flies into)");
-                ImGui.SameLine(0, 8);
-                ImGui.TextDisabled($"{g.Count()}x, first at t={firstTime}");
-            }
-            ImGui.EndChild();
+            UiSection("where it turns up", AcRoutes, "nowhere");
+            ImGui.PushTextWrapPos(0f);
+            ImGui.TextColored(ColorOf(UiFaint),
+                "No level in this episode spawns it directly - it may only appear as a launch or a death drop.");
+            ImGui.PopTextWrapPos();
+            return;
         }
-        else ImGui.TextDisabled("No level in this episode spawns it directly (it may only appear as a launch or death drop).");
+
+        var groups = sites.GroupBy(s => s.FileNum).ToList();
+        UiSection("where it turns up", AcRoutes, $"{groups.Count} level{(groups.Count == 1 ? "" : "s")}");
+        int most = groups.Max(g => g.Count());
+
+        ImGui.BeginChild("enwhere", new Vector2(0, 0));
+        foreach (var g in groups)
+        {
+            var first = g.First();
+            ushort firstTime = g.Min(s => s.Time);
+            const float rowH = 30f;
+            var box = UiRow($"##app{first.FileNum}", false, AcRoutes, rowH);
+            if (box.Clicked)
+            {
+                SelectLevelFile(_enemyEpisodeIdx < 0 ? _episodeIdx : _enemyEpisodeIdx, first.FileNum);
+                // One entry, and it is the earliest spawn of it that the row names.
+                _pendingJump = new MapJump(firstTime, new[] { enemyId });
+            }
+            if (box.Hovered)
+                ImGui.SetTooltip("open this level at its first spawn of this entry\n" +
+                    "(in playback, seek to the frame it flies into)");
+
+            var dl = ImGui.GetWindowDrawList();
+            float barW = Math.Max(28f, (box.Max.X - box.Min.X) * 0.28f);
+            string trail = $"×{g.Count()}";
+            RowText(box, 10f, $"{first.Name}  #{first.FileNum:00}", $"first at t={firstTime}",
+                AcRoutes, false, barW + TrailRoom(trail) + 12f);
+            var bar = new Vector2(box.Max.X - barW - TrailRoom(trail), box.Min.Y + rowH * 0.5f - 5f);
+            MeterBar(dl, bar, bar + new Vector2(barW, 7f), g.Count() / (float)most, AcRoutes);
+            RowTrail(box, trail, Shade(AcRoutes, 1.1f));
+        }
+        ImGui.EndChild();
     }
 
     private void BuildAppearances(EpisodeInfo ep)
@@ -657,7 +896,7 @@ public sealed unsafe partial class App
         int at = levels.FindIndex(l => l.Ep == _asmLevelEp && l.File == _asmLevelFile);
         if (_asmLevelEp >= 0 && at < 0) { _asmLevelEp = _asmLevelFile = -1; }   // episode set changed
 
-        ImGui.SetNextItemWidth(160);
+        ImGui.SetNextItemWidth(168);
         if (!ImGui.BeginCombo("##asmlevelpick", at >= 0 ? levels[at].Label : "any level")) return;
         if (ImGui.Selectable("any level", at < 0))
         {
@@ -801,31 +1040,34 @@ public sealed unsafe partial class App
         for (int i = 0; i < shown.Count; i++)
         {
             var a = shown[i];
-            if (a.KindPlural != lastGroup) { ImGui.SeparatorText(a.KindPlural); lastGroup = a.KindPlural; }
-
-            var mn = ImGui.GetCursorScreenPos();
-            bool sel = i == _asmSelected;
-            if (ImGui.Selectable($"##asm{i}", sel, ImGuiSelectableFlags.None, new Vector2(0, 30f)))
-                _asmSelected = i;
-            if (sel && _asmScrollToSelection) { ImGui.SetScrollHereY(0.4f); _asmScrollToSelection = false; }
-            var dl = ImGui.GetWindowDrawList();
             uint col = a.IsBoss ? AcBoss : a.Rank == 1 ? AcRoutes : AcSim;
-            dl.AddRectFilled(mn, new Vector2(mn.X + 2.5f, mn.Y + 28f), col, 1f);
+            if (a.KindPlural != lastGroup)
+            {
+                UiSection(a.KindPlural, col, shown.Count(x => x.KindPlural == a.KindPlural).ToString());
+                lastGroup = a.KindPlural;
+            }
+
+            bool sel = i == _asmSelected;
+            const float rowH = 34f;
+            var box = UiRow($"##asm{i}", sel, col, rowH);
+            if (box.Clicked) _asmSelected = i;
+            if (sel && _asmScrollToSelection) { ImGui.SetScrollHereY(0.4f); _asmScrollToSelection = false; }
+
             // Parts and level first: the list is already grouped by kind, so repeating it on
             // every row would say nothing, and several groups share one level name. A run
             // spanning levels is named after the first and counts the rest.
             bool run = _asmUnique && a.RepeatCount > 1;
-            dl.AddText(new Vector2(mn.X + 8f, mn.Y), Gfx.Rgba(228, 232, 242),
+            // Most-useful first on the second line, because a narrow list column cuts the tail.
+            // A folded run drops the link number -- every spawn in it carries a different one.
+            RowText(box, 10f,
                 $"{a.Parts.Count} part{(a.Parts.Count == 1 ? "" : "s")}  ·  " +
                 AssemblyLevelLabel(a.EpisodeIdx, a.LevelFileNum, a.LevelName) +
-                (run && a.LevelCount > 1 ? $"  +{a.LevelCount - 1}" : ""));
-            // Most-useful first, because a narrow list column clips the tail. A folded run
-            // drops the link number -- every spawn in it carries a different one.
-            dl.AddText(new Vector2(mn.X + 8f, mn.Y + 14f), Shade(col, 1f, 190),
+                (run && a.LevelCount > 1 ? $"  +{a.LevelCount - 1}" : ""),
                 (a.TotalArmor > 0 ? $"armour {a.TotalArmor}  ·  " : "") +
                 (run ? $"×{a.RepeatCount}" +
                        (a.LevelCount > 1 ? $"  ·  in {a.LevelCount} levels" : $"  ·  from t={a.Time}")
-                     : (a.LinkNum != 0 ? $"link {a.LinkNum}  ·  " : "") + $"t={a.Time}"));
+                     : (a.LinkNum != 0 ? $"link {a.LinkNum}  ·  " : "") + $"t={a.Time}"),
+                col, sel);
         }
     }
 
@@ -836,28 +1078,33 @@ public sealed unsafe partial class App
     /// </summary>
     private void DrawAssemblySites(EnemyAssembly asm)
     {
-        ImGui.TextColored(ColorOf(AcLink), asm.LevelCount > 1
+        UiSection(asm.LevelCount > 1
             // No em dash: the ImGui font has Latin-1, so · is safe where — draws as a box.
-            ? $"×{asm.RepeatCount} across {asm.LevelCount} levels  ·  click a spawn to open it there"
-            : $"×{asm.RepeatCount} in this level  ·  click a spawn to jump to it");
+            ? $"×{asm.RepeatCount} across {asm.LevelCount} levels"
+            : $"×{asm.RepeatCount} in this level", AcLink, "click a spawn to open it there");
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("The same pieces in the same arrangement, spawned again with a fresh\n" +
                 "set of link numbers. Turn \"unique\" off to list each one on its own.");
 
         // Fixed height rather than one row per spawn: some runs are 40 long, and the preview
         // below is the point of the pane.
-        float h = Math.Clamp(asm.RepeatCount * ImGui.GetTextLineHeightWithSpacing() + 6f, 40f, 108f);
-        ImGui.BeginChild("asmsites", new Vector2(0, h), ImGuiChildFlags.Borders);
+        float h = Math.Clamp(asm.RepeatCount * 24f + 16f, 48f, 116f);
+        WellBegin("asmsites", new Vector2(ImGui.GetContentRegionAvail().X, h), AcLink, 8f, 6f);
         int i = 0;
         foreach (var s in asm.Sites)
         {
             bool here = s.EpisodeIdx == _episodeIdx && s.LevelFileNum == _levelFileNum;
-            if (ImGui.Selectable(
-                    $"{AssemblyLevelLabel(s.EpisodeIdx, s.LevelFileNum, s.LevelName),-24}  t={s.Time}##site{i++}",
-                    here))
-                OpenAssemblySite(asm, s);
+            var box = UiRow($"##site{i++}", here, AcLink, 22f);
+            if (box.Clicked) OpenAssemblySite(asm, s);
+            var dl = ImGui.GetWindowDrawList();
+            string trail = $"t={s.Time}";
+            ClipText(dl, new Vector2(box.Min.X + 10f, box.Min.Y + 2f),
+                box.Max.X - box.Min.X - 10f - TrailRoom(trail),
+                here ? Gfx.Rgba(250, 252, 255) : UiText,
+                AssemblyLevelLabel(s.EpisodeIdx, s.LevelFileNum, s.LevelName));
+            RowTrail(box, trail, UiFaint);
         }
-        ImGui.EndChild();
+        WellEnd();
     }
 
     /// <summary>
@@ -881,16 +1128,17 @@ public sealed unsafe partial class App
         }
         if (flips == 0) return false;
 
-        ImGui.Checkbox("damaged##asmdmg", ref _enemyDamaged);
+        UiToggle("damaged", ref _enemyDamaged, AcBoss,
+            "Damage is not per part: crossing that armour on any one of them\n" +
+            "flips every linked part with a damage level at the same instant\n" +
+            "(tyrian2.c:2954). Parts without one keep the form they had.");
         ImGui.SameLine(0, 8);
+        ImGui.AlignTextToFramePadding();
         // dani < 0 starts the part in its second form, so for those the flip is the way UP.
         string what = wakes == flips ? "wakes" : wakes == 0 ? "wrecks" : "changes form";
-        ImGui.TextDisabled($"the whole link group {what} at armour <= {(lo == hi ? $"{lo}" : $"{lo}..{hi}")}" +
+        ImGui.TextColored(ColorOf(UiDim),
+            $"the whole link group {what} at armour <= {(lo == hi ? $"{lo}" : $"{lo}..{hi}")}" +
             (flips < asm.Parts.Count ? $"  ({flips} of {asm.Parts.Count} parts)" : ""));
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Damage is not per part: crossing that armour on any one of them\n" +
-                "flips every linked part with a damage level at the same instant\n" +
-                "(tyrian2.c:2954). Parts without one keep the form they had.");
         return true;
     }
 
@@ -912,7 +1160,11 @@ public sealed unsafe partial class App
     private void DrawAssemblyDetail()
     {
         var shown = ShownAssemblies();
-        if (shown.Count == 0) { ImGui.TextDisabled("Nothing to show."); return; }
+        if (shown.Count == 0)
+        {
+            UiEmpty("Nothing to show", "No group matches the level picker and filter.", AcEnemy);
+            return;
+        }
         var asm = shown[Math.Clamp(_asmSelected, 0, shown.Count - 1)];
         var ep = _gd!.Episodes[asm.EpisodeIdx];
         var ed = TryEnemyDataFor(ep);
@@ -932,36 +1184,61 @@ public sealed unsafe partial class App
         }
 
         bool respawned = _asmUnique && asm.RepeatCount > 1;
-        DrawGameHeader(asm.LevelName.ToUpperInvariant(), asm.IsBoss ? AcBoss : AcRoutes);
-        ImGui.TextDisabled($"{asm.Title}  ·  spawns at t={asm.Time}  ·  {asm.Width:0}x{asm.Height:0} px  ·  total armor {asm.TotalArmor}");
-        if (asm.KillsEverything)
-            ImGui.TextColored(ColorOf(AcBoss), "link 254: killing any part clears the screen and can end the level");
-        else if (asm.HasBossBar)
-            ImGui.TextColored(ColorOf(AcBoss), $"link {asm.LinkNum}: the level draws a boss health bar for this group");
-        else if (asm.LinkNum >= 100)
-            ImGui.TextDisabled($"link {asm.LinkNum}: killing it also kills group {asm.LinkNum - 100}");
-        else if (asm.LinkNum > 40)
-            ImGui.TextDisabled($"link {asm.LinkNum}: killing it also kills the lower links in bucket {asm.LinkNum / 20}");
-        else if (asm.LinkNum != 0)
-            ImGui.TextDisabled($"link {asm.LinkNum}: the parts die together");
+        uint col = asm.IsBoss ? AcBoss : AcRoutes;
 
+        UiTitle(asm.LevelName.ToUpperInvariant(), col, asm.Title);
+        Badge($"{asm.Parts.Count} parts", col);
+        ImGui.SameLine(0, 5f);
+        Badge($"armour {asm.TotalArmor}", AcBoss);
+        ImGui.SameLine(0, 5f);
+        Badge($"{asm.Width:0}x{asm.Height:0} px", Gfx.Rgba(150, 162, 185));
+        ImGui.SameLine(0, 5f);
+        Badge($"t={asm.Time}", Gfx.Rgba(150, 162, 185));
+
+        ImGui.Dummy(new Vector2(0, 3f));
+        ImGui.PushTextWrapPos(0f);
+        if (asm.IsBoss && !asm.HasBossBar && !asm.KillsEverything)
+            ImGui.TextColored(ColorOf(AcBoss),
+                $"{asm.TileCount} distinct tiles: a set piece the level draws in full, " +
+                "though it never arms a health bar for it");
+        if (asm.KillsEverything)
+            ImGui.TextColored(ColorOf(AcBoss),
+                "link 254: killing any part clears the screen and can end the level");
+        else if (asm.HasBossBar)
+            ImGui.TextColored(ColorOf(AcBoss),
+                $"link {asm.LinkNum}: the level draws a boss health bar for this group");
+        else if (asm.SplitLinks)
+            ImGui.TextColored(ColorOf(UiDim),
+                $"links {string.Join(", ", asm.Links.Order())}: one body on screen, but the " +
+                "cascade does not relate them — each link dies on its own");
+        else if (asm.LinkNum >= 100)
+            ImGui.TextColored(ColorOf(UiDim), $"link {asm.LinkNum}: killing it also kills group {asm.LinkNum - 100}");
+        else if (asm.LinkNum > 40)
+            ImGui.TextColored(ColorOf(UiDim),
+                $"link {asm.LinkNum}: killing it also kills the lower links in bucket {asm.LinkNum / 20}");
+        else if (asm.LinkNum != 0)
+            ImGui.TextColored(ColorOf(UiDim), $"link {asm.LinkNum}: the parts die together");
+        ImGui.PopTextWrapPos();
+
+        ImGui.Dummy(new Vector2(0, 3f));
         // Always the group's OWN episode, never the browser's: in "All episodes" the list spans
         // the whole game, and taking the episode from the picker opened the same-numbered level
         // file of whatever episode happened to be current.
-        if (!respawned && ImGui.SmallButton($"open {asm.LevelName}##asmlvl"))
+        if (!respawned && UiButton($"open {asm.LevelName}", col, "open that level at this group's spawn"))
             OpenAssemblySite(asm, new EnemyAssembly.SpawnSite(
                 asm.EpisodeIdx, asm.LevelFileNum, asm.LevelName, asm.Time));
-        if (respawned) DrawAssemblySites(asm);
 
         // --- Damaged form, where the group has one ---
         bool showDamaged = _enemyDamaged && DrawAssemblyDamagedToggle(asm, ed);
+        if (respawned) DrawAssemblySites(asm);
 
         // --- The group composited at its own offsets ---
-        float stageH = Math.Max(150f, Math.Min(360f, ImGui.GetContentRegionAvail().Y - 150f));
+        ImGui.Dummy(new Vector2(0, 3f));
+        float stageH = Math.Max(160f, Math.Min(380f, ImGui.GetContentRegionAvail().Y - 170f));
         var mn2 = ImGui.GetCursorScreenPos();
         var mx2 = new Vector2(mn2.X + ImGui.GetContentRegionAvail().X, mn2.Y + stageH);
         var dl = ImGui.GetWindowDrawList();
-        DrawStarStage(dl, mn2, mx2);
+        StageBegin(dl, mn2, mx2);
 
         float scale = Math.Max(1f, MathF.Floor(Math.Min(
             (mx2.X - mn2.X - 24f) / Math.Max(1f, asm.Width),
@@ -991,41 +1268,78 @@ public sealed unsafe partial class App
                 }
                 else
                 {
+                    // Through the same gate the single-entry stage uses: a group is mostly
+                    // guns, and an animate-2 part free-running was the strobe at its worst --
+                    // a dozen of them out of step with each other.
                     var run = FrameRun(d, flipped);
                     if (run.Count > 0)
-                        sprite = d.EGraphic[Math.Clamp(run[(int)(((long)_enemyClock) % run.Count)] - 1, 0, 19)];
+                        sprite = d.EGraphic[Math.Clamp(
+                            run[RunningFrameIndex(d, run.Count, flipped)] - 1, 0, 19)];
                 }
             }
             DrawEnemyFrame(dl, atlas, sprite, p.Big, origin + new Vector2(p.X * scale, p.Y * scale), scale);
         }
-        ImGui.Dummy(new Vector2(0, stageH + 4f));
+        UiHint(dl, new Vector2(mn2.X + 8f, mx2.Y - ImGui.GetTextLineHeight() - 14f),
+            $"drawn at {scale:0}x  ·  the zoom slider caps it", col);
+        StageEnd(dl);
+        ImGui.Dummy(new Vector2(0, stageH + 5f));
 
         // --- Parts list ---
-        ImGui.TextDisabled("parts (click one to open it)");
+        DrawAssemblyParts(asm);
+    }
+
+    /// <summary>
+    /// What the group is built from, one card per distinct piece. Grouped by what is drawn
+    /// rather than by id: the parts events 49-52 synthesise all share id 0 and differ only in
+    /// the sprite and bank the event handed them.
+    /// </summary>
+    private void DrawAssemblyParts(EnemyAssembly asm)
+    {
+        UiSection("parts", AcLink, "click one to open it");
         ImGui.BeginChild("asmparts", new Vector2(0, 0));
-        // Group by what is drawn, not by id: the 49-52 parts all share id 0 and differ only
-        // in the sprite and bank the event handed them.
+
+        float wide = ImGui.GetContentRegionAvail().X;
+        // Wide enough for the widest line it can carry ("armour 255 · 2x2 · bank 26") at the
+        // 40px text inset, and the text is clipped on top of that -- a part with a long line
+        // used to print straight out through the side of its card.
+        const float cardH = 34f;
+        float cardW = Math.Max(150f, Math.Min(232f, wide));
+        int cols = Math.Max(1, (int)(wide / (cardW + 5f)));
+        int k = 0;
         foreach (var g in asm.Parts.GroupBy(p => (p.EnemyId, p.Sprite, p.ShapeBank))
                      .OrderBy(g => g.Key.EnemyId).ThenBy(g => g.Key.Sprite))
         {
             var (id, sprite, bank) = g.Key;
             var first = g.First();
-            if (id != 0)
-            {
-                if (ImGui.SmallButton($"#{id}##ap{id}_{sprite}")) OpenEnemy(_enemyEpisodeIdx, id);
-                if (ImGui.IsItemHovered()) ImGui.SetTooltip("open this enemyDat entry");
-            }
-            else
-            {
-                if (ImGui.SmallButton($"spr {sprite}##ap0_{sprite}_{bank}"))
-                    OpenSprite(EnemySpriteSource(bank), sprite);
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("An event-built part: no enemyDat entry of its own, just\n" +
-                        "a sprite, a bank and an armour value carried by the event.");
-            }
-            ImGui.SameLine(0, 8);
-            ImGui.TextDisabled($"x{g.Count()}   armour {first.Armor}   " +
-                $"{(first.Big ? "2x2" : "1x1")}   bank {bank}");
+            if (k % cols != 0) ImGui.SameLine(0, 5f);
+            k++;
+
+            var p = ImGui.GetCursorScreenPos();
+            bool hit = ImGui.InvisibleButton($"##ap{id}_{sprite}_{bank}", new Vector2(cardW, cardH));
+            bool hot = ImGui.IsItemHovered();
+            var dl = ImGui.GetWindowDrawList();
+            Card(dl, p, p + new Vector2(cardW, cardH), id != 0 ? AcEnemy : AcSprite, hot ? 0.18f : 0.07f);
+
+            var atlas = Atlas(EnemySpriteSource(bank), AppSettings.GamePalette);
+            if (atlas != null)
+                DrawEnemyFrameCentered(dl, atlas, sprite, first.Big,
+                    new Vector2(p.X + 4f, p.Y + 2f), new Vector2(p.X + 36f, p.Y + cardH - 2f), 1f);
+
+            float lh = ImGui.GetTextLineHeight();
+            float room = cardW - 46f;
+            ClipText(dl, new Vector2(p.X + 40f, p.Y + 3f), room, hot ? Gfx.Rgba(248, 250, 255) : UiText,
+                id != 0 ? $"#{id}  ×{g.Count()}" : $"spr {sprite}  ×{g.Count()}");
+            ClipText(dl, new Vector2(p.X + 40f, p.Y + 3f + lh + 1f), room, UiFaint,
+                $"armour {first.Armor}  ·  {(first.Big ? "2x2" : "1x1")}  ·  bank {bank}");
+
+            if (hot)
+                ImGui.SetTooltip(id != 0
+                    ? "open this enemyDat entry"
+                    : "An event-built part: no enemyDat entry of its own, just\n" +
+                      "a sprite, a bank and an armour value carried by the event.");
+            if (!hit) continue;
+            if (id != 0) OpenEnemy(_enemyEpisodeIdx, id);
+            else OpenSprite(EnemySpriteSource(bank), sprite);
         }
         ImGui.EndChild();
     }

@@ -32,6 +32,8 @@ internal static unsafe class Program
             return SpriteGrid(args);
         if (Array.IndexOf(args, "--checksprites") >= 0)
             return CheckSprites();
+        if (Array.IndexOf(args, "--checkaudio") >= 0)
+            return CheckAudio();
         if (Array.IndexOf(args, "--checktimelines") >= 0)
             return CheckTimelines();
         if (Array.IndexOf(args, "--checkalllevels") >= 0)
@@ -96,6 +98,9 @@ internal static unsafe class Program
         // canvas jumps) and must not also wander the widget focus.
         io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
         io.IniFilename = null;   // window/panel state lives in settings.json, not imgui.ini
+        // One house style for every window the app opens, so the floating playback HUD, the
+        // reference browsers and every popup share the same rounded shell.
+        T2LV.App.ApplyGlobalStyle();
 
         var bWindow = new ImSdl.SDLWindowPtr((ImSdl.SDLWindow*)(void*)window.Handle);
         var bRenderer = new ImSdl.SDLRendererPtr((ImSdl.SDLRenderer*)(void*)renderer.Handle);
@@ -135,6 +140,9 @@ internal static unsafe class Program
         if (Array.IndexOf(args, "--asm-all") >= 0) settings.AssembliesUnique = false;   // one row per spawn
         if (Array.IndexOf(args, "--showitems") >= 0) settings.ShowItems = true;
         if (Array.IndexOf(args, "--showanalysis") >= 0) settings.ShowAnalysis = true;
+        if (Array.IndexOf(args, "--showmusic") >= 0) settings.ShowMusic = true;
+        if (Array.IndexOf(args, "--showsounds") >= 0) settings.ShowSounds = true;
+        if (Array.IndexOf(args, "--mute") >= 0) settings.AudioEnabled = false;
         if (Array.IndexOf(args, "--allepisodes") >= 0) settings.AllEpisodes = true;
         int pli = Array.IndexOf(args, "--player");
         int cliPlayerX = pli >= 0 && pli + 1 < args.Length && int.TryParse(args[pli + 1], out int pxv) ? pxv : -1;
@@ -186,6 +194,15 @@ internal static unsafe class Program
         if (anArg >= 0 && anArg + 1 < args.Length && int.TryParse(args[anArg + 1], out int anMode))
             app.ShowAnalysis(anMode);
 
+        // "--showmusic N" opens the music player on song N (1..41), "--showsounds N" the
+        // sound player on sound N (1..40) -- both the numbers the game's own data uses.
+        int musArg = Array.IndexOf(args, "--showmusic");
+        if (musArg >= 0 && musArg + 1 < args.Length && int.TryParse(args[musArg + 1], out int song))
+            app.ShowTrack(song);
+        int sndArg = Array.IndexOf(args, "--showsounds");
+        if (sndArg >= 0 && sndArg + 1 < args.Length && int.TryParse(args[sndArg + 1], out int snd))
+            app.ShowSound(snd);
+
         // "--search <text>" opens the search window already showing that query's results.
         int qArg = Array.IndexOf(args, "--search");
         if (qArg >= 0 && qArg + 1 < args.Length) app.ShowSearch(args[qArg + 1]);
@@ -224,7 +241,18 @@ internal static unsafe class Program
             if (fakeButton >= 0 && frame >= 3) io.AddMouseButtonEvent(fakeButton, true);
             ImGui.NewFrame();
 
-            app.Render();
+            try
+            {
+                app.Render();
+            }
+            catch (Exception ex)
+            {
+                // A WinExe that throws mid-frame just disappears, which makes a bug report
+                // "it crashed" and nothing more. Leave the stack trace somewhere findable
+                // before going down.
+                WriteCrashLog(ex);
+                throw;
+            }
 
             ImGui.Render();
             SdlNs.SDL.SetRenderDrawColor(renderer, 30, 30, 35, 255);
@@ -620,6 +648,92 @@ internal static unsafe class Program
                     string.Join(" ", g.Select(p => $"({p.X:0},{p.Y:0})")));
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Headless check of the whole audio path, no device required: parse music.mus and
+    /// the two .snd files, convert every song to MIDI, and actually render each one
+    /// through the OPL emulator for a second to prove the chip is producing sound.
+    /// </summary>
+    static int CheckAudio()
+    {
+        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        if (dir == null) { Console.Error.WriteLine("Could not find Tyrian 2000 data files."); return 1; }
+        Console.WriteLine($"data: {dir}");
+        bool failed = false;
+
+        var music = new T2LV.Tyrian.Audio.MusicBank();
+        if (!music.Load(dir)) { Console.Error.WriteLine("music.mus did not parse."); return 1; }
+        Console.WriteLine($"music.mus: {music.Tracks.Length} songs");
+
+        const int rate = 44100;
+        var opl = new T2LV.Tyrian.Audio.OplChip(rate);
+        var lds = new T2LV.Tyrian.Audio.LdsPlayer(opl);
+        var buf = new short[(int)(rate / 69.5) + 2];
+
+        Console.WriteLine("  #  title                              lds    notes  length   loop   oplPeak");
+        foreach (var t in music.Tracks)
+        {
+            var song = t.Lds;
+            var seq = T2LV.Tyrian.Audio.MidiSequence.From(t.Midi);
+            if (song == null) { Console.Error.WriteLine($"  song {t.Index + 1} will not parse as LDS"); failed = true; continue; }
+            if (seq == null) { Console.Error.WriteLine($"  song {t.Index + 1} will not convert to MIDI"); failed = true; continue; }
+
+            // One second of real OPL rendering: silence here means the chip is not running.
+            lds.Load(song);
+            int peak = 0;
+            for (int i = 0; i < 70; i++)
+            {
+                lds.Update();
+                opl.GetSample(buf.AsSpan(0, buf.Length - 2));
+                foreach (short s in buf) peak = Math.Max(peak, Math.Abs((int)s));
+            }
+            if (peak == 0) { Console.Error.WriteLine($"  song {t.Index + 1} rendered silence"); failed = true; }
+            if (seq.Notes.Length == 0) { Console.Error.WriteLine($"  song {t.Index + 1} has no notes"); failed = true; }
+
+            Console.WriteLine($"{t.Index + 1,3}  {t.Title,-34} {t.Raw.Length,6} {seq.Notes.Length,6}  " +
+                $"{seq.Duration,6}  {(seq.Loops ? seq.LoopStart.ToString() : "once"),6}  {peak,7}");
+        }
+
+        var sounds = new T2LV.Tyrian.Audio.SoundBank();
+        if (!sounds.Load(dir, rate)) { Console.Error.WriteLine("tyrian.snd / voices.snd did not parse."); return 1; }
+        Console.WriteLine($"\ntyrian.snd + {sounds.VoiceFile}: {T2LV.Tyrian.Audio.SoundBank.SoundCount} sounds");
+        foreach (var c in sounds.Clips)
+        {
+            if (c == null || c.Raw.Length == 0)
+            { Console.Error.WriteLine("  a sound slot is empty"); failed = true; continue; }
+            Console.WriteLine($"{c.Number,3}  {c.Title,-10} {c.Symbol,-24} {c.Seconds,6:0.000}s  " +
+                $"{c.Raw.Length,6} samples  peak {c.Peak,5:0.00}");
+        }
+
+        var gd = new T2LV.Tyrian.GameData(dir);
+        var usage = T2LV.Tyrian.Audio.AudioUsageIndex.Build(gd);
+        int songsUsed = 0, soundsUsed = 0;
+        for (int i = 0; i < music.Tracks.Length; i++) if (usage.Song(i).Count > 0) songsUsed++;
+        for (int i = 1; i <= T2LV.Tyrian.Audio.SoundBank.SoundCount; i++) if (usage.Sound(i).Count > 0) soundsUsed++;
+        Console.WriteLine($"\ncross-reference: {songsUsed}/{music.Tracks.Length} songs and " +
+            $"{soundsUsed}/{T2LV.Tyrian.Audio.SoundBank.SoundCount} sounds are named by the data set");
+
+        return failed ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Drop an unhandled frame exception next to the settings file, where the user can find
+    /// it. Best-effort by design: this runs while the process is already on its way down.
+    /// </summary>
+    static void WriteCrashLog(Exception ex)
+    {
+        string text = $"Tyrian 2000 Level Viewer crash\n{DateTime.Now:yyyy-MM-dd HH:mm:ss}\n\n{ex}\n";
+        Console.Error.WriteLine(text);
+        try
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Tyrian2000LevelViewer");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "crash.log"), text);
+        }
+        catch { /* nothing left to do about it */ }
     }
 
     static int CheckSprites()

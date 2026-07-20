@@ -56,6 +56,9 @@ public sealed class EnemyAssembly
     public readonly List<AssemblyPart> Parts = new();
     /// <summary>An event 79 registered this link group as a boss health bar.</summary>
     public bool HasBossBar;
+    /// <summary>Assembled from link numbers the kill cascade does not relate: one body on the
+    /// screen, but each link dies on its own. See <see cref="MergeAdjacentBodies"/>.</summary>
+    public bool SplitLinks { get; private set; }
     /// <summary>One place the game spawns a body: which level, and where along it.</summary>
     public readonly record struct SpawnSite(
         int EpisodeIdx, int LevelFileNum, string LevelName, ushort Time);
@@ -75,13 +78,30 @@ public sealed class EnemyAssembly
     public int TotalArmor;
     public float Width, Height;
 
+    /// <summary>Distinct sprites in the body -- how much of it is drawn rather than repeated.
+    /// Set from the authored parts and left alone afterwards, so opening a group and resolving
+    /// it against the sim cannot reclassify it.</summary>
+    public int TileCount { get; private set; }
+
+    /// <summary>Distinct sprites above which a body is a boss on size alone. Counting sprites
+    /// rather than parts is what separates the two: STARGATE's 50-part wall is two tiles laid
+    /// down twenty-five times and APPROACH's 18-part rank is one three-tile segment six times
+    /// over, while every hand-drawn body in the game -- DREAD-NOT 34, TIME WAR 24, STATION 27,
+    /// CAMANIS 23 -- is almost all distinct.</summary>
+    private const int BossTileCount = 16;
+
     /// <summary>
-    /// A boss is a thing with a health bar, and nothing else is. Armour does not qualify one
-    /// -- an asteroid built from twenty 50-armour rocks outweighs several real bosses -- and
-    /// neither does the 254 cascade on its own, which some levels use just to clear the
-    /// screen at the end.
+    /// A boss is a thing with a health bar -- or one drawn from enough distinct tiles that the
+    /// level plainly built it as the set piece. Armour does not qualify one on its own -- an
+    /// asteroid built from twenty 50-armour rocks outweighs several real bosses, and 154 of
+    /// episode 4's 849 entries carry the invulnerable 255 -- and neither does the 254 cascade,
+    /// which some levels use just to clear the screen at the end.
+    ///
+    /// The size clause exists because a bar is declared, not inherent: TIME WAR hangs a 30-part
+    /// machine over the whole level and never arms one (no event 79 anywhere in ep4 #17), so a
+    /// bar-only rule files the biggest object in the game under "structure".
     /// </summary>
-    public bool IsBoss => HasBossBar;
+    public bool IsBoss => HasBossBar || TileCount >= BossTileCount;
 
     /// <summary>Ranked so the list can group by it and put the interesting things first.</summary>
     public int Rank => IsBoss ? 0 : Parts.Count >= 8 ? 1 : Parts.Count >= 4 ? 2 : 3;
@@ -93,6 +113,11 @@ public sealed class EnemyAssembly
 
     /// <summary>Last spawn time added, so a group only accepts parts that arrive with it.</summary>
     private int _lastTime;
+
+    /// <summary>The group was authored as a picture -- every part a different sprite -- rather
+    /// than one enemy repeated. Fixed before any merging; see <see cref="MergeAdjacentBodies"/>.
+    /// </summary>
+    private bool _tiled;
 
     /// <summary>
     /// Every multi-part group a level spawns. Single-part spawns are kept only when the level
@@ -126,13 +151,18 @@ public sealed class EnemyAssembly
             asm._lastTime = ev.Time;
         }
 
+        // Event 65 locks the top band to bg1's cursor, which moves every top-band spawn 54px
+        // (see BandXOffset). TIME WAR turns it on at t=0, and its machine has rows in both
+        // bands, so without tracking it the two halves assemble a couple of tiles apart.
+        bool bg3x1 = false;
         foreach (var ev in lv.Events)
         {
+            if (ev.Type == 65) { bg3x1 = ev.Dat == 0; continue; }
             if (ev.Type == 12)
             {
                 // "Custom 4x4 ground enemy": four consecutive entries as one 2x2 block of
                 // 2x2 metasprites, 48x56 in all (tyrian2.c:6396).
-                float bx = SpawnX(ev, ed, ev.Dat) + BandXOffset(lv, 25);
+                float bx = SpawnX(ev, ed, ev.Dat) + BandXOffset(lv, 25, bg3x1);
                 for (int k = 0; k < 4; k++)
                     Add(ev, ObjectPlacer.Describe(ev.Dat + k, ed),
                         bx + (k % 2) * 24f, (k < 2 ? 0f : -28f) + ev.Dat5, 25);
@@ -143,11 +173,18 @@ public sealed class EnemyAssembly
             // -99 / -200 fall back to the entry's own start X, which the scratch entry the
             // 49-52 events use does not have -- those always carry a real X.
             float x = ev.Dat2 is -99 or -200 && info.EnemyId != 0 ? ed.Get(info.EnemyId).StartX : ev.Dat2;
-            Add(ev, info, x + BandXOffset(lv, band), baseEy + ev.Dat5, band);
+            Add(ev, info, x + BandXOffset(lv, band, bg3x1), baseEy + ev.Dat5, band);
         }
         done.AddRange(open.Values);
 
+        // Before any merging: whether a group is a picture is a property of how it was
+        // authored, and folding two mirrored halves together would destroy the evidence.
+        foreach (var asm in done)
+            asm._tiled = asm.Parts.Count >= 2 &&
+                         asm.Parts.Select(p => p.Sprite).Distinct().Count() == asm.Parts.Count;
+
         MergeCascadeLinked(done);
+        MergeAdjacentBodies(done);
         AttachBossBars(lv, done);
 
         var kept = new List<EnemyAssembly>();
@@ -155,6 +192,7 @@ public sealed class EnemyAssembly
         {
             if (asm.Parts.Count < 2 && !asm.HasBossBar) continue;
             if (asm.LinkNum == 0 && asm.Parts.Count > MaxUnlinkedParts) continue;
+            asm.TileCount = asm.Parts.Select(p => p.Sprite).Distinct().Count();
             asm.Normalize();
             kept.Add(asm);
         }
@@ -264,16 +302,102 @@ public sealed class EnemyAssembly
                 {
                     var (a, b) = (groups[i], groups[j]);
                     if (Math.Abs(a.Time - b.Time) > SameObjectTicks || !CascadeLinked(a, b)) continue;
-                    a.Parts.AddRange(b.Parts);
-                    a.TotalArmor += b.TotalArmor;
-                    a.LinkNum = Math.Max(a.LinkNum, b.LinkNum);   // the core, which kills the rest
-                    a.Links.UnionWith(b.Links);                   // ... but the bar may name any of them
-                    a._lastTime = Math.Max(a._lastTime, b._lastTime);
+                    Absorb(a, b);
                     groups.RemoveAt(j);
                     merged = true;
                     break;
                 }
         }
+    }
+
+    /// <summary>Fold the second group's parts into the first, which keeps its own spawn time --
+    /// the earlier of the two, since the list is in event order.</summary>
+    private static void Absorb(EnemyAssembly a, EnemyAssembly b)
+    {
+        a.Parts.AddRange(b.Parts);
+        a.TotalArmor += b.TotalArmor;
+        a.LinkNum = Math.Max(a.LinkNum, b.LinkNum);   // the core, which kills the rest
+        a.Links.UnionWith(b.Links);                   // ... but the bar may name any of them
+        a._lastTime = Math.Max(a._lastTime, b._lastTime);
+        a._tiled &= b._tiled;
+    }
+
+    /// <summary>
+    /// Fuse groups that are one body the kill cascade knows nothing about. TIME WAR builds its
+    /// overhead machine out of five link numbers -- 25 through 29, every one at or below 40 and
+    /// none a 100-offset pair, so nothing in tyrian2.c:3030 relates them -- laid down as one
+    /// contiguous 30-part mass in a twenty-tick burst. Grouped by link alone it reads as a
+    /// structure plus four formations, which is not a thing the level contains.
+    ///
+    /// Four signals together, because each alone over-merges -- measured over all 70 levels, the
+    /// first three on their own fold FLEET's 200-fighter wave and SQUADRON's forty into single
+    /// "bodies". The same spawn burst; link numbers that adjoin, since a designer numbers the
+    /// parts of one object in sequence and a wave reusing those numbers arrives spread over
+    /// hundreds of ticks; bodies that touch on the sprite grid; and both sides authored as
+    /// pictures rather than repeats (<see cref="_tiled"/>), which is what tells a machine from
+    /// a rank of identical fighters. Unlinked groups are excluded outright -- those are already
+    /// the "landed on one tick" fallback, and adjacency would glue terrain rows into slabs.
+    /// </summary>
+    private static void MergeAdjacentBodies(List<EnemyAssembly> groups)
+    {
+        for (bool merged = true; merged;)
+        {
+            merged = false;
+            for (int i = 0; i < groups.Count && !merged; i++)
+                for (int j = groups.Count - 1; j > i; j--)
+                {
+                    var (a, b) = (groups[i], groups[j]);
+                    if (Math.Abs(a.Time - b.Time) > SameObjectTicks || !a._tiled || !b._tiled ||
+                        !LinksAdjoin(a, b) || !Touching(a, b)) continue;
+                    Absorb(a, b);
+                    a.SplitLinks = true;
+                    groups.RemoveAt(j);
+                    merged = true;
+                    break;
+                }
+        }
+    }
+
+    /// <summary>Does either group carry a link number one off one of the other's?</summary>
+    private static bool LinksAdjoin(EnemyAssembly a, EnemyAssembly b)
+    {
+        if (a.Links.Contains(0) || b.Links.Contains(0)) return false;
+        foreach (int x in a.Links)
+            foreach (int y in b.Links)
+                if (Math.Abs(x - y) <= 1) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Do the two bodies touch? The slack is deliberately loose -- two tiles across, one down.
+    /// A body with rows in more than one band is only ever approximately placed here: the bands
+    /// register horizontally against different map cursors, and the authored offsets say nothing
+    /// about what the scroll does to the rows between the bursts. <see cref="ResolveFromSim"/>
+    /// reads the real positions back once a group is opened; this only has to tell a body apart
+    /// from the next thing along.
+    /// </summary>
+    private static bool Touching(EnemyAssembly a, EnemyAssembly b)
+    {
+        var (ax0, ay0, ax1, ay1) = a.Bounds();
+        var (bx0, by0, bx1, by1) = b.Bounds();
+        float gapX = Math.Max(bx0 - ax1, ax0 - bx1);
+        float gapY = Math.Max(by0 - ay1, ay0 - by1);
+        return gapX <= 48f && gapY <= 28f;
+    }
+
+    /// <summary>The group's bounding box in its own (still un-normalised) coordinates.
+    /// esize 1 anchors at the block's centre, esize 0 at its top-left.</summary>
+    private (float X0, float Y0, float X1, float Y1) Bounds()
+    {
+        float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+        foreach (var p in Parts)
+        {
+            float px = p.X + (p.Big ? -6f : 0f), py = p.Y + (p.Big ? -7f : 0f);
+            x0 = Math.Min(x0, px); y0 = Math.Min(y0, py);
+            x1 = Math.Max(x1, px + (p.Big ? 24f : 12f));
+            y1 = Math.Max(y1, py + (p.Big ? 28f : 14f));
+        }
+        return (x0, y0, x1, y1);
     }
 
     /// <summary>Whether any link in one group's set kills any link in the other's.</summary>
@@ -363,14 +487,15 @@ public sealed class EnemyAssembly
     /// <summary>
     /// The engine turns an event's map-relative X into a screen X differently per band
     /// (tyrian2.c:6174-6193): the ground bands sit 12px left of the sky band, and the top band
-    /// is measured against its own map cursor entirely. Only differences matter inside one
-    /// group, so this gives each band's offset relative to the sky band -- without it, a boss
-    /// whose hull is in one band and whose guns are in another assembles misaligned.
+    /// is measured against its own map cursor entirely -- unless event 65 has locked it to
+    /// bg1's, when it registers like a ground band. Only differences matter inside one group,
+    /// so this gives each band's offset relative to the sky band -- without it, a boss whose
+    /// hull is in one band and whose guns are in another assembles misaligned.
     /// </summary>
-    private static float BandXOffset(Level lv, int band) => band switch
+    private static float BandXOffset(Level lv, int band, bool bg3x1) => band switch
     {
         0 => 0f,
-        50 => (lv.MapX - 1) * 24f - lv.MapX3 * 24f + 6f - 48f,
+        50 => bg3x1 ? -12f : (lv.MapX - 1) * 24f - lv.MapX3 * 24f + 6f - 48f,
         _ => -12f,      // 25 and 75, the two ground bands
     };
 
@@ -445,15 +570,7 @@ public sealed class EnemyAssembly
     /// what a preview can lay out without knowing anything about the map.</summary>
     private void Normalize()
     {
-        float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
-        foreach (var p in Parts)
-        {
-            // esize 1 anchors at the block's centre, esize 0 at its top-left.
-            float x0 = p.X + (p.Big ? -6f : 0f), y0 = p.Y + (p.Big ? -7f : 0f);
-            minX = Math.Min(minX, x0); minY = Math.Min(minY, y0);
-            maxX = Math.Max(maxX, x0 + (p.Big ? 24f : 12f));
-            maxY = Math.Max(maxY, y0 + (p.Big ? 28f : 14f));
-        }
+        var (minX, minY, maxX, maxY) = Bounds();
         if (minX > maxX) return;
 
         for (int i = 0; i < Parts.Count; i++)
