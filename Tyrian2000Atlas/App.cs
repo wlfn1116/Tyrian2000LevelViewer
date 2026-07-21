@@ -127,7 +127,7 @@ public sealed unsafe partial class App
     private static readonly float[] SpeedSteps = { 0.25f, 0.5f, 1f, 2f, 4f, 8f };
     private static readonly string[] DifficultyNames =
         { "Wimp", "Easy", "Normal", "Hard", "Impossible", "Insanity",
-          "Suicide", "Maniacal", "Zinglon", "Nortaneous", "Nortaneous 2" };
+          "Suicide", "Maniacal", "Lord of Game", "Nortaneous", "Zinglon" };
 
     private readonly SdlNs.SDLWindowPtr _window;
     private bool _scrollLevelListToSelection;      // keep the selection visible after keyboard/startup selects
