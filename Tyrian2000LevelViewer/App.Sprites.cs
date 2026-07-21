@@ -303,7 +303,15 @@ public sealed unsafe partial class App
             }
         }
 
-        bool numbers = _sprNumbers && !_sprGapless && cw >= 22f;
+        bool numbers = _sprNumbers && cw >= 22f;
+
+        // Selection and hover outlines are captured in the loop and stroked once it finishes,
+        // never inline. In gapless mode the cells butt together, so a cell's right and bottom
+        // edges land exactly where the next cell's flat backing is drawn a few iterations
+        // later -- stroked inline, those two sides were painted straight back over.
+        Vector2 selMn = default, selMx = default; bool haveSel = false;
+        Vector2 hovMn = default, hovMx = default; bool haveHov = false;
+
         for (int r = rowFrom; r <= rowTo; r++)
             for (int c = 0; c < cols; c++)
             {
@@ -331,24 +339,31 @@ public sealed unsafe partial class App
                     }
                     else EmptyCell(dl, mn, mx);
                     if (has) atlas.DrawCentered(dl, idx, mn, mx, scale);
-                    if (numbers && has)
-                        dl.AddText(new Vector2(mn.X + 2.5f, mn.Y + 1f), Gfx.Rgba(255, 255, 255, 95),
-                            idx.ToString());
                 }
 
-                if (idx == _sprSelected)
-                {
-                    // One ring, nothing else. It used to carry corner ticks on top of the
-                    // outline, which read as two separate indicators; and the cell's corners
-                    // fall on fractional pixels (cw/ch are floats), where a 2px AddRect
-                    // rasterises two of its four sides a pixel wider than the others. Snapping
-                    // to whole pixels first is what makes the ring an even thickness.
-                    var a = new Vector2(MathF.Round(mn.X) - 1f, MathF.Round(mn.Y) - 1f);
-                    var b = new Vector2(MathF.Round(mx.X) + 1f, MathF.Round(mx.Y) + 1f);
-                    dl.AddRect(a, b, Shade(AcSprite, 1.15f), 3f, ImDrawFlags.None, 2f);
-                }
-                else if (idx == hover) dl.AddRect(mn, mx, Gfx.Rgba(255, 255, 255, 130), 3f);
+                // Number sits on both layouts. In gapless it lands over the tile's top-left --
+                // the one corner every cell shares -- rather than in a margin there is none of.
+                if (numbers && has)
+                    dl.AddText(new Vector2(mn.X + 2.5f, mn.Y + 1f), Gfx.Rgba(255, 255, 255, 95),
+                        idx.ToString());
+
+                if (idx == _sprSelected) { selMn = mn; selMx = mx; haveSel = true; }
+                else if (idx == hover) { hovMn = mn; hovMx = mx; haveHov = true; }
             }
+
+        if (haveHov)
+            dl.AddRect(hovMn, hovMx, Gfx.Rgba(255, 255, 255, 130), _sprGapless ? 0f : 3f);
+        if (haveSel)
+        {
+            // One sharp 1px ring: no rounding, no corner ticks. The cell's corners fall on
+            // fractional pixels (cw/ch are floats), and ImGui strokes lines half a pixel off
+            // the path, so a 2px box straddled the grid and left two of its four sides a pixel
+            // fatter than the others. Snapping to whole pixels and stroking a single-pixel
+            // line lands it crisp and even.
+            var a = new Vector2(MathF.Round(selMn.X) - 1f, MathF.Round(selMn.Y) - 1f);
+            var b = new Vector2(MathF.Round(selMx.X) + 1f, MathF.Round(selMx.Y) + 1f);
+            dl.AddRect(a, b, Shade(AcSprite, 1.15f));
+        }
 
         if (hover < 0) return;
         var (w, h) = atlas.SizeOf(hover);

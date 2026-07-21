@@ -43,7 +43,17 @@ public sealed unsafe partial class App
     private readonly byte[] _itemFilter = new byte[64];
 
     private static readonly string[] ItemTabs =
-        { "Ships", "Weapon ports", "Sidekicks", "Shields", "Generators", "Specials" };
+        { "Ships", "Weapon ports", "Sidekicks", "Shields", "Generators", "Specials", "Arcade", "Other", "Outposts" };
+
+    /// <summary>The tabs that are not one of the six shop item tables: "Arcade" lays out the
+    /// super-arcade ships and their ball loadouts, "Other" the field pickups (powerups,
+    /// datacubes, money...) and "Outposts" the shops by level.</summary>
+    private const int TabArcade = 6, TabOther = 7, TabOutposts = 8;
+
+    private int _arcadeSel;                 // row within the Arcade tab
+    private int _otherSel;                 // row within the Other tab
+    private int _outpostSel;               // row within the Outposts tab
+    private bool _arcadeScrollToSelection, _otherScrollToSelection, _outpostScrollToSelection;
 
     /// <summary>The window's own colour, shared with its launcher chip. See AcAnalysis.</summary>
     private static uint AcShop => AcBuild;
@@ -124,8 +134,13 @@ public sealed unsafe partial class App
                 if (TabItem(ItemTabs[t], _itemTabPending == t))
                 {
                     // Slot 0 of most tables is the shop's empty "None" row. It belongs in the
-                    // list, but opening the detail pane on it shows nothing at all.
-                    if (_itemTab != t) { _itemTab = t; _itemSelected = FirstRealItem(items); }
+                    // list, but opening the detail pane on it shows nothing at all. The two
+                    // non-table tabs carry their own selection, untouched by the switch.
+                    if (_itemTab != t)
+                    {
+                        _itemTab = t;
+                        if (t < TabArcade) _itemSelected = FirstRealItem(items);
+                    }
                     ImGui.EndTabItem();
                 }
             ImGui.EndTabBar();
@@ -134,7 +149,13 @@ public sealed unsafe partial class App
             // and apply the row then, over the tab switch's own default.
             if (_itemTabPending >= 0 && _itemTab == _itemTabPending)
             {
-                if (_itemRowPending >= 0) _itemSelected = _itemRowPending;
+                if (_itemRowPending >= 0)
+                {
+                    if (_itemTab == TabArcade) { _arcadeSel = _itemRowPending; _arcadeScrollToSelection = true; }
+                    else if (_itemTab == TabOther) { _otherSel = _itemRowPending; _otherScrollToSelection = true; }
+                    else if (_itemTab == TabOutposts) { _outpostSel = _itemRowPending; _outpostScrollToSelection = true; }
+                    else _itemSelected = _itemRowPending;
+                }
                 _itemTabPending = -1;
                 _itemRowPending = -1;
             }
@@ -144,14 +165,20 @@ public sealed unsafe partial class App
         _itemListW = Math.Clamp(_itemListW, 190f, maxList);
 
         WellBegin("itemlist", new Vector2(_itemListW, ImGui.GetContentRegionAvail().Y), AcShop);
-        DrawItemList(items);
+        if (_itemTab == TabOutposts) DrawOutpostList();
+        else if (_itemTab == TabOther) DrawOtherList();
+        else if (_itemTab == TabArcade) DrawArcadeList();
+        else DrawItemList(items);
         WellEnd();
 
         ImGui.SameLine(0, 3);
         VSplitter("##itemsplit", ref _itemListW, 190f, maxList);
         ImGui.SameLine(0, 3);
         ImGui.BeginChild("itemdetail", new Vector2(0, 0));
-        DrawItemDetail(items);
+        if (_itemTab == TabOutposts) DrawOutpostDetail();
+        else if (_itemTab == TabOther) DrawOtherDetail();
+        else if (_itemTab == TabArcade) DrawArcadeDetail();
+        else DrawItemDetail(items);
         ImGui.EndChild();
 
         RefEnd(AcShop);
@@ -159,9 +186,14 @@ public sealed unsafe partial class App
 
     /// <summary>Name, icon and price for a row in the current tab. Slot 0 of most tables is
     /// the empty "None" entry, which the shop shows too.</summary>
-    private (string Name, int Cost, SpriteSource Src, int Sprite, bool Big) ItemRow(ItemData d, int i)
+    private (string Name, int Cost, SpriteSource Src, int Sprite, bool Big) ItemRow(ItemData d, int i) =>
+        ItemRowFor(d, _itemTab, i);
+
+    /// <summary>The same for an explicit tab, so the Outposts inventory can draw ships, ports,
+    /// sidekicks and the rest side by side without touching <see cref="_itemTab"/>.</summary>
+    private (string Name, int Cost, SpriteSource Src, int Sprite, bool Big) ItemRowFor(ItemData d, int tab, int i)
     {
-        switch (_itemTab)
+        switch (tab)
         {
             case 0:
             {
@@ -206,9 +238,12 @@ public sealed unsafe partial class App
     /// shows garbage. The engine draws it as two 2x2 halves, sprites 220 and 222 either side
     /// of the anchor (game_menu.c:3032), and so do we.
     /// </summary>
-    private void DrawItemIcon(ImDrawListPtr dl, ItemData d, int index, Vector2 boxMin, Vector2 boxMax, float scale)
+    private void DrawItemIcon(ImDrawListPtr dl, ItemData d, int index, Vector2 boxMin, Vector2 boxMax, float scale) =>
+        DrawItemIconFor(dl, d, _itemTab, index, boxMin, boxMax, scale);
+
+    private void DrawItemIconFor(ImDrawListPtr dl, ItemData d, int tab, int index, Vector2 boxMin, Vector2 boxMax, float scale)
     {
-        if (_itemTab == 0 && d.Ships[index].ShipGraphic == 1)
+        if (tab == 0 && d.Ships[index].ShipGraphic == 1)
         {
             var shipSheet = Atlas(SpriteSource.MainSheet(8), AppSettings.GamePalette);
             if (shipSheet == null) return;
@@ -222,7 +257,7 @@ public sealed unsafe partial class App
             return;
         }
 
-        var (_, _, src, sprite, big) = ItemRow(d, index);
+        var (_, _, src, sprite, big) = ItemRowFor(d, tab, index);
         var atlas = Atlas(src, AppSettings.GamePalette);
         if (atlas != null) DrawEnemyFrameCentered(dl, atlas, sprite, big, boxMin, boxMax, scale);
     }
@@ -297,7 +332,39 @@ public sealed unsafe partial class App
         DrawItemHero(d, name, cost, src, sprite);
 
         ImGui.Dummy(new Vector2(0, 4f));
-        WellBegin("itembody", ImGui.GetContentRegionAvail(), AcShop, 12f, 9f);
+
+        // Ports and sidekicks carry long detail -- a port's two eleven-row tables, the
+        // Charge-Laser's charge stages -- so their "where you get it" is pinned in its own well
+        // at the foot of the pane, stats scrolling above it, and never scrolls off the bottom.
+        // The short tabs let it flow straight under the stats, which fills the pane without a gap.
+        if (_itemTab is 1 or 2)
+        {
+            var avail = ImGui.GetContentRegionAvail();
+            float whereH = Math.Clamp(avail.Y * 0.44f, 150f, 330f);
+            whereH = Math.Min(whereH, Math.Max(120f, avail.Y - 130f));
+            float bodyH = Math.Max(90f, avail.Y - whereH - 6f);
+
+            WellBegin("itembody", new Vector2(avail.X, bodyH), AcShop, 12f, 9f);
+            DrawItemBody(d);
+            WellEnd();
+
+            ImGui.Dummy(new Vector2(0, 6f));
+            WellBegin("itemwhere", new Vector2(avail.X, whereH), AcShop, 12f, 9f);
+            DrawItemAppearances(d);
+            WellEnd();
+        }
+        else
+        {
+            WellBegin("itembody", ImGui.GetContentRegionAvail(), AcShop, 12f, 9f);
+            DrawItemBody(d);
+            ImGui.Dummy(new Vector2(0, 6f));
+            DrawItemAppearances(d);
+            WellEnd();
+        }
+    }
+
+    private void DrawItemBody(ItemData d)
+    {
         switch (_itemTab)
         {
             case 0: DrawShipDetail(d.Ships[_itemSelected]); break;
@@ -307,7 +374,6 @@ public sealed unsafe partial class App
             case 4: DrawGeneratorDetail(d.Powers[_itemSelected]); break;
             default: DrawSpecialDetail(d.Specials[_itemSelected]); break;
         }
-        WellEnd();
     }
 
     /// <summary>

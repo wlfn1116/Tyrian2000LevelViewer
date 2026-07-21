@@ -171,6 +171,11 @@ public sealed unsafe partial class App
         _assembliesFor = "";
         _appearances = null;
         _appearancesFor = -1;
+        _itemSoldAt = null;
+        _itemFoundIn = null;
+        _episodeOutposts = null;
+        _specialDropSites = null;
+        _otherPickups = null;
         _statsCache.Clear();
         _peerRows.Clear();
         _peerKey = "";

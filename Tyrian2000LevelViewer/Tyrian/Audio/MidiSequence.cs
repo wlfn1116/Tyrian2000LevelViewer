@@ -76,6 +76,21 @@ public sealed class MidiSequence
     public int LowKey { get; private set; } = 127;
     public int HighKey { get; private set; }
 
+    /// <summary>
+    /// Ticks between the pattern rows the notes actually fall on -- the grid a piano roll draws
+    /// so its notes sit on lines. These are AdLib tracker songs: the player steps one pattern
+    /// row every few ticks and notes only ever start on a row, but the row rate is the LDS
+    /// <c>tempo</c>, which a pattern command can change mid-song, so the file header does not
+    /// give it away. It is recovered from the note data instead -- see <see cref="ComputeRowTicks"/>.
+    /// 1 when a song is too sparse to tell (its grid is then simply not drawn).
+    /// </summary>
+    public int RowTicks { get; private set; } = 1;
+
+    /// <summary>The first note's start tick -- the whole song's, for phasing the row grid on in
+    /// the all-channels view, where there is no one channel to take it from. Notes are in start
+    /// order, so it is simply the first.</summary>
+    public uint FirstNoteTick => Notes.Length > 0 ? Notes[0].Start : 0;
+
     private MidiSequence()
     {
         for (int i = 0; i < LaneCount; i++) { LanePrograms[i] = new List<int>(); LaneChannel[i] = -1; }
@@ -122,7 +137,37 @@ public sealed class MidiSequence
 
         seq.BuildNotes();
         seq.BuildMarkers();
+        seq.ComputeRowTicks();
         return seq;
+    }
+
+    private static long Gcd(long a, long b) { while (b != 0) (a, b) = (b, a % b); return Math.Abs(a); }
+
+    /// <summary>
+    /// Work out <see cref="RowTicks"/> from the notes. Every onset on one lane is a whole number
+    /// of rows from the last, so the gaps on that lane are all multiples of the row size, and the
+    /// gap-GCD recovers it (times however sparsely the lane plays). Combined across the lanes
+    /// that GCD collapses to the true row. Done per lane on purpose: between lanes the channel
+    /// delays offset some notes by a tick or two, and a whole-song GCD would collapse to 1.
+    /// </summary>
+    private void ComputeRowTicks()
+    {
+        long all = 0;
+        for (int lane = 0; lane < LaneCount; lane++)
+        {
+            long lane_g = 0;
+            uint prev = 0;
+            bool have = false;
+            foreach (var n in Notes)
+            {
+                if (n.Lane != lane) continue;
+                if (have && n.Start > prev) lane_g = Gcd(lane_g, n.Start - prev);
+                prev = n.Start;
+                have = true;
+            }
+            if (lane_g > 0) all = Gcd(all, lane_g);
+        }
+        RowTicks = all > 0 ? (int)all : 1;
     }
 
     private static int LaneOf(in SeqEvent e) => (uint)e.Lane < LaneCount ? e.Lane : -1;

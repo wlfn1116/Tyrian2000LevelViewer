@@ -343,6 +343,9 @@ public sealed unsafe partial class App
             return;
         }
 
+        // Escape steps back out of a channel's piano roll to the all-channels lanes.
+        if (_pianoLane >= 0 && ImGui.IsKeyPressed(ImGuiKey.Escape)) { _pianoLane = -1; return; }
+
         var player = _audio?.Player;
         if (player == null) return;
         var track = _audio!.Music[_musicSelected];

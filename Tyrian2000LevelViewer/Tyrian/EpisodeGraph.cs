@@ -36,6 +36,41 @@ public sealed class CubeStop
     }
 }
 
+/// <summary>
+/// One outpost's shop stock, exactly as its ']I' item-availability lines set it up
+/// (tyrian2.c:4340). Nine rows are read — the engine reads nine — of which seven are ever
+/// sold from; which row is which upgrade slot is fixed (game_menu.c:182 itemAvailMap).
+///
+/// The rows are stored verbatim, WITHOUT the widescreen fork's re-added Charge-Laser Cannon:
+/// that injection depends on which build you play, so the item browser applies it itself and
+/// one fork-agnostic graph serves both. <see cref="Section"/> is the ']I''s own section
+/// (the engine's mainLevel), which the injection keys on (tyrian2.c:4360).
+/// </summary>
+public sealed class ShopStop
+{
+    /// <summary>How many availability rows a ']I' carries.</summary>
+    public const int RowCount = 9;
+
+    public int Section;
+    public readonly List<int>[] Rows;
+
+    public ShopStop()
+    {
+        Rows = new List<int>[RowCount];
+        for (int i = 0; i < RowCount; i++) Rows[i] = new List<int>();
+    }
+
+    /// <summary>Same section and the same ids in every row: two routes that stock an outpost
+    /// identically are one shelf, not two.</summary>
+    public bool SameAs(ShopStop o)
+    {
+        if (Section != o.Section) return false;
+        for (int i = 0; i < RowCount; i++)
+            if (!Rows[i].SequenceEqual(o.Rows[i])) return false;
+        return true;
+    }
+}
+
 public sealed class GraphNode
 {
     public int Id;
@@ -54,6 +89,11 @@ public sealed class GraphNode
     /// the asteroid levels really are stocked differently coming from Tyrian than from
     /// Bubbles — keeping only the first list would lose half the readings.</summary>
     public readonly List<CubeStop> CubeStops = new();
+    /// <summary>What the outposts on the way in sell. One entry per distinct ']I' shelf, same
+    /// reasoning as <see cref="CubeStops"/>: a level reached two ways sits behind two outposts,
+    /// and in Episode 1 the asteroid levels are stocked differently from Tyrian than from
+    /// Bubbles. Raw rows; the fork's Charge-Laser re-add is applied by the reader.</summary>
+    public readonly List<ShopStop> ShopStops = new();
     public readonly List<int> Out = new();   // edge indices
     public readonly List<int> In = new();
 
@@ -162,6 +202,11 @@ public sealed class EpisodeGraph
         public int MaxLow, MaxHigh;
         public List<int> CubeDropped = new();
         public bool Galaga, Engage, Extra, Save, Shop;
+        /// <summary>The stock of the outpost the walk last passed through, set at its ']I' and
+        /// attached to the level(s) it leads into. A fresh <see cref="WalkState"/> after each
+        /// level (see Carry) clears it, so it only ever reaches the level right after the shop.
+        /// The reference is shared read-only across the map-choice forks, so copying it is cheap.</summary>
+        public ShopStop? ShopStock;
         public List<(EdgeKind Kind, string Label)> Conds = new();
 
         /// <summary>What the outpost can put on its shelf, and how much of that is free.</summary>
@@ -175,6 +220,7 @@ public sealed class EpisodeGraph
                 MaxLow = MaxLow, MaxHigh = MaxHigh,
                 CubeDropped = new List<int>(CubeDropped),
                 Galaga = Galaga, Engage = Engage, Extra = Extra, Save = Save, Shop = Shop,
+                ShopStock = ShopStock,
                 Conds = new List<(EdgeKind, string)>(Conds),
             };
             Array.Copy(MapPlanet, s.MapPlanet, MaxMapDest);
@@ -353,6 +399,7 @@ public sealed class EpisodeGraph
                 // The outpost. Its 9 item-availability lines are data, not commands, and
                 // launching from its map menu is what sets the next section.
                 case 'I':
+                    st.ShopStock = ParseShop(i, st.MainLevel);
                     i += 9;
                     st.Shop = true;
                     if (st.MapCount == 0) break;
@@ -445,6 +492,7 @@ public sealed class EpisodeGraph
             existing.Shop |= d.State.Shop;
             existing.SavePoint |= d.State.Save;
             NoteCubes(existing, d.State);
+            NoteShop(existing, d.State);
             return existing;
         }
 
@@ -462,7 +510,57 @@ public sealed class EpisodeGraph
         n.SavePoint = d.State.Save;
         n.Shop = d.State.Shop;
         NoteCubes(n, d.State);
+        NoteShop(n, d.State);
         return n;
+    }
+
+    /// <summary>Record the outpost this route came through, one entry per distinct shelf.</summary>
+    private static void NoteShop(GraphNode n, WalkState st)
+    {
+        if (st.ShopStock == null) return;
+        if (!n.ShopStops.Any(s => s.SameAs(st.ShopStock))) n.ShopStops.Add(st.ShopStock);
+    }
+
+    /// <summary>
+    /// Read the nine item-availability lines that follow a ']I' at <paramref name="iLine"/>
+    /// (tyrian2.c:4340-4354): each line's first eight characters are a fixed label field the
+    /// engine skips, and the rest is a run of whitespace-separated item ids. <see cref="Section"/>
+    /// is filled from the outpost's own section so the fork's Charge-Laser re-add can be
+    /// reproduced without re-walking.
+    /// </summary>
+    private ShopStop ParseShop(int iLine, int section)
+    {
+        var stop = new ShopStop { Section = section };
+        for (int r = 0; r < ShopStop.RowCount; r++)
+        {
+            int ln = iLine + 1 + r;
+            if (ln >= _f.Lines.Count) break;
+            string s = _f.Lines[ln];
+            // strncpy(buf, (strlen(s) > 8) ? s + 8 : "", ...): only past the 8-char label.
+            if (s.Length > 8) PopInts(s, 8, stop.Rows[r]);
+        }
+        return stop;
+    }
+
+    /// <summary>
+    /// str_pop_int in a loop (mainint.c:5229): repeatedly strtol, which skips leading
+    /// whitespace, reads an optional sign and digits, and stops at the first character that is
+    /// neither — so the ids are whitespace-separated and anything else ends the line, exactly
+    /// as the engine reads it.
+    /// </summary>
+    private static void PopInts(string s, int start, List<int> into)
+    {
+        int i = start;
+        while (i < s.Length)
+        {
+            while (i < s.Length && char.IsWhiteSpace(s[i])) i++;   // strtol skips whitespace
+            int tokenStart = i;
+            if (i < s.Length && (s[i] == '+' || s[i] == '-')) i++;
+            int digits = i;
+            while (i < s.Length && s[i] >= '0' && s[i] <= '9') i++;
+            if (i == digits) break;                                // strtol found no number: stop
+            if (int.TryParse(s.AsSpan(tokenStart, i - tokenStart), out int v)) into.Add(v);
+        }
     }
 
     /// <summary>Record the outpost this route came through, keeping one entry per distinct

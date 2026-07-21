@@ -933,10 +933,13 @@ public sealed unsafe partial class App
                 "per segment, and how the levels rank against each other."))
             _showAnalysis = !_showAnalysis;
 
+        // Only while the window is shut: open, the chip is already lit and the player is on show.
+        bool musicLive = !_showMusic && _musicOwner == 2 && _audio?.Player is { IsPlaying: true };
         if (Chip("Music", _showMusic, AcMusic, w,
                 "Every song in music.mus laid out like a DAW clip: all nine Loudness\n" +
                 "channels, their notes, where each song is used, and a choice of\n" +
-                "AdLib, SoundFont or the OS synthesizer to hear it through."))
+                "AdLib, SoundFont or the OS synthesizer to hear it through.",
+                playing: musicLive))
             _showMusic = !_showMusic;
         ImGui.SameLine(0, 5);
         if (Chip("Sounds", _showSounds, AcSound, w,
@@ -1773,7 +1776,8 @@ public sealed unsafe partial class App
     /// with a lit left edge so a row of them reads at a glance. Chips that re-run the whole
     /// simulation carry a small dot, because those cost a rebuild and the draw-only ones don't.
     /// </summary>
-    private bool Chip(string label, bool on, uint accent, float w, string tip, bool rebuilds = false)
+    private bool Chip(string label, bool on, uint accent, float w, string tip, bool rebuilds = false,
+        bool playing = false)
     {
         ImGui.PushStyleColor(ImGuiCol.Button, on ? Shade(accent, 0.42f, 235) : Gfx.Rgba(40, 42, 52, 220));
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, on ? Shade(accent, 0.58f, 245) : Gfx.Rgba(58, 62, 76, 235));
@@ -1791,8 +1795,17 @@ public sealed unsafe partial class App
         if (rebuilds)
             dl.AddCircleFilled(new Vector2(mx.X - 5f, mn.Y + 5f), 1.8f,
                 Gfx.Rgba(255, 205, 125, on ? (byte)235 : (byte)140));
+        // A live dot: the browser is shut but its player is still going, so "something is
+        // playing and here is where to get back to it" is answerable without opening it.
+        if (playing)
+        {
+            var c = new Vector2(mx.X - 6.5f, mn.Y + 6.5f);
+            dl.AddCircle(c, 4.5f, Alpha(AcGo, 70));
+            dl.AddCircleFilled(c, 3f, Shade(AcGo, 1.05f));
+        }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(tip + (rebuilds ? "\n\n(dot: rebuilds the timeline)" : ""));
+            ImGui.SetTooltip(tip + (rebuilds ? "\n\n(dot: rebuilds the timeline)" : "")
+                + (playing ? "\n\n(dot: a song is still playing -- click to open)" : ""));
         return hit;
     }
 

@@ -194,11 +194,15 @@ internal static unsafe class Program
         if (anArg >= 0 && anArg + 1 < args.Length && int.TryParse(args[anArg + 1], out int anMode))
             app.ShowAnalysis(anMode);
 
-        // "--showmusic N" opens the music player on song N (1..41), "--showsounds N" the
-        // sound player on sound N (1..40) -- both the numbers the game's own data uses.
+        // "--showmusic N [channel]" opens the music player on song N (1..41), and an optional
+        // channel drills into that voice's piano roll; "--showsounds N" the sound player on
+        // sound N (1..40) -- all the numbers the game's own data uses.
         int musArg = Array.IndexOf(args, "--showmusic");
         if (musArg >= 0 && musArg + 1 < args.Length && int.TryParse(args[musArg + 1], out int song))
-            app.ShowTrack(song);
+        {
+            int chan = musArg + 2 < args.Length && int.TryParse(args[musArg + 2], out int c) ? c : -1;
+            app.ShowTrack(song, chan);
+        }
         int sndArg = Array.IndexOf(args, "--showsounds");
         if (sndArg >= 0 && sndArg + 1 < args.Length && int.TryParse(args[sndArg + 1], out int snd))
             app.ShowSound(snd);
