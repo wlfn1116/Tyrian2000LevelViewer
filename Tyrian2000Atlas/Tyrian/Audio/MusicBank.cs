@@ -21,6 +21,10 @@ public sealed class MusicTrack
     private bool _ldsTried;
     private LdsMidiSong? _midi;
     private bool _midiTried;
+    private MidiSequence? _seq;
+    private bool _seqTried;
+    private bool _ringStarted;
+    private static int _ringOutsRunning;
 
     /// <summary>The parsed LDS song, decoded on first use. Null if it will not parse.</summary>
     public LdsSong? Lds
@@ -42,8 +46,53 @@ public sealed class MusicTrack
         }
     }
 
+    /// <summary>
+    /// The flattened song the music window draws and the player runs, built on first use and
+    /// kept. Null if the song will not convert.
+    /// </summary>
+    public MidiSequence? Sequence
+    {
+        get
+        {
+            if (!_seqTried) { _seqTried = true; try { _seq = MidiSequence.From(Midi); } catch { _seq = null; } }
+            return _seq;
+        }
+    }
+
+    /// <summary>
+    /// Asks for the OPL ring-out measurement. Only the note views want it -- playing a song
+    /// does not need it and neither does exporting one -- so it is not part of building the
+    /// sequence. It runs the whole song through a chip, a tenth of a second on a long one,
+    /// which is far too long to spend on the thread drawing the window (let alone the mixer's
+    /// path), so this starts a thread and returns. Idempotent. The note views draw bare bars
+    /// until the measurement lands and pick the tails up on the frame it does.
+    /// </summary>
+    public void WantRingOut()
+    {
+        if (_ringStarted) return;
+        _ringStarted = true;
+        if (Sequence is not { } seq || Lds is not { } lds) return;
+        Interlocked.Increment(ref _ringOutsRunning);
+        var t = new Thread(() =>
+        {
+            try { seq.MeasureRingOut(lds); }
+            catch { /* the bars are right either way */ }
+            finally { Interlocked.Decrement(ref _ringOutsRunning); }
+        })
+        { IsBackground = true, Name = $"T2A ring-out {Index + 1}" };
+        t.Start();
+    }
+
+    /// <summary>Ring-out measurements still in flight. A screenshot run waits this out, so
+    /// what it captures is the window settled rather than the window mid-measurement.</summary>
+    public static int RingOutsPending => Volatile.Read(ref _ringOutsRunning);
+
     /// <summary>True once the MIDI conversion has been attempted (so the UI can show progress).</summary>
     public bool MidiReady => _midiTried;
+
+    /// <summary>True once <see cref="Sequence"/> has been built, so a song list can show what
+    /// it knows without converting all forty-one songs to fill a column in.</summary>
+    public bool SequenceReady => _seqTried;
 
     /// <summary>Length in Loudness ticks (~69.5 Hz), from the MIDI conversion.</summary>
     public int Ticks => Midi?.Duration is uint d ? (int)d : 0;

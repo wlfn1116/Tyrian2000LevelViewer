@@ -60,6 +60,27 @@ public sealed unsafe partial class App
     /// <summary>Money, wherever it turns up.</summary>
     private static readonly uint AcItem = Gfx.Rgba(255, 210, 120);
 
+    // ---- The two-player craft the shop's ship table never lists --------------------------------
+    // In two-player mode (arcade and network alike) Player 1 always flies the Silver Ship and
+    // Player 2 the Dragonwing (tyrian2.c:5420 / :4971). The Silver Ship is one of the 19 shop
+    // hulls already, but the Dragonwing has no shop record at all: fixed 10 armour (varz.c:437),
+    // drawn as two 2x2 halves out of the player-ship sheet rather than a single block
+    // (mainint.c:7099), and folded onto shipCombos row 0 for its twiddles. The Ships tab appends
+    // it after the real hulls; everything ship-shaped keys off IsSynthShip.
+
+    /// <summary>How many made-up hulls the Ships tab shows past the 19 the table names.</summary>
+    private const int SynthShipCount = 1;
+    /// <summary>ships[] index of the hull Player 1 always flies in two players: the Silver Ship.</summary>
+    private const int TwoPlayerP1Ship = 11;
+    /// <summary>Player-ship sheet (tyrian.shp #8) 2x2 block ids for the Dragonwing's left and right
+    /// halves at rest -- <c>ship_sprite + 13</c> and <c>+ 51</c> with no banking (mainint.c:7099).</summary>
+    private const int DragonwingLeftGr = 13, DragonwingRightGr = 51;
+
+    /// <summary>Rows in the Ships tab: the 19 shop hulls plus the appended two-player craft.</summary>
+    private static int ShipRowCount(ItemData d) => d.Ships.Length + SynthShipCount;
+    /// <summary>Whether a Ships-tab row is one of the appended craft rather than a shop hull.</summary>
+    private static bool IsSynthShip(ItemData d, int i) => i >= d.Ships.Length;
+
     /// <summary>The "--showitems &lt;tab&gt; [row]" entry point: frame one shop tab, and optionally
     /// one row, for a screenshot. ImGui owns which tab is active, so the tab is a request the
     /// next frame hands it via SetSelected.</summary>
@@ -154,7 +175,7 @@ public sealed unsafe partial class App
                     if (_itemTab == TabArcade) { _arcadeSel = _itemRowPending; _arcadeScrollToSelection = true; }
                     else if (_itemTab == TabOther) { _otherSel = _itemRowPending; _otherScrollToSelection = true; }
                     else if (_itemTab == TabOutposts) { _outpostSel = _itemRowPending; _outpostScrollToSelection = true; }
-                    else _itemSelected = _itemRowPending;
+                    else { _itemSelected = _itemRowPending; _itemScrollToSelection = true; }
                 }
                 _itemTabPending = -1;
                 _itemRowPending = -1;
@@ -197,6 +218,11 @@ public sealed unsafe partial class App
         {
             case 0:
             {
+                // The appended Dragonwing has no shop record; name it, price it at nothing, and
+                // hand back the player-ship sheet block its left half comes from so "open the
+                // sprite" lands somewhere sensible.
+                if (IsSynthShip(d, i))
+                    return ("Dragonwing", 0, SpriteSource.MainSheet(8), DragonwingLeftGr, true);
                 var s = d.Ships[i];
                 // Over 500 the index means the Tyrian 2000 sheet. Graphic 1 is the Nort Ship
                 // sentinel and is drawn separately -- see DrawShipIcon.
@@ -243,17 +269,18 @@ public sealed unsafe partial class App
 
     private void DrawItemIconFor(ImDrawListPtr dl, ItemData d, int tab, int index, Vector2 boxMin, Vector2 boxMax, float scale)
     {
+        // The Dragonwing flies as two 2x2 halves exactly like the Nort Ship, just out of a
+        // different pair of blocks -- take that path before touching d.Ships[index], which the
+        // appended row has no entry in.
+        if (tab == 0 && IsSynthShip(d, index))
+        {
+            DrawShipHalves(dl, DragonwingLeftGr, DragonwingRightGr, boxMin, boxMax, scale);
+            return;
+        }
         if (tab == 0 && d.Ships[index].ShipGraphic == 1)
         {
-            var shipSheet = Atlas(SpriteSource.MainSheet(8), AppSettings.GamePalette);
-            if (shipSheet == null) return;
-            // Two 2x2 halves side by side: 48x28 in all, so centring means backing off by
-            // half of that, not by half of one block.
-            var tl = new Vector2(
-                MathF.Round((boxMin.X + boxMax.X) * 0.5f - 24f * scale),
-                MathF.Round((boxMin.Y + boxMax.Y) * 0.5f - 14f * scale));
-            Draw2x2(dl, shipSheet, 220, tl, scale);
-            Draw2x2(dl, shipSheet, 222, tl + new Vector2(24f * scale, 0), scale);
+            // The Nort Ship: blocks 220 and 222 either side of the anchor (game_menu.c:3032).
+            DrawShipHalves(dl, 220, 222, boxMin, boxMax, scale);
             return;
         }
 
@@ -261,6 +288,39 @@ public sealed unsafe partial class App
         var atlas = Atlas(src, AppSettings.GamePalette);
         if (atlas != null) DrawEnemyFrameCentered(dl, atlas, sprite, big, boxMin, boxMax, scale);
     }
+
+    /// <summary>Draw a two-block hull centred in a box. The Nort Ship and the Dragonwing are both
+    /// drawn not as one 2x2 block but as a left and a right one side by side, 48x28 in all, out of
+    /// the player-ship sheet -- so centring backs off by half of the pair, not half of a block.
+    /// They are twice a normal hull's width, so their callers hand them a wider box; the scale is
+    /// kept whole (<paramref name="maxScale"/> capped to what fits) so the pixels never warp.</summary>
+    private void DrawShipHalves(ImDrawListPtr dl, int leftGr, int rightGr, Vector2 boxMin, Vector2 boxMax, float maxScale)
+    {
+        var shipSheet = Atlas(SpriteSource.MainSheet(8), AppSettings.GamePalette);
+        if (shipSheet == null) return;
+        float scale = IntFitScale(48f, 28f, boxMin, boxMax, maxScale);
+        var tl = new Vector2(
+            MathF.Round((boxMin.X + boxMax.X) * 0.5f - 24f * scale),
+            MathF.Round((boxMin.Y + boxMax.Y) * 0.5f - 14f * scale));
+        Draw2x2(dl, shipSheet, leftGr, tl, scale);
+        Draw2x2(dl, shipSheet, rightGr, tl + new Vector2(24f * scale, 0), scale);
+    }
+
+    /// <summary>The largest WHOLE scale up to <paramref name="maxScale"/> at which a
+    /// <paramref name="w"/>x<paramref name="h"/> game-pixel footprint fits the box. Pixel art wants
+    /// integer scales -- a fractional one warps the sprite -- so the two-block hulls are given a box
+    /// big enough for a good whole scale rather than squeezed into a normal hull's box.</summary>
+    private static float IntFitScale(float w, float h, Vector2 boxMin, Vector2 boxMax, float maxScale)
+    {
+        for (int k = (int)MathF.Floor(maxScale); k >= 2; k--)
+            if (k * w <= boxMax.X - boxMin.X && k * h <= boxMax.Y - boxMin.Y) return k;
+        return 1f;
+    }
+
+    /// <summary>The Nort Ship and the appended Dragonwing both fly as a 48px-wide pair of blocks
+    /// rather than a single 24px hull, so their icon needs a wider box to sit in at full scale.</summary>
+    private static bool IsTwoHalfShip(ItemData d, int tab, int i) =>
+        tab == 0 && (IsSynthShip(d, i) || (i >= 0 && i < d.Ships.Length && d.Ships[i]?.ShipGraphic == 1));
 
     /// <summary>The first row that actually names something, so a tab never opens on "None".</summary>
     private int FirstRealItem(ItemData d)
@@ -275,7 +335,7 @@ public sealed unsafe partial class App
 
     private int ItemCount(ItemData d) => _itemTab switch
     {
-        0 => d.Ships.Length,
+        0 => ShipRowCount(d),
         1 => d.Ports.Length,
         2 => d.Options.Length,
         3 => d.Shields.Length,
@@ -302,18 +362,29 @@ public sealed unsafe partial class App
             if (box.Clicked) _itemSelected = i;
             if (sel && _itemScrollToSelection) { ImGui.SetScrollHereY(0.4f); _itemScrollToSelection = false; }
 
+            // A two-block hull is 48px wide against a normal hull's 24, so it gets a wider icon box
+            // and its text is pushed right to clear it -- shrinking it into the normal gutter would
+            // warp the pixels. Everything else keeps the original spacing.
+            bool wide = IsTwoHalfShip(d, _itemTab, i);
+            float iconRight = wide ? 60f : 45f;
+            float textX = wide ? 66f : 50f;
+
             var dl = ImGui.GetWindowDrawList();
-            DrawItemIcon(dl, d, i, new Vector2(box.Min.X + 7f, box.Min.Y + 2f),
-                new Vector2(box.Min.X + 45f, box.Max.Y - 2f), 1f);
+            DrawItemIcon(dl, d, i, new Vector2(box.Min.X + (wide ? 6f : 7f), box.Min.Y + 2f),
+                new Vector2(box.Min.X + iconRight, box.Max.Y - 2f), 1f);
 
             float lh = ImGui.GetTextLineHeight();
             float top = box.Min.Y + (rowH - 3f - lh * 2f - 1f) * 0.5f;
-            float room = box.Max.X - box.Min.X - 60f;
-            ClipText(dl, new Vector2(box.Min.X + 50f, top), room,
+            float room = box.Max.X - box.Min.X - textX - 10f;
+            ClipText(dl, new Vector2(box.Min.X + textX, top), room,
                 sel ? Gfx.Rgba(250, 252, 255) : UiText, name.Length > 0 ? name : "(unnamed)");
-            ClipText(dl, new Vector2(box.Min.X + 50f, top + lh + 1f), room,
+            // Ships-tab synthetic rows carry no price and no table slot, so the row index would
+            // read as a bogus ship id -- label them by role instead.
+            string sub = _itemTab == 0 && IsSynthShip(d, i) ? "two-player · Player 2"
+                : cost > 0 ? $"{cost:n0} credits" : $"#{i}";
+            ClipText(dl, new Vector2(box.Min.X + textX, top + lh + 1f), room,
                 restored ? AcGo : cost > 0 ? Shade(AcItem, 1f, 205) : UiFaint,
-                (cost > 0 ? $"{cost:n0} credits" : $"#{i}") + (restored ? "   ·   restored cut content" : ""));
+                sub + (restored ? "   ·   restored cut content" : ""));
         }
         if (!anyShown) ImGui.TextDisabled("Nothing matches.");
     }
@@ -367,7 +438,7 @@ public sealed unsafe partial class App
     {
         switch (_itemTab)
         {
-            case 0: DrawShipDetail(d.Ships[_itemSelected]); break;
+            case 0: DrawShipDetail(d, _itemSelected); break;
             case 1: DrawPortDetail(d.Ports[_itemSelected]); break;
             case 2: DrawSidekickDetail(d.Options[_itemSelected]); break;
             case 3: DrawShieldDetail(d.Shields[_itemSelected]); break;
@@ -384,8 +455,13 @@ public sealed unsafe partial class App
     private void DrawItemHero(ItemData d, string name, int cost, SpriteSource src, int sprite)
     {
         var dl = ImGui.GetWindowDrawList();
-        var big2 = _itemTab == 0 ? Atlas(SpriteSource.MainBank(5), AppSettings.GamePalette) : null;
-        int bigIdx = _itemTab == 0 ? d.Ships[_itemSelected].BigShipGraphic - 1 : -1;
+        bool synthShip = _itemTab == 0 && IsSynthShip(d, _itemSelected);
+        // The Nort Ship and the Dragonwing fly as a 48px-wide pair of blocks, so the icon well is
+        // widened for them and the hull drawn at full 2x rather than squeezed to fit an 88px well.
+        bool twoHalf = IsTwoHalfShip(d, _itemTab, _itemSelected);
+        // The shop's large illustration is a real hull's; the Dragonwing has none.
+        var big2 = _itemTab == 0 && !synthShip ? Atlas(SpriteSource.MainBank(5), AppSettings.GamePalette) : null;
+        int bigIdx = big2 != null ? d.Ships[_itemSelected].BigShipGraphic - 1 : -1;
         bool hasBig = big2 != null && bigIdx >= 0 && big2.Has(bigIdx);
 
         if (hasBig)
@@ -402,20 +478,47 @@ public sealed unsafe partial class App
                 ImGui.SetTooltip($"the shop's large illustration (bigshipgraphic {bigIdx + 1}), at {bs:0}x");
             ImGui.SameLine(0, 10);
         }
+        else if (synthShip)
+        {
+            // No shop art exists for the Dragonwing, so the lead slot shows the craft it forms with
+            // Player 1's Silver Ship once the two link (mainint.c:6942) instead. The slot is sized so
+            // the 48x36 pair sits at a whole 3x.
+            var box = new Vector2(160f, 136f);
+            var p = ImGui.GetCursorScreenPos();
+            Well(dl, p, p + box, AcShop, 6f);
+            DrawLinkedCraft(dl, d, p, p + box, 3f);
+            ImGui.Dummy(box);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Player 1's Silver Ship with the Dragonwing linked below it, at 3x");
+            ImGui.SameLine(0, 10);
+        }
 
-        float iconBox = hasBig ? 88f : 116f;
+        // The wide hulls get a roomier square well so their 96px 2x form is not clipped.
+        float iconBox = twoHalf ? 108f : hasBig || synthShip ? 88f : 116f;
         var at = ImGui.GetCursorScreenPos();
         Well(dl, at, at + new Vector2(iconBox, iconBox), AcShop, 6f);
-        DrawItemIcon(dl, d, _itemSelected, at, at + new Vector2(iconBox, iconBox), hasBig ? 2f : 3f);
+        DrawItemIcon(dl, d, _itemSelected, at, at + new Vector2(iconBox, iconBox), hasBig || synthShip ? 2f : 3f);
         ImGui.Dummy(new Vector2(iconBox, iconBox));
-        if (ImGui.IsItemHovered() && _itemTab == 0) ImGui.SetTooltip("the ship as it flies");
+        if (ImGui.IsItemHovered() && _itemTab == 0)
+            ImGui.SetTooltip(synthShip ? "the Dragonwing on its own, as it flies" : "the ship as it flies");
         ImGui.SameLine(0, 12);
 
         ImGui.BeginGroup();
         UiTitle(name.Length > 0 ? name : "(unnamed)", AcShop);
-        Badge(ItemTabs[_itemTab].TrimEnd('s'), AcShop);
-        ImGui.SameLine(0, 5f);
-        Badge($"#{_itemSelected}", Gfx.Rgba(150, 162, 185));
+        // A real hull is a "Ship" numbered by its table slot; the appended craft is a two-player
+        // fixture, so it is badged by its role rather than a meaningless row index.
+        if (synthShip)
+        {
+            Badge("2-player", AcShop);
+            ImGui.SameLine(0, 5f);
+            Badge("Player 2", Gfx.Rgba(150, 162, 185));
+        }
+        else
+        {
+            Badge(ItemTabs[_itemTab].TrimEnd('s'), AcShop);
+            ImGui.SameLine(0, 5f);
+            Badge($"#{_itemSelected}", Gfx.Rgba(150, 162, 185));
+        }
         if (cost > 0)
         {
             ImGui.SameLine(0, 5f);
@@ -427,8 +530,40 @@ public sealed unsafe partial class App
         ImGui.EndGroup();
     }
 
-    private static void DrawShipDetail(ShipItem s)
+    /// <summary>The two-player craft the Silver Ship (Player 1) and the Dragonwing (Player 2) make
+    /// when they link: the Dragonwing rides one pixel left and eight below the Silver Ship
+    /// (mainint.c:6944). The engine draws player 1 first and player 2 over it (mainint.c:7587-7594),
+    /// so the Silver Ship goes down first and the Dragonwing sits on top, as in the game. The pair's
+    /// footprint is 48x36 game pixels, fitted to the box.</summary>
+    private void DrawLinkedCraft(ImDrawListPtr dl, ItemData d, Vector2 boxMin, Vector2 boxMax, float maxScale)
     {
+        var sheet = Atlas(SpriteSource.MainSheet(8), AppSettings.GamePalette);
+        if (sheet == null) return;
+        float scale = IntFitScale(48f, 36f, boxMin, boxMax, maxScale);
+        var origin = new Vector2(
+            MathF.Round((boxMin.X + boxMax.X) * 0.5f - 24f * scale),
+            MathF.Round((boxMin.Y + boxMax.Y) * 0.5f - 18f * scale));
+
+        // The Silver Ship first, under, centred over the join. It may live on either the classic or
+        // the Tyrian 2000 sheet, so resolve its block the same way the row does.
+        var s = d.Ships[TwoPlayerP1Ship];
+        bool t2k = s.ShipGraphic > 500;
+        var p1Sheet = t2k ? Atlas(SpriteSource.MainSheet(12), AppSettings.GamePalette) : sheet;
+        int p1Gr = t2k ? s.ShipGraphic - 500 : s.ShipGraphic;
+        if (p1Sheet != null && p1Gr > 1)
+            Draw2x2(dl, p1Sheet, p1Gr, origin + new Vector2(13f * scale, 0f), scale);
+
+        // The Dragonwing over it, eight pixels down, both halves.
+        Draw2x2(dl, sheet, DragonwingLeftGr, origin + new Vector2(0f, 8f * scale), scale);
+        Draw2x2(dl, sheet, DragonwingRightGr, origin + new Vector2(24f * scale, 8f * scale), scale);
+    }
+
+    /// <summary>The hull's own numbers, then the twiddles it can fly -- what the ship is, then
+    /// what it can do, before the pane goes on to where you get it.</summary>
+    private void DrawShipDetail(ItemData d, int shipId)
+    {
+        if (IsSynthShip(d, shipId)) { DrawDragonwingDetail(d); return; }
+        var s = d.Ships[shipId];
         UiSection("hull", AcShop);
         UiStatBar("damage taken", s.Dmg, 30, AcBoss, $"{s.Dmg}");
         UiStatBar("speed", s.Spd + 15, 30, AcPlayer, $"{s.Spd:+0;-0;0}");
@@ -437,6 +572,39 @@ public sealed unsafe partial class App
         KV("ship sprite", s.ShipGraphic == 1
             ? "1 - a sentinel: the Nort Ship, drawn as two halves"
             : $"{s.ShipGraphic}" + (s.ShipGraphic > 500 ? "  (Tyrian 2000 sheet)" : ""));
+
+        DrawShipTwiddleBlock(d, shipId);
+    }
+
+    /// <summary>The appended Dragonwing: the craft Player 2 flies in two players. It has no shop
+    /// record, so its numbers come from the engine rather than the item table -- fixed 10 armour
+    /// (varz.c:437), no speed of its own, powering the rear gun and folded onto the 2nd-player
+    /// twiddle row. Player 1's half of the pair, the Silver Ship, is a click away.</summary>
+    private void DrawDragonwingDetail(ItemData d)
+    {
+        UiSection("hull", AcShop);
+        UiStatBar("damage taken", 10, 30, AcBoss, "10");
+        ImGui.Dummy(new Vector2(0, 4f));
+        KV("role", "Player 2 in two-player mode");
+        KV("armour", "10, fixed  (not the item table's)");
+        KV("ship sprite", $"two halves: blocks {DragonwingLeftGr} and {DragonwingRightGr} of the player-ship sheet");
+
+        ImGui.Dummy(new Vector2(0, 4f));
+        ImGui.PushTextWrapPos(0f);
+        ImGui.TextColored(ColorOf(UiFaint),
+            "Two-player mode always pairs the Dragonwing with Player 1's Silver Ship. It is not sold " +
+            "or found -- it is simply the hull Player 2 gets. Unlike a bought ship it powers the rear " +
+            "weapon rather than the front, and when the two ships overlap they link: the Dragonwing " +
+            "rides just below the Silver Ship and becomes an aimable gun turret.");
+        ImGui.PopTextWrapPos();
+
+        ImGui.Dummy(new Vector2(0, 6f));
+        if (UiButton("Player 1's Silver Ship", AcShop, "open the hull Player 1 flies in two players"))
+            ShowItemTab(0, TwoPlayerP1Ship);
+
+        // Player 2's twiddles are shipCombos row 0 whatever hull they fly (varz.c:158); the twiddle
+        // block already knows that row as the 2nd-player one, so hand it straight over.
+        DrawShipTwiddleBlock(d, PlayerTwoCombos);
     }
 
     private void DrawPortDetail(PortItem p)

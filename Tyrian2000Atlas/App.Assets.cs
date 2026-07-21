@@ -182,7 +182,6 @@ public sealed unsafe partial class App
         _enemySelected = -1;
         _sprSelected = -1;
         _usage = null;              // song/sound cross-references belong to the old data set
-        _seqCache.Clear();
     }
 
     /// <summary>
@@ -307,6 +306,73 @@ public sealed unsafe partial class App
             MathF.Round((boxMin.X + boxMax.X) * 0.5f - (ox + w * 0.5f) * scale),
             MathF.Round((boxMin.Y + boxMax.Y) * 0.5f - (oy + h * 0.5f) * scale));
         DrawEnemyFrame(dl, atlas, gr, big, anchor, scale, tint);
+    }
+
+    /// <summary>One piece of a thumbnail: a frame, and where it sits relative to the group's
+    /// anchor in game pixels.</summary>
+    private readonly record struct ThumbPart(int Bank, int Sprite, bool Big, float X, float Y);
+
+    /// <summary>
+    /// An enemy as it is really drawn, fitted into a row-sized box: a single 12px frame, the 24x28
+    /// metasprite, or the 48x56 object an event 12 tiles from four consecutive entries. A fixed
+    /// scale would either clip the big ones or leave the small ones lost in the box, so the group's
+    /// own footprint sets the scale -- never above <paramref name="maxScale"/>, so a small enemy is
+    /// still drawn at its true size rather than blown up.
+    /// </summary>
+    /// <param name="blockBase">Base id of an event-12 block; 0 for an ordinary spawn.</param>
+    /// <param name="customSprite">With <paramref name="enemyId"/> 0: the art an event 49-52 carries
+    /// itself, which has no table entry to read.</param>
+    private void DrawEnemyThumb(ImDrawListPtr dl, int episodeIdx, int enemyId,
+        Vector2 boxMin, Vector2 boxMax, int blockBase = 0,
+        int customSprite = 0, int customBank = 0, float maxScale = 1f)
+    {
+        var parts = new List<ThumbPart>();
+        EnemyData? ed = null;
+        try { ed = _gd?.GetEnemyData(_gd.Episodes[episodeIdx]); } catch { /* no table for it */ }
+
+        void AddEntry(int id, float x, float y)
+        {
+            var d = ed?.Get(id) ?? default;
+            if (d.Loaded && d.EGraphic is { Length: > 0 })
+                parts.Add(new ThumbPart(d.ShapeBank, d.EGraphic[0], d.Esize == 1, x, y));
+        }
+
+        if (enemyId == 0 && customSprite > 0)
+        {
+            // Events 49-52 spawn scratch entry 0, so its esize -- not the event's -- sets the form.
+            parts.Add(new ThumbPart(customBank, customSprite, (ed?.Get(0).Esize ?? 0) == 1, 0, 0));
+        }
+        else if (blockBase > 0)
+        {
+            for (int k = 0; k < 4; k++) AddEntry(blockBase + k, (k % 2) * 24f, -(k / 2) * 28f);
+        }
+        if (parts.Count == 0) AddEntry(enemyId, 0, 0);
+        if (parts.Count == 0) return;
+
+        // Union of every piece's own box, so the group is measured as the player sees it.
+        float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+        var atlases = new SpriteAtlas?[parts.Count];
+        for (int i = 0; i < parts.Count; i++)
+        {
+            atlases[i] = Atlas(EnemySpriteSource(parts[i].Bank), AppSettings.GamePalette);
+            if (atlases[i] is not { } a) continue;
+            var (ox, oy, w, h) = EnemyFrameBox(a, parts[i].Sprite, parts[i].Big);
+            x0 = Math.Min(x0, parts[i].X + ox); y0 = Math.Min(y0, parts[i].Y + oy);
+            x1 = Math.Max(x1, parts[i].X + ox + w); y1 = Math.Max(y1, parts[i].Y + oy + h);
+        }
+        if (x1 <= x0 || y1 <= y0) return;
+
+        float bw = x1 - x0, bh = y1 - y0;
+        float scale = Math.Min(maxScale,
+            Math.Min((boxMax.X - boxMin.X) / bw, (boxMax.Y - boxMin.Y) / bh));
+        var origin = new Vector2(
+            MathF.Round((boxMin.X + boxMax.X) * 0.5f - (x0 + bw * 0.5f) * scale),
+            MathF.Round((boxMin.Y + boxMax.Y) * 0.5f - (y0 + bh * 0.5f) * scale));
+
+        for (int i = 0; i < parts.Count; i++)
+            if (atlases[i] is { } a)
+                DrawEnemyFrame(dl, a, parts[i].Sprite, parts[i].Big,
+                    origin + new Vector2(parts[i].X, parts[i].Y) * scale, scale);
     }
 
     /// <summary>

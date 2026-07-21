@@ -133,7 +133,7 @@ public sealed unsafe partial class App
                     case ExportKind.SongWav:
                     {
                         var track = bank[index];
-                        var seq = MidiSequence.From(track?.Midi);
+                        var seq = track?.Sequence;
                         short[]? pcm = null;
                         int channels = 1;
 
@@ -271,7 +271,7 @@ public sealed unsafe partial class App
             }
             else
             {
-                var seq = MidiSequence.From(track.Midi);
+                var seq = track.Sequence;
                 short[]? pcm = null;
                 int channels = 1;
                 if (useFluid && seq != null)

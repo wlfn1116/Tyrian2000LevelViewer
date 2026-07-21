@@ -120,8 +120,23 @@ public sealed unsafe partial class App
 
     private enum DropVia { Drop, Launch, ArmorShip }
 
-    private readonly record struct OtherSite(int EpisodeIdx, int Episode, int FileNum, string Level, ushort Time);
-    private readonly record struct OtherCarrier(int EpisodeIdx, int Episode, int FileNum, string Level, int CarrierId, DropVia Via);
+    /// <summary>The event-61 flag tests a record sits behind: how many tagged enemies have to be
+    /// destroyed first, and how many have to be left alive, before the engine runs it at all.</summary>
+    private readonly record struct DropGate(int Kills, int Spares)
+    {
+        public bool Any => Kills > 0 || Spares > 0;
+    }
+
+    private readonly record struct OtherSite(int EpisodeIdx, int Episode, int FileNum, string Level,
+        ushort Time, DropGate Gate);
+
+    /// <summary>An enemy that leaves a pickup behind. <see cref="CarrierId"/> 0 means the level built
+    /// the carrier itself with an event 49-52, which names no table entry -- then <see cref="Sprite"/>
+    /// and <see cref="Bank"/> are the event's own art and there is no enemy page to open.
+    /// <see cref="Block"/> is the base id when an event 12 tiled this entry into a 48x56 object with
+    /// its three neighbours, so the four quadrants can be shown as the one enemy they are.</summary>
+    private readonly record struct OtherCarrier(int EpisodeIdx, int Episode, int FileNum, string Level,
+        int CarrierId, DropVia Via, int Sprite, int Bank, ushort Time, DropGate Gate, int Block = 0);
 
     private sealed class OtherPickup
     {
@@ -135,7 +150,7 @@ public sealed unsafe partial class App
         public readonly SortedSet<int> WarpTargets = new();       // secret warp: value-10000 per source
         public readonly Dictionary<(int, int), int> Hits = new(); // source (ep,id) -> appearance count
         private readonly HashSet<(int, int, ushort)> _directSeen = new();
-        private readonly HashSet<(int, int, int, DropVia)> _carrierSeen = new();
+        private readonly Dictionary<(int, int, int, DropVia, int), int> _carrierAt = new();
         public bool Appears => Direct.Count > 0 || Carriers.Count > 0;
 
         public void AddDirect(OtherSite s, int srcId)
@@ -143,11 +158,26 @@ public sealed unsafe partial class App
             if (_directSeen.Add((s.EpisodeIdx, s.FileNum, s.Time))) Direct.Add(s);
             Bump(s.EpisodeIdx, srcId);
         }
+
+        /// <summary>One enemy is one row however often the level fields it, but the instance kept
+        /// has to be the one that really carries the drop: the deepest kill chain first, then the
+        /// latest spawn. An earlier sibling is one the retarget's slack window swept up -- in
+        /// SAWBLADES that is the sixth carrot, dead well before the seventh is armed.</summary>
         public void AddCarrier(OtherCarrier c, int srcEp, int srcId)
         {
-            if (_carrierSeen.Add((c.EpisodeIdx, c.FileNum, c.CarrierId, c.Via))) Carriers.Add(c);
+            var key = (c.EpisodeIdx, c.FileNum, c.CarrierId, c.Via, c.Sprite);
+            if (_carrierAt.TryGetValue(key, out int at))
+            {
+                if (Rank(c).CompareTo(Rank(Carriers[at])) > 0) Carriers[at] = c;
+            }
+            else
+            {
+                _carrierAt[key] = Carriers.Count;
+                Carriers.Add(c);
+            }
             Bump(srcEp, srcId);
         }
+        private static (int, ushort) Rank(in OtherCarrier c) => (c.Gate.Kills + c.Gate.Spares, c.Time);
         private void Bump(int ep, int id) => Hits[(ep, id)] = Hits.GetValueOrDefault((ep, id)) + 1;
     }
 
@@ -265,6 +295,78 @@ public sealed unsafe partial class App
         catch { return 0; }
     }
 
+    /// <summary>Events 49-52 spawn scratch entry 0, so its esize -- not the event's -- decides
+    /// whether their sprite is one 12px frame or the 2x2 metasprite block.</summary>
+    private bool CustomSpawnIsBig(int episodeIdx)
+    {
+        try { return _gd!.GetEnemyData(_gd.Episodes[episodeIdx]).Get(0).Esize == 1; }
+        catch { return false; }
+    }
+
+    /// <summary>One enemy a spawn event puts on the field: a table entry, or -- for events 49-52,
+    /// which name no entry at all -- the event's own sprite and shape bank. <c>Block</c> is the
+    /// event-12 base id when this is one quadrant of a tiled 48x56 object.</summary>
+    private readonly record struct SpawnedUnit(int Id, int Sprite, int Bank, ushort Time, int Index,
+        int Block = 0);
+
+    /// <summary>
+    /// The stretch a level spends waiting on a boss. An event 70 with a forward target leaves for it
+    /// the moment nothing with the named link numbers is alive (tyrian2.c:7020), so every record
+    /// between the first such test and that target only ever runs for a player who refuses to finish
+    /// the fight -- it is not part of a run. SAVARA IV parks its super-bomb waves in exactly that
+    /// stretch, which is why the level never hands one out however carefully it is played.
+    /// Returns the half-open event-index range, or null when the level has no such gate.
+    /// </summary>
+    private static (int Start, int End)? BossHoldWindow(Level lv)
+    {
+        var evs = lv.Events;
+        for (int i = 0; i < evs.Length; i++)
+        {
+            if (evs[i].Type != 70) continue;
+            int target = unchecked((ushort)evs[i].Dat);
+            if (target <= evs[i].Time) continue;   // a backwards target is a holding loop, not an exit
+            int end = evs.Length;
+            for (int j = i + 1; j < evs.Length; j++)
+                if (evs[j].Time >= target) { end = j; break; }
+            return (i, end);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The kill chain guarding an event record. Event 61 skips its next <c>Dat3</c> records while
+    /// <c>globalFlags[Dat-1]</c> equals <c>Dat2</c> (tyrian2.c:6991), and event 60 tags a formation so
+    /// that destroying it sets that flag (tyrian2.c:6979, set at the kill in tyrian2.c:3042). Chain
+    /// those and you get the levels' "shoot these in turn" secrets: SAWBLADES releases one carrot at
+    /// a time and only arms the HOT DOG on the seventh. <c>Dat2 == 1</c> inverts a link -- that record
+    /// runs only while the tagged enemy is still alive.
+    /// </summary>
+    private static DropGate GateOf(EventRec[] evs, int index)
+    {
+        int kills = 0, spares = 0, cur = index;
+        for (int depth = 0; depth < 16; depth++)
+        {
+            int guard = -1;
+            for (int j = cur - 1; j >= 0; j--)
+                if (evs[j].Type == 61 && j + Math.Max(0, (int)evs[j].Dat3) >= cur) { guard = j; break; }
+            if (guard < 0) break;
+            if (evs[guard].Dat2 == 0) kills++; else spares++;
+
+            // Step back to the spawn whose death sets the flag this test reads.
+            int flag = evs[guard].Dat, setter = -1;
+            for (int k = guard - 1; k >= 0; k--)
+                if (evs[k].Type == 60 && evs[k].Dat == flag && evs[k].Dat2 == 1) { setter = k; break; }
+            if (setter < 0) break;
+            int tagged = -1;
+            for (int s = setter - 1; s >= 0; s--)
+                if (evs[s].Dat4 == evs[setter].Dat4 && ObjectPlacer.IsSpawn(evs[s].Type, out _, out _))
+                { tagged = s; break; }
+            if (tagged < 0) break;
+            cur = tagged;
+        }
+        return new DropGate(kills, spares);
+    }
+
     /// <summary>Walk every level's spawns, their death/launch chains, and its event-33 retargets,
     /// crediting each pickup to the levels it is placed in and the enemies that drop it.</summary>
     private void ScanOtherAppearances(Dictionary<(int, int), OtherPickup> byId)
@@ -280,23 +382,35 @@ public sealed unsafe partial class App
                 Level lv;
                 try { lv = _gd.LoadLevel(ep, li.FileNum); } catch { continue; }
                 string name = string.IsNullOrWhiteSpace(li.Name) ? "(unnamed)" : li.Name.Trim();
+                var hold = BossHoldWindow(lv);
+                bool InRun(int i) => hold is not { } h || i < h.Start || i >= h.End;
 
-                // linknum -> the enemies spawned under it, with their times.
-                var byLink = new Dictionary<int, List<(int Id, ushort Time)>>();
-                foreach (var ev in lv.Events)
+                // linknum -> what a spawn event put under it. Events 49-52 belong here as much as
+                // any other spawn: they are how a level builds a one-off enemy, and SAWBLADES's
+                // carrots -- the only carriers the HOT DOG has -- are exactly that.
+                var byLink = new Dictionary<int, List<SpawnedUnit>>();
+                for (int i = 0; i < lv.Events.Length; i++)
                 {
-                    if (ev.Type == 33 || ev.Type is >= 49 and <= 52) continue;
-                    if (!ObjectPlacer.IsSpawn(ev.Type, out _, out _) && ev.Type != 12) continue;
-                    if (!byLink.TryGetValue(ev.Dat4, out var l)) byLink[ev.Dat4] = l = new List<(int, ushort)>();
-                    for (int k = 0; k < (ev.Type == 12 ? 4 : 1); k++)
-                        if (ev.Dat + k > 0) l.Add((ev.Dat + k, ev.Time));
+                    var ev = lv.Events[i];
+                    if (!ObjectPlacer.IsSpawn(ev.Type, out _, out _) || !InRun(i)) continue;
+                    if (!byLink.TryGetValue(ev.Dat4, out var l)) byLink[ev.Dat4] = l = new List<SpawnedUnit>();
+                    if (ev.Type is >= 49 and <= 52)
+                        l.Add(new SpawnedUnit(0, ev.Dat, ev.Dat3, ev.Time, i));
+                    else
+                        for (int k = 0; k < (ev.Type == 12 ? 4 : 1); k++)
+                            if (ev.Dat + k > 0)
+                                l.Add(new SpawnedUnit(ev.Dat + k, 0, 0, ev.Time, i,
+                                    ev.Type == 12 ? ev.Dat : 0));
                 }
 
                 // Direct placement + static enemydie / launch chains.
-                foreach (var ev in lv.Events)
+                for (int i = 0; i < lv.Events.Length; i++)
                 {
-                    if (ev.Type is >= 49 and <= 52) continue;
-                    if (!ObjectPlacer.IsSpawn(ev.Type, out _, out _) && ev.Type != 12) continue;
+                    var ev = lv.Events[i];
+                    if (ev.Type is >= 49 and <= 52) continue;   // scratch entry 0, never a table pickup
+                    if (!ObjectPlacer.IsSpawn(ev.Type, out _, out _) || !InRun(i)) continue;
+                    var gate = GateOf(lv.Events, i);
+                    int block = ev.Type == 12 ? ev.Dat : 0;
                     for (int k = 0; k < (ev.Type == 12 ? 4 : 1); k++)
                     {
                         int root = ev.Dat + k;
@@ -311,19 +425,21 @@ public sealed unsafe partial class App
                             var dc = ed.Get(cur);
                             if (!dc.Loaded) continue;
                             if (cur == root && byId.TryGetValue((e, cur), out var pd0))
-                                pd0.AddDirect(new OtherSite(e, ep.Number, li.FileNum, name, ev.Time), cur);
+                                pd0.AddDirect(new OtherSite(e, ep.Number, li.FileNum, name, ev.Time, gate), cur);
                             int die = dc.EEnemyDie;
                             if (die != 0)
                             {
                                 if (byId.TryGetValue((e, die), out var pd))
-                                    pd.AddCarrier(new OtherCarrier(e, ep.Number, li.FileNum, name, cur, DropVia.Drop), e, die);
+                                    pd.AddCarrier(new OtherCarrier(e, ep.Number, li.FileNum, name, cur,
+                                        DropVia.Drop, 0, 0, ev.Time, gate, cur == root ? block : 0), e, die);
                                 queue.Enqueue(die);
                             }
                             int launch = LaunchedId(cur, dc);
                             if (launch != 0)
                             {
                                 if (byId.TryGetValue((e, launch), out var pl))
-                                    pl.AddCarrier(new OtherCarrier(e, ep.Number, li.FileNum, name, cur, DropVia.Launch), e, launch);
+                                    pl.AddCarrier(new OtherCarrier(e, ep.Number, li.FileNum, name, cur,
+                                        DropVia.Launch, 0, 0, ev.Time, gate, cur == root ? block : 0), e, launch);
                                 queue.Enqueue(launch);
                             }
                         }
@@ -331,9 +447,10 @@ public sealed unsafe partial class App
                 }
 
                 // Event 33: retarget the formation with linknum Dat4 to drop enemyDat[Dat].
-                foreach (var ev in lv.Events)
+                for (int i = 0; i < lv.Events.Length; i++)
                 {
-                    if (ev.Type != 33 || ev.Dat <= 0) continue;
+                    var ev = lv.Events[i];
+                    if (ev.Type != 33 || ev.Dat <= 0 || !InRun(i)) continue;
                     if (!byId.TryGetValue((e, ev.Dat), out var pick)) continue;
                     if (!byLink.TryGetValue(ev.Dat4, out var formation)) continue;
                     // The formation live at the retarget: whatever was spawned latest at or before it.
@@ -342,7 +459,9 @@ public sealed unsafe partial class App
                     ushort newest = pool.Max(c => c.Time);
                     foreach (var c in pool)
                         if (c.Time >= newest - 300)   // parts of one formation stagger a little
-                            pick.AddCarrier(new OtherCarrier(e, ep.Number, li.FileNum, name, c.Id, DropVia.Drop), e, ev.Dat);
+                            pick.AddCarrier(new OtherCarrier(e, ep.Number, li.FileNum, name, c.Id,
+                                DropVia.Drop, c.Sprite, c.Bank, c.Time, GateOf(lv.Events, c.Index),
+                                c.Block), e, ev.Dat);
                 }
             }
         }
@@ -360,7 +479,8 @@ public sealed unsafe partial class App
             if (!ed.Get(560).Loaded) continue;
             for (int id = 561; id <= 563; id++)
                 if (byId.TryGetValue((e, id), out var p) && p.Kind == OtherKind.Armour)
-                    p.AddCarrier(new OtherCarrier(e, _gd.Episodes[e].Number, 0, "any level", 560, DropVia.ArmorShip), e, id);
+                    p.AddCarrier(new OtherCarrier(e, _gd.Episodes[e].Number, 0, "any level", 560,
+                        DropVia.ArmorShip, 0, 0, 0, default), e, id);
         }
     }
 
@@ -499,15 +619,36 @@ public sealed unsafe partial class App
         WellEnd();
     }
 
+    /// <summary>How a kill chain reads on a row, or "" when the record is not gated at all.</summary>
+    private static string GateText(DropGate g) => g switch
+    {
+        { Kills: > 0, Spares: > 0 } => $"after {g.Kills} chained kills, {g.Spares} spared",
+        { Kills: > 0 } => $"after {g.Kills} chained kill{(g.Kills == 1 ? "" : "s")}",
+        { Spares: > 0 } => $"only while {g.Spares} earlier target{(g.Spares == 1 ? " is" : "s are")} alive",
+        _ => "",
+    };
+
     private void DrawOtherDroppers(OtherPickup p)
     {
         var shown = new HashSet<int>(ShownEpisodes());
+        // One row per enemy, however many levels field it -- and an event-12 block is ONE enemy,
+        // so its four quadrants share a row keyed on the base id. The level and moment shown are
+        // the best instance's -- deepest kill chain, then latest -- so a click lands where the
+        // drop really is rather than on an earlier sibling.
         var groups = p.Carriers.Where(c => shown.Contains(c.EpisodeIdx))
-            .GroupBy(c => (c.EpisodeIdx, c.CarrierId))
-            .Select(g => (g.Key.EpisodeIdx, g.Key.CarrierId, Episode: g.First().Episode,
-                Launch: g.Any(c => c.Via == DropVia.Launch), ArmorShip: g.Any(c => c.Via == DropVia.ArmorShip),
-                Levels: g.Where(c => c.FileNum > 0).Select(c => c.Level).Distinct().ToList()))
-            .OrderBy(g => g.Episode).ThenBy(g => g.CarrierId)
+            .GroupBy(c => (c.EpisodeIdx, Key: c.Block > 0 ? c.Block : c.CarrierId, c.Sprite))
+            .Select(g =>
+            {
+                var best = g.OrderByDescending(c => c.Gate.Kills + c.Gate.Spares)
+                            .ThenByDescending(c => c.Time).First();
+                var ids = g.Select(c => c.CarrierId).Distinct().OrderBy(x => x).ToList();
+                return (g.Key.EpisodeIdx, CarrierId: g.Key.Key, g.Key.Sprite, best.Episode, best.Bank,
+                    best.FileNum, best.Time, best.Gate, best.Block, Ids: ids,
+                    Launch: g.Any(c => c.Via == DropVia.Launch),
+                    ArmorShip: g.Any(c => c.Via == DropVia.ArmorShip),
+                    Levels: g.Where(c => c.FileNum > 0).Select(c => c.Level).Distinct().ToList());
+            })
+            .OrderBy(g => g.Episode).ThenBy(g => g.CarrierId).ThenBy(g => g.Sprite)
             .ToList();
 
         ImGui.Dummy(new Vector2(0, 4f));
@@ -524,26 +665,55 @@ public sealed unsafe partial class App
             return;
         }
 
-        const float rowH = 30f;
-        int shownRows = 0;
+        int chained = groups.Count(g => g.Gate.Kills > 0);
+        if (chained > 0)
+        {
+            ImGui.PushTextWrapPos(0f);
+            ImGui.TextColored(ColorOf(Shade(AcEnemy, 1f, 205)),
+                (chained == groups.Count ? "Behind" : "Some of these sit behind") +
+                " a kill chain: the level tags one target at a time and only releases the next once the " +
+                "last has been destroyed, so the drop comes at the end of the run -- miss a step and the " +
+                "rest never fly in.");
+            ImGui.PopTextWrapPos();
+        }
+
+        const float rowH = 34f;
+        BeginRowScroll("##dropperlist", groups.Count, rowH, reserve: 110f);   // "placed directly in" follows
         foreach (var g in groups)
         {
-            if (shownRows >= MaxOutpostRows)
+            bool custom = g.CarrierId == 0 && !g.ArmorShip;
+            var b = UiRow($"##drp{g.EpisodeIdx}_{g.CarrierId}_{g.Sprite}", false, AcEnemy, rowH);
+            if (b.Clicked)
             {
-                ImGui.TextColored(ColorOf(UiFaint), $"   +{groups.Count - shownRows} more");
-                break;
+                // A custom carrier has no table entry to open -- go to the level instead.
+                if (custom) { SelectLevelFile(g.EpisodeIdx, g.FileNum); _pendingJump = new MapJump(g.Time, Array.Empty<int>()); }
+                else OpenEnemy(g.EpisodeIdx, g.CarrierId);
             }
-            shownRows++;
-            var b = UiRow($"##drp{g.EpisodeIdx}_{g.CarrierId}", false, AcEnemy, rowH);
-            if (b.Clicked) OpenEnemy(g.EpisodeIdx, g.CarrierId);
-            if (b.Hovered) ImGui.SetTooltip("open this enemy -- its own page shows every level it flies in");
+            if (b.Hovered) ImGui.SetTooltip(custom
+                ? "open this level at the frame the carrier flies in"
+                : "open this enemy -- its own page shows every level it flies in");
+
+            DrawEnemyThumb(ImGui.GetWindowDrawList(), g.EpisodeIdx, g.CarrierId,
+                new Vector2(b.Min.X + 7f, b.Min.Y + 1f), new Vector2(b.Min.X + 47f, b.Max.Y - 1f),
+                g.Block, g.Sprite, g.Bank);
+
             string epTag = _allEpisodes ? $"  ·  Ep {g.Episode}" : "";
-            string title = g.ArmorShip ? $"the rescue ship  #{g.CarrierId}" : $"enemy #{g.CarrierId}";
+            string ids = g.Ids.Count > 1
+                ? $"#{g.Ids[0]}-{g.Ids[^1]}" : $"#{g.CarrierId}";
+            string title = g.ArmorShip ? $"the rescue ship  #{g.CarrierId}"
+                : custom ? "the level's own enemy" : $"enemy {ids}";
             string sub = g.ArmorShip ? "flies in when your hull is low"
-                : (g.Launch ? "launches it" : "drops it on death") +
-                  (g.Levels.Count > 0 ? "  ·  " + (g.Levels.Count == 1 ? g.Levels[0] : $"{g.Levels.Count} levels") : "");
-            RowText(b, 10f, title, sub + epTag, AcEnemy, false, 14f);
+                : string.Join("  ·  ", new[]
+                {
+                    g.Launch ? "launches it" : "drops it on death",
+                    custom ? $"sprite {g.Sprite}, bank {g.Bank}" : "",
+                    g.Block > 0 ? "4x4 block" : "",
+                    GateText(g.Gate),
+                    g.Levels.Count == 0 ? "" : g.Levels.Count == 1 ? g.Levels[0] : $"{g.Levels.Count} levels",
+                }.Where(s => s.Length > 0));
+            RowText(b, 52f, title, sub + epTag, AcEnemy, false, 14f);
         }
+        ImGui.EndChild();
     }
 
     private void DrawOtherDirect(OtherPickup p)
@@ -552,7 +722,8 @@ public sealed unsafe partial class App
         var groups = p.Direct.Where(s => shown.Contains(s.EpisodeIdx))
             .GroupBy(s => (s.EpisodeIdx, s.FileNum))
             .Select(g => (g.First().EpisodeIdx, g.First().Episode, g.First().FileNum, g.First().Level,
-                Time: g.Min(s => s.Time), Count: g.Count()))
+                Time: g.Min(s => s.Time), Count: g.Count(),
+                Gate: g.Select(s => s.Gate).OrderByDescending(x => x.Kills + x.Spares).First()))
             .OrderBy(g => g.Episode).ThenBy(g => g.Time)
             .ToList();
 
@@ -572,15 +743,9 @@ public sealed unsafe partial class App
 
         int most = groups.Max(g => g.Count);
         const float rowH = 30f;
-        int shownRows = 0;
+        BeginRowScroll("##directlist", groups.Count, rowH);
         foreach (var g in groups)
         {
-            if (shownRows >= MaxOutpostRows)
-            {
-                ImGui.TextColored(ColorOf(UiFaint), $"   +{groups.Count - shownRows} more");
-                break;
-            }
-            shownRows++;
             var b = UiRow($"##odir{g.EpisodeIdx}_{g.FileNum}", false, AcRoutes, rowH);
             if (b.Clicked) { SelectLevelFile(g.EpisodeIdx, g.FileNum); _pendingJump = new MapJump(g.Time, Array.Empty<int>()); }
             if (b.Hovered) ImGui.SetTooltip("open this level at the frame it flies in");
@@ -588,11 +753,14 @@ public sealed unsafe partial class App
             float barW = Math.Max(24f, (b.Max.X - b.Min.X) * 0.22f);
             string trail = g.Count > 1 ? $"x{g.Count}" : "";
             string epTag = _allEpisodes ? $"  ·  Ep {g.Episode}" : "";
-            RowText(b, 10f, $"{g.Level}  #{g.FileNum:00}", $"first at t={g.Time}{epTag}",
+            string gate = GateText(g.Gate);
+            RowText(b, 10f, $"{g.Level}  #{g.FileNum:00}",
+                $"first at t={g.Time}" + (gate.Length > 0 ? $"  ·  {gate}" : "") + epTag,
                 AcRoutes, false, barW + TrailRoom(trail) + 12f);
             var bar = new Vector2(b.Max.X - barW - TrailRoom(trail), b.Min.Y + rowH * 0.5f - 5f);
             MeterBar(dl, bar, bar + new Vector2(barW, 7f), g.Count / (float)most, AcRoutes);
             if (trail.Length > 0) RowTrail(b, trail, Shade(AcRoutes, 1.1f));
         }
+        ImGui.EndChild();
     }
 }

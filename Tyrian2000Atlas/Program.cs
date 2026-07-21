@@ -266,7 +266,12 @@ internal static unsafe class Program
             SdlNs.SDL.RenderClear(renderer);
             ImSdl.ImGuiImplSDL2.SDLRenderer2RenderDrawData(ImGui.GetDrawData(), bRenderer);
 
-            if (uishot >= 0 && ++frame >= 5)
+            // Five frames in, but not while a music ring-out is still being measured: that
+            // runs off the UI thread and lands after a frame or two, and a shot taken before
+            // it does catches the note view without its tails. Capped so a stuck measurement
+            // cannot hold the run open.
+            if (uishot >= 0 && ++frame >= 5
+                && (T2A.Tyrian.Audio.MusicTrack.RingOutsPending == 0 || frame > 400))
             {
                 int w, h; SdlNs.SDL.GetWindowSize(window, &w, &h);
                 var buf = new uint[w * h];
@@ -682,7 +687,7 @@ internal static unsafe class Program
         foreach (var t in music.Tracks)
         {
             var song = t.Lds;
-            var seq = T2A.Tyrian.Audio.MidiSequence.From(t.Midi);
+            var seq = t.Sequence;
             if (song == null) { Console.Error.WriteLine($"  song {t.Index + 1} will not parse as LDS"); failed = true; continue; }
             if (seq == null) { Console.Error.WriteLine($"  song {t.Index + 1} will not convert to MIDI"); failed = true; continue; }
 

@@ -67,9 +67,6 @@ public sealed unsafe partial class App
     private float _musicScrubTick = -1f;   // where a live scrub is pointing; -1 = not scrubbing
     private int _musicUseTab;                     // 0 = where used, 1 = channels, 2 = song data
 
-    /// <summary>Flattened songs, kept so switching tracks does not re-convert every time.</summary>
-    private readonly Dictionary<int, MidiSequence?> _seqCache = new();
-
     private static readonly uint AcMusic = Gfx.Rgba(150, 200, 255);
     private static readonly uint AcSound = Gfx.Rgba(255, 175, 120);
 
@@ -111,16 +108,26 @@ public sealed unsafe partial class App
 
     private MusicBank? Bank => _audio?.Music;
 
-    /// <summary>The flattened song for a track, converted once and kept.</summary>
+    /// <summary>
+    /// The flattened song for a track, converted once and kept on the track itself. Asking for
+    /// it here is also what sets the ring-out measurement going: this is the window's accessor,
+    /// and the note views are the only thing that draws it.
+    /// </summary>
     private MidiSequence? SeqFor(int index)
     {
-        if (_seqCache.TryGetValue(index, out var hit)) return hit;
         var track = Bank?[index];
-        MidiSequence? seq = null;
-        try { seq = MidiSequence.From(track?.Midi); } catch { /* a song that will not convert has no timeline */ }
-        _seqCache[index] = seq;
-        return seq;
+        track?.WantRingOut();
+        return track?.Sequence;
     }
+
+    /// <summary>
+    /// Whether the note views should draw the ring-out past each bar. It belongs to the OPL:
+    /// a Loudness key-off only starts the chip's release phase, so the voice sings on. The two
+    /// MIDI devices really do stop the note where the bar stops -- what happens after that is
+    /// the SoundFont's own release, not the song's -- so the tail comes off with them.
+    /// </summary>
+    private static bool ShowRingOut(MidiSequence seq, MusicPlayer player) =>
+        seq.HasRingOut && player.Device == MusicDevice.Opl;
 
     // =====================================================================
     // The window
@@ -454,7 +461,9 @@ public sealed unsafe partial class App
 
                 int levels = usage?.SongLevelCount(i) ?? 0;
                 string trail = levels > 0 ? $"{levels} lv" : "";
-                var seq = _seqCache.TryGetValue(i, out var cached) ? cached : null;
+                // Only what has already been converted: filling this in for every row would
+                // convert all forty-one songs the first time the list is drawn.
+                var seq = t.SequenceReady ? t.Sequence : null;
                 string sub = seq != null
                     ? $"{FormatTicks(seq.Duration)}   ·   {seq.Notes.Length:n0} notes"
                     : $"#{i + 1}";
@@ -624,7 +633,7 @@ public sealed unsafe partial class App
             // Its default is not a number on the slider's own scale but "whatever fits", which
             // is what the button beside it does -- so the right-click goes there instead.
             if (SliderResetHint("How tall each semitone is drawn.\n" +
-                    "Also shift+wheel over the roll; alt+wheel runs up and down it.", "fit"))
+                    "Also alt+wheel over the roll; shift+wheel runs up and down it.", "fit"))
             { _pianoKeyH = 0; _pianoCenterPending = true; }
             ImGui.SameLine(0, 5);
             if (UiButton("fit", AcMusic, "Back to a readable default, centred on the channel", 34f, _pianoKeyH <= 0))
@@ -635,7 +644,7 @@ public sealed unsafe partial class App
             float laneH = _laneZoom > 0 ? _laneZoom : _laneH;
             if (ImGui.SliderFloat("##muslaneh", ref laneH, MinLaneH, MaxLaneH, "%.0f px")) _laneZoom = laneH;
             if (SliderResetHint("How tall each channel lane is drawn.\n" +
-                    "Also shift+wheel over the timeline; alt+wheel scrolls down them.", "fit"))
+                    "Also alt+wheel over the timeline; shift+wheel scrolls down them.", "fit"))
             { _laneZoom = 0; _laneScroll = 0; }
             ImGui.SameLine(0, 5);
             if (UiButton("fit", AcMusic, "Back to every used channel in the panel", 34f, _laneZoom <= 0))
@@ -771,7 +780,7 @@ public sealed unsafe partial class App
         int laneRows = LaneRows(seq);
         // Lane height is the user's, not a division of whatever room is left: nine channels
         // squeezed into a short pane leaves each one too flat to read a melody off. 0 means
-        // "fit", which is what it does until the height slider or ctrl+shift+wheel is used.
+        // "fit", which is what it does until the height slider or alt+wheel is used.
         _laneH = _laneZoom > 0
             ? Math.Clamp(_laneZoom, MinLaneH, MaxLaneH)
             : Math.Clamp(viewH / laneRows, MinLaneH, MaxLaneH);
@@ -795,8 +804,8 @@ public sealed unsafe partial class App
         var io = ImGui.GetIO();
         var mouse = ImGui.GetMousePos();
 
-        // Wheel scrolls the song; ctrl+wheel zooms time about the cursor; shift+wheel makes
-        // the channels taller or shorter; alt+wheel scrolls down the channels themselves.
+        // Wheel scrolls the song; ctrl+wheel zooms time about the cursor; alt+wheel makes
+        // the channels taller or shorter; shift+wheel scrolls down the channels themselves.
         if (hovered && io.MouseWheel != 0)
         {
             if (io.KeyCtrl)
@@ -807,14 +816,14 @@ public sealed unsafe partial class App
                 _musicZoom = newZoom;
                 zoom = newZoom;
             }
-            else if (io.KeyShift)
+            else if (io.KeyAlt)
             {
                 _laneZoom = Math.Clamp(_laneH * MathF.Pow(1.15f, io.MouseWheel), MinLaneH, MaxLaneH);
                 _laneH = _laneZoom;
                 lanesFull = _laneH * laneRows;
                 lanesH = Math.Min(viewH, lanesFull);
             }
-            else if (io.KeyAlt) _laneScroll -= io.MouseWheel * _laneH * 0.5f;
+            else if (io.KeyShift) _laneScroll -= io.MouseWheel * _laneH * 0.5f;
             else _musicScrollTicks -= io.MouseWheel * (gridW * 0.15f) / zoom;
         }
         _laneScroll = Math.Clamp(_laneScroll, 0f, Math.Max(0f, lanesFull - lanesH));
@@ -980,13 +989,15 @@ public sealed unsafe partial class App
         float hNote = Math.Clamp((_laneH - 6f) / span * 1.6f, 2f, 6f);
         float left = gridPos.X, right = gridPos.X + gridW;
         int shown = 0, clipped = 0;
+        bool ringOut = ShowRingOut(seq, player);
 
         foreach (var n in seq.Notes)
         {
             int lane = n.Lane;
             if ((uint)lane >= MidiSequence.LaneCount || _laneSlot[lane] < 0) continue;
             float x0 = TickX(n.Start), x1 = TickX(n.End);
-            if (x1 < left || x0 > right) continue;
+            float xr = ringOut ? TickX(n.Ring) : x1;
+            if (xr < left || x0 > right) continue;
             if (shown >= NoteDrawBudget) { clipped++; continue; }
             shown++;
 
@@ -1002,6 +1013,14 @@ public sealed unsafe partial class App
             float xb = n.Restruck
                 ? Math.Min(xa + Math.Clamp(x1 - x0, 1.5f, 5f) - 0.75f, right)
                 : Math.Min(Math.Max(x1 - 0.75f, x0 + 1f), right);
+
+            // The chip goes on singing after the key lifts, and on these patches it is still
+            // most of the note -- so the release is drawn too, thinner and dimmer than the
+            // held part. Behind the bar, so a bar that swallows its own tail still reads.
+            if (xr > xb + 0.5f)
+                dl.AddRectFilled(new Vector2(xa, y - hNote * 0.25f),
+                    new Vector2(Math.Min(xr, right), y + hNote * 0.25f), Alpha(laneCol[lane], 70), 1f);
+
             dl.AddRectFilled(new Vector2(xa, y - hNote * 0.5f),
                 new Vector2(Math.Max(xb, xa + 0.75f), y + hNote * 0.5f), c, 1f);
 
@@ -1337,6 +1356,20 @@ public sealed unsafe partial class App
         ImGui.SameLine(0, 8);
         ImGui.AlignTextToFramePadding();
         ImGui.TextColored(ColorOf(UiFaint), $"{(notes > 0 ? inst : "silent")}   ·   {notes:n0} notes");
+        if (ShowRingOut(seq, player))
+        {
+            // The faint slab past a bar needs saying once: it is not a longer note.
+            ImGui.SameLine(0, 8);
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextColored(ColorOf(Alpha(col, 150)), "·   ring-out");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("The faint slab past a note is the chip still sounding it.\n" +
+                                 "A Loudness key-off only starts the OPL's release phase, so the\n" +
+                                 "voice sings on -- on these patches often right up to the next\n" +
+                                 "note, which is why the bars alone read staccato.\n\n" +
+                                 "Measured off the chip, note by note. The two MIDI voices really\n" +
+                                 "do stop where the bar stops, so it is not drawn for them.");
+        }
         ImGui.SameLine(0, 14);
         bool muted = player.IsMuted(lane);
         if (UiToggle("mute", ref muted, Gfx.Rgba(250, 140, 150), $"Silence channel {lane + 1}"))
@@ -1375,7 +1408,7 @@ public sealed unsafe partial class App
         // The default key height is readable, not fitted: a piano roll wants its keys tall
         // enough to letter (C6, D#7), and scrolls when the channel's range does not fit -- the
         // way FL Studio does -- rather than squeezing five octaves into an unlabelable smear.
-        // shift+wheel overrides it, down to MinKeyH when the whole span has to be seen at once.
+        // alt+wheel overrides it, down to MinKeyH when the whole span has to be seen at once.
         float keyH = _pianoKeyH > 0
             ? Math.Clamp(_pianoKeyH, MinKeyH, MaxKeyH)
             : Math.Clamp(viewH / keyCount, Math.Min(lh + 3f, MaxKeyH), MaxKeyH);
@@ -1384,7 +1417,7 @@ public sealed unsafe partial class App
 
         // A vertical scrollbar down the right whenever the channel's range is taller than fits,
         // so a high line centred out of view can be dragged to rather than only reached by
-        // alt+wheel. It takes its width from the note field.
+        // shift+wheel. It takes its width from the note field.
         float scrollBarW = keysFull > lanesH + 0.5f ? 12f : 0f;
         float gridW = Math.Max(60f, avail.X - KeyboardW - scrollBarW);
 
@@ -1408,8 +1441,8 @@ public sealed unsafe partial class App
         var io = ImGui.GetIO();
         var mouse = ImGui.GetMousePos();
 
-        // Wheel: as in the lanes. Plain scrolls time, ctrl zooms time about the cursor, shift
-        // makes the keys taller or shorter, alt runs up and down the keyboard.
+        // Wheel: as in the lanes. Plain scrolls time, ctrl zooms time about the cursor, alt
+        // makes the keys taller or shorter, shift runs up and down the keyboard.
         if (hovered && io.MouseWheel != 0)
         {
             if (io.KeyCtrl)
@@ -1420,14 +1453,14 @@ public sealed unsafe partial class App
                 _pianoZoom = newZoom;
                 zoom = newZoom;
             }
-            else if (io.KeyShift)
+            else if (io.KeyAlt)
             {
                 _pianoKeyH = Math.Clamp(keyH * MathF.Pow(1.15f, io.MouseWheel), MinKeyH, MaxKeyH);
                 keyH = _pianoKeyH;
                 keysFull = keyH * keyCount;
                 lanesH = Math.Min(viewH, keysFull);
             }
-            else if (io.KeyAlt) _pianoScroll -= io.MouseWheel * keyH * 1.5f;
+            else if (io.KeyShift) _pianoScroll -= io.MouseWheel * keyH * 1.5f;
             else _musicScrollTicks -= io.MouseWheel * (gridW * 0.15f) / zoom;
         }
         // On the way in, sit on the middle of the channel's range rather than the top, so a
@@ -1587,11 +1620,13 @@ public sealed unsafe partial class App
 
         float left = gridPos.X, right = gridPos.X + gridW;
         int shown = 0, clipped = 0;
+        bool ringOut = ShowRingOut(seq, player);
         foreach (var n in seq.Notes)
         {
             if (n.Lane != lane) continue;
             float x0 = TickX(n.Start), x1 = TickX(n.End);
-            if (x1 < left || x0 > right) continue;
+            float xr = ringOut ? TickX(n.Ring) : x1;
+            if (xr < left || x0 > right) continue;
             float top = KeyTop(n.Key);
             if (top + keyH < lanesTop || top > lanesEnd) continue;
             if (shown >= NoteDrawBudget) { clipped++; continue; }
@@ -1609,6 +1644,17 @@ public sealed unsafe partial class App
             xb = Math.Max(xb, xa + 1.5f);
 
             uint c = Alpha(noteBase, (byte)(audible ? Math.Clamp(150 + n.Velocity, 170, 255) : 95));
+
+            // The release: on these patches the chip is still singing most of the note after
+            // the key lifts, so it gets a slab of its own -- inset and faint, and behind the
+            // bar, so what the key actually holds is still the thing that reads.
+            if (xr > xb + 0.5f)
+            {
+                float inset = Math.Min(3f, (yb - ya) * 0.28f);
+                dl.AddRectFilled(new Vector2(xa, ya + inset), new Vector2(Math.Min(xr, right), yb - inset),
+                    Alpha(noteBase, audible ? (byte)62 : (byte)34), 2f);
+            }
+
             dl.AddRectFilled(new Vector2(xa, ya), new Vector2(xb, yb), c, 2f);
             dl.AddRect(new Vector2(xa, ya), new Vector2(xb, yb), Alpha(Shade(noteBase, 1.4f), audible ? (byte)205 : (byte)120), 2f);
             // The struck edge, brighter, so a held note reads its onset and a row of repeats
@@ -1682,7 +1728,7 @@ public sealed unsafe partial class App
 
         // --- tooltips ---
         if (inScroll && !_pianoScrollDrag)
-            ImGui.SetTooltip("Drag to scroll up and down the keyboard.\nAlso alt+wheel over the roll.");
+            ImGui.SetTooltip("Drag to scroll up and down the keyboard.\nAlso shift+wheel over the roll.");
         else if (inOverview && !_musicDragOverview)
             ImGui.SetTooltip("Drag to scroll the piano roll.\nClick anywhere on the strip to jump there.");
         else if (hovered && !_musicDragRuler && !_musicDragLoop && !_musicDragOverview && !_pianoScrollDrag
@@ -1693,7 +1739,7 @@ public sealed unsafe partial class App
             if (t >= 0 && t <= seq.Duration && key >= 0 && key <= 127)
                 ImGui.SetTooltip($"{GeneralMidi.NoteName(key)}   ·   {FormatTicks((uint)t)}\n" +
                                  "click to seek   ·   ctrl+drag sets an A-B loop\n" +
-                                 "ctrl+wheel zooms time   ·   shift+wheel the key height   ·   alt+wheel scrolls");
+                                 "ctrl+wheel zooms time   ·   alt+wheel the key height   ·   shift+wheel scrolls");
         }
     }
 

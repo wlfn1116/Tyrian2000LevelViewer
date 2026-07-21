@@ -795,12 +795,8 @@ public sealed unsafe partial class App
         var dl = ImGui.GetWindowDrawList();
         Card(dl, p, p + new Vector2(w, h), AcLink, hot ? 0.16f : 0.07f);
         if (target.Loaded)
-        {
-            var atlas = Atlas(EnemySpriteSource(target.ShapeBank), AppSettings.GamePalette);
-            if (atlas != null)
-                DrawEnemyFrameCentered(dl, atlas, target.EGraphic[0], target.Esize == 1,
-                    new Vector2(p.X + 5f, p.Y + 3f), new Vector2(p.X + 37f, p.Y + h - 3f), 1f);
-        }
+            DrawEnemyThumb(dl, _enemyEpisodeIdx, enemyId,
+                new Vector2(p.X + 5f, p.Y + 3f), new Vector2(p.X + 37f, p.Y + h - 3f));
         ClipText(dl, new Vector2(p.X + 42f, p.Y + 4f), w - 50f,
             hot ? Gfx.Rgba(248, 250, 255) : UiText, $"{label} #{enemyId}");
         ClipText(dl, new Vector2(p.X + 42f, p.Y + 4f + lh + 1f), w - 50f, UiFaint, note);
@@ -914,6 +910,54 @@ public sealed unsafe partial class App
                 _asmScrollToSelection = true;
             }
         ImGui.EndCombo();
+    }
+
+    /// <summary>Every multi-part body a level spawns, per level. Separate from
+    /// <see cref="Assemblies"/> because that one is filtered to the episodes being browsed, while
+    /// the item scan spans the whole game and must not be rebuilt when the filter changes.</summary>
+    private Dictionary<(int Ep, int File), List<EnemyAssembly>>? _bodiesByLevel;
+
+    private List<EnemyAssembly> BodiesIn(int episodeIdx, int fileNum)
+    {
+        _bodiesByLevel ??= new Dictionary<(int, int), List<EnemyAssembly>>();
+        if (_bodiesByLevel.TryGetValue((episodeIdx, fileNum), out var cached)) return cached;
+
+        var list = new List<EnemyAssembly>();
+        try
+        {
+            var ep = _gd!.Episodes[episodeIdx];
+            var ed = TryEnemyDataFor(ep);
+            if (ed != null)
+                list = EnemyAssembly.Find(_gd.LoadLevel(ep, fileNum), ed, "", episodeIdx);
+        }
+        catch { /* a level that will not parse has no bodies */ }
+        _bodiesByLevel[(episodeIdx, fileNum)] = list;
+        return list;
+    }
+
+    /// <summary>
+    /// The body a spawn belongs to: the group the level laid down under its link number around
+    /// its moment. Null when the enemy flies alone -- <see cref="EnemyAssembly.Find"/> only keeps
+    /// groups of two or more, which is exactly the distinction wanted here. Matching is on a part
+    /// (by entry id, or by sprite for the entries events 49-52 synthesise) plus the link, then the
+    /// nearest spawn in time, since one link number is reused all level long.
+    /// </summary>
+    private EnemyAssembly? FindBody(int episodeIdx, int fileNum, int linkNum, ushort time,
+        int enemyId, int sprite)
+    {
+        EnemyAssembly? best = null;
+        int bestGap = int.MaxValue;
+        foreach (var a in BodiesIn(episodeIdx, fileNum))
+        {
+            if (!a.Links.Contains(linkNum)) continue;
+            bool holds = enemyId != 0
+                ? a.Parts.Any(p => p.EnemyId == enemyId)
+                : a.Parts.Any(p => p.EnemyId == 0 && p.Sprite == sprite);
+            if (!holds) continue;
+            int gap = Math.Abs(a.Time - time);
+            if (gap < bestGap) { bestGap = gap; best = a; }
+        }
+        return best;
     }
 
     private List<EnemyAssembly> Assemblies()

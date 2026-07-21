@@ -293,6 +293,23 @@ public sealed class OplChip
     /// </summary>
     public void GetSample(Span<short> dst) => adlib_getsample(dst, dst.Length);
 
+    /// <summary>
+    /// How loud a channel's voice is right now: its operators' envelope times their level,
+    /// i.e. the swing the waveform is being multiplied by. Not part of the emulation --
+    /// the music window's note view reads it to find where a released note really stops
+    /// sounding, because a key-off only starts the release phase and the chip sings on.
+    /// </summary>
+    public double ChannelEnvelope(int channel)
+    {
+        if ((uint)channel >= NUM_CHANNELS) return 0.0;
+        // op[c] is operator 1, op[c + 9] operator 2. Under frequency modulation only the
+        // second is heard; the additive mode the feedback register's bit 0 selects sums both.
+        double level = op[channel + 9].step_amp * op[channel + 9].vol;
+        if ((adlibreg[ARC_FEEDBACK + channel] & 1) != 0)
+            level += op[channel].step_amp * op[channel].vol;
+        return level;
+    }
+
     /// <summary>Reads the status port (C: adlib_reg_read).</summary>
     public byte ReadRegister(int port) => adlib_reg_read(port);
 

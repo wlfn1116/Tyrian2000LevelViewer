@@ -253,7 +253,7 @@ public sealed unsafe class MusicPlayer : IDisposable
     public static void Prepare(MusicTrack? track)
     {
         if (track == null) return;
-        try { _ = track.Lds; _ = track.Midi; } catch { /* Play reports an unplayable song */ }
+        try { _ = track.Lds; _ = track.Sequence; } catch { /* Play reports an unplayable song */ }
     }
 
     /// <summary>Loads and starts a song from the top.</summary>
@@ -264,13 +264,12 @@ public sealed unsafe class MusicPlayer : IDisposable
             if (track == null) { StopLocked(); return; }
             if (!ReferenceEquals(track, _track))
             {
-                // track.Midi / track.Lds decode on first touch. Prepare() is meant to have
+                // track.Sequence / track.Lds decode on first touch. Prepare() is meant to have
                 // done that off the lock already; if it has not, this is the fallback and it
                 // will cost the mixer a buffer.
                 var lds = track.Lds;
-                var midi = track.Midi;
                 _track = track;
-                _seq = MidiSequence.From(midi);
+                _seq = track.Sequence;
                 _lds.Load(lds);
                 _loopA = _loopB = -1;
                 LoopCount = 0;

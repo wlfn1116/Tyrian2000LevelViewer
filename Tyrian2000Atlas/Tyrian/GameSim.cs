@@ -398,6 +398,18 @@ public sealed class GameSim
         return -1;
     }
 
+    /// <summary>
+    /// Is <paramref name="slot"/> still the live enemy an earlier <see cref="CollectEnemies"/>
+    /// reported there? A slot is reused the moment its occupant dies, so a target picked on an
+    /// earlier frame — which is what the atlas aims a click with, the frame it was drawn on
+    /// being the one the user actually saw — has to prove it is still the same thing before it
+    /// is shot at. Type and link together are as much identity as a slot carries; two spawns
+    /// that agree on both are interchangeable anyway.
+    /// </summary>
+    public bool SlotHolds(int slot, int enemyId, int linkNum) =>
+        (uint)slot < (uint)_enemy.Length && _avail[slot] == 0 &&
+        _enemy[slot].enemytype == enemyId && _enemy[slot].linknum == linkNum;
+
     /// <summary>Damage that outlives any armour value the data can hold (the engine's cap is
     /// 255), so one hit always reaches the kill branch.</summary>
     public const int InstantKillDamage = 30000;

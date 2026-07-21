@@ -22,6 +22,10 @@ namespace T2A;
 ///   SASpecialWeapon / SASpecialWeaponB (varz.c:47-49), and a front-weapon pickup in that mode
 ///   also swaps in a fixed special (specialArcadeWeapon, varz.c:63).
 ///
+/// The twiddle table is also read the other way round, under a hull's stats in the Ships tab:
+/// <see cref="DrawShipTwiddleBlock"/> lists the up-to-three codes that ship can fly, with the
+/// special each one fires and what it costs. Ships and specials therefore point at each other.
+///
 /// All of it is drawn with the same rounded rows as the rest of the browser, and every level or
 /// enemy named is a click through to it.
 /// </summary>
@@ -62,7 +66,8 @@ public sealed unsafe partial class App
     };
 
     /// <summary>shipCombos[19][3] (varz.c:158): up to three 1-based <see cref="KeyboardCombos"/>
-    /// rows each ship can perform. Indexed by ship id (the Ships table index); 0 = no combo.</summary>
+    /// rows each ship can perform. Indexed by ship id (the Ships table index); 0 = no combo.
+    /// Rows past <see cref="TwiddleShipMax"/> are never read -- see there.</summary>
     private static readonly byte[][] ShipCombos =
     {
         new byte[] { 5, 4, 7 },   // 0 (2nd Player ship)
@@ -86,10 +91,26 @@ public sealed unsafe partial class App
         new byte[] { 0, 0, 0 },   // 18 Rum Bottle
     };
 
-    /// <summary>shipCombosB[21] (varz.c:153): in Super Tyrian mode (the ']e' engage levels) EVERY
-    /// ship can perform these 21 combos instead of its own three (mainint.c:4718-4723).</summary>
+    /// <summary>shipCombosB[21] (varz.c:153): Super Tyrian mode swaps a ship's own three combos for
+    /// these 21 (mainint.c:4718-4723). It always flies <see cref="SuperTyrianShip"/>, so in practice
+    /// these are the Stalker 21.126's move list rather than "every ship's".</summary>
     private static readonly byte[] ShipCombosB =
         { 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 7, 8, 5, 25, 14, 4, 6, 3, 9, 2, 26 };
+
+    /// <summary>The ship Super Tyrian always puts you in: The Stalker 21.126, both for the ']e'
+    /// levels (tyrian2.c:4262) and for the ENGAGE title code (tyrian2.c:5540). Its own shipCombos
+    /// row is empty -- the 21 <see cref="ShipCombosB"/> twiddles ARE what it can do.</summary>
+    private const int SuperTyrianShip = 13;
+
+    /// <summary>The ship ids the twiddle reader looks at combos for at all. JE_SFCodes returns
+    /// before it reads a single key when <c>ship >= 15</c> (mainint.c:4680-4687), so the last four
+    /// hulls cannot twiddle whatever <see cref="ShipCombos"/> holds for them -- and it holds rows
+    /// for two of them. The same guard folds player 2 onto row 0 (the "2nd Player ship" row)
+    /// whichever hull they are actually flying.</summary>
+    private const int TwiddleShipMax = 15;
+
+    /// <summary>The shipCombos row player 2 is folded onto, whatever they fly.</summary>
+    private const int PlayerTwoCombos = 0;
 
     // Super-Arcade (SA = 9): the arcade ships and the special each carries (varz.c:46-61).
     private static readonly byte[] SAShip = { 3, 1, 5, 10, 2, 11, 12, 15, 17 };
@@ -163,8 +184,8 @@ public sealed unsafe partial class App
     };
 
     /// <summary>Every combo that fires this special: the row, the ships whose own three include it,
-    /// and whether it is also one of the 21 Super Tyrian combos (usable by any ship in an engage
-    /// level).</summary>
+    /// and whether it is also one of the 21 Super Tyrian combos (see <see cref="SuperTyrianLevels"/>
+    /// for where those actually go off).</summary>
     private List<(byte[] Combo, List<int> ShipIds, bool SuperTyrian)> TwiddlesForSpecial(int specialId)
     {
         var result = new List<(byte[], List<int>, bool)>();
@@ -182,8 +203,63 @@ public sealed unsafe partial class App
         return result;
     }
 
-    /// <summary>The engage-mode (Super Tyrian) levels, where any ship gets the shipCombosB
-    /// twiddles -- ** ALE **, TIME WAR, SQUADRON, read straight off the flow graph's ']e' flag.</summary>
+    /// <summary>The other way round: the <see cref="KeyboardCombos"/> rows one hull can perform --
+    /// its own up-to-three (<see cref="ShipCombos"/>), or the 21 <see cref="ShipCombosB"/> for the
+    /// Stalker 21.126, whose own row is empty because Super Tyrian's list is what it flies with.
+    /// Says nothing about whether the reader ever gets there; that is <see cref="TwiddleShipMax"/>.
+    /// </summary>
+    private static List<byte[]> TwiddlesForShip(int shipId)
+    {
+        byte[] combos = shipId == SuperTyrianShip ? ShipCombosB
+            : shipId >= 0 && shipId < ShipCombos.Length ? ShipCombos[shipId]
+            : Array.Empty<byte>();
+        var rows = new List<byte[]>();
+        foreach (byte c in combos)
+            if (c > 0 && c <= KeyboardCombos.Length) rows.Add(KeyboardCombos[c - 1]);
+        return rows;
+    }
+
+    /// <summary>Whether one of player 2's three fires this special. They are folded onto
+    /// shipCombos row 0 whatever hull they picked, so their move list never changes.</summary>
+    private static bool PlayerTwoTwiddles(int specialId) =>
+        ShipCombos[PlayerTwoCombos].Any(c => c > 0 && TwiddleSpecialId(KeyboardCombos[c - 1]) == specialId);
+
+    private static string ShipName(ItemData d, int id)
+    {
+        string n = id >= 0 && id < d.Ships.Length && d.Ships[id] != null ? d.Ships[id].Name.Trim() : "";
+        return n.Length > 0 ? n : $"ship {id}";
+    }
+
+    private static bool SpecialExists(ItemData d, int id) =>
+        id > 0 && id < d.Specials.Length && d.Specials[id] != null;
+
+    /// <summary>Whether a special has a shop icon at all. Most of the twiddle-only ones have
+    /// none (they are never on a shelf to need one), and a column of empty gutters reads as
+    /// broken art rather than as "no icon" -- so a list of them drops the gutter instead.
+    /// The test is <see cref="DrawEnemyFrameCentered"/>'s own.</summary>
+    private static bool SpecialHasIcon(ItemData d, int id) =>
+        SpecialExists(d, id) && d.Specials[id].ItemGraphic is > 0 and not 999;
+
+    private static string SpecialName(ItemData d, int id)
+    {
+        string n = SpecialExists(d, id) ? d.Specials[id].Name.Trim() : "";
+        return n.Length > 0 ? n : $"special {id}";
+    }
+
+    /// <summary>A twiddle's cost line, or "free" left as it reads.</summary>
+    private static string TwiddleCostText(ItemData d, int specialId)
+    {
+        if (!SpecialExists(d, specialId)) return "cost unknown";
+        string cost = TwiddleCost(d.Specials[specialId].Pwr);
+        return cost == "free" ? "free" : $"costs {cost}";
+    }
+
+    /// <summary>The campaign levels a shipCombosB twiddle can actually go off in. The flow graph's
+    /// ']e' flag (engageMode, which turns superTyrian on) marks three -- ** ALE **, TIME WAR and
+    /// SQUADRON -- but the other two carry ']g' as well, and galaga mode skips JE_doSpecialShot
+    /// outright (mainint.c:7234), so nothing a twiddle arms there ever fires. That leaves TIME WAR.
+    /// Past the campaign, Super Tyrian is a whole-game mode -- the ENGAGE title code, unlocked by
+    /// beating TIME WAR (newSuperTyrianGame, tyrian2.c:5497) -- and every level plays that way.</summary>
     private List<(int EpisodeIdx, int FileNum, string Name)> SuperTyrianLevels()
     {
         var levels = new List<(int, int, string)>();
@@ -193,7 +269,7 @@ public sealed unsafe partial class App
             var g = _gd.GetGraph(_gd.Episodes[e]);
             if (g == null) continue;
             foreach (var n in g.Nodes)
-                if (n.Engage && n.Kind == GraphNodeKind.Level &&
+                if (n.Engage && !n.Galaga && n.Kind == GraphNodeKind.Level &&
                     !levels.Any(l => l.Item1 == e && l.Item2 == n.LvlFileNum))
                     levels.Add((e, n.LvlFileNum, n.Title.Trim()));
         }
@@ -228,7 +304,7 @@ public sealed unsafe partial class App
     /// retargets, in a level, at a time. The carriers share the event's linknum, so seeking to
     /// the moment lands on them; the pickiest of them (most armour) names the row.</summary>
     private readonly record struct DropSite(int EpisodeIdx, int Episode, int FileNum, string Level,
-        ushort Time, int LinkNum, string Boss, int[] Carriers);
+        ushort Time, int LinkNum, int BossId, int[] Carriers);
 
     private List<DropSite>? _specialDropSites;
 
@@ -270,17 +346,13 @@ public sealed unsafe partial class App
                     int boss = carriers[0];
                     foreach (int c in carriers) if (ed.Get(c).Armor > ed.Get(boss).Armor) boss = c;
                     sites.Add(new DropSite(e, ep.Number, li.FileNum, name, ev.Time, link,
-                        EnemyName(ed, boss), carriers.ToArray()));
+                        boss, carriers.ToArray()));
                 }
             }
         }
         _specialDropSites = sites;
         return sites;
     }
-
-    /// <summary>A short name for an enemy entry: its own (unused here) has none, so fall back to
-    /// the id -- the enemy browser is where the full picture lives.</summary>
-    private static string EnemyName(EnemyData ed, int id) => $"enemy #{id}";
 
     // ---- UI ------------------------------------------------------------
 
@@ -303,7 +375,7 @@ public sealed unsafe partial class App
         if (twiddles.Any(t => t.ShipIds.Count > 0 || t.SuperTyrian))
         {
             ImGui.Dummy(new Vector2(0, 4f));
-            DrawTwiddleBlock(d, twiddles, TwiddleCost(d.Specials[specialId].Pwr));
+            DrawTwiddleBlock(d, specialId, twiddles, TwiddleCost(d.Specials[specialId].Pwr));
         }
 
         var arcade = ArcadeShipsForSpecial(specialId);
@@ -331,16 +403,10 @@ public sealed unsafe partial class App
         ImGui.PopTextWrapPos();
         if (sites.Count == 0) return;
 
-        const float rowH = 30f;
-        int shownRows = 0;
+        const float rowH = 34f;
+        BeginRowScroll("##specdroplist", sites.Count, rowH, reserve: 110f);   // twiddles + arcade follow
         foreach (var s in sites)
         {
-            if (shownRows >= MaxOutpostRows)
-            {
-                ImGui.TextColored(ColorOf(UiFaint), $"   +{sites.Count - shownRows} more");
-                break;
-            }
-            shownRows++;
             var box = UiRow($"##drop{s.EpisodeIdx}_{s.FileNum}_{s.Time}_{s.LinkNum}", false, AcEnemy, rowH);
             if (box.Clicked)
             {
@@ -348,17 +414,27 @@ public sealed unsafe partial class App
                 _pendingJump = new MapJump(s.Time, s.Carriers);
             }
             if (box.Hovered) ImGui.SetTooltip("open this level at the frame the drop is armed\n(the formation is on screen then)");
+            // The formation's biggest part, so the row shows what to shoot rather than just its id.
+            DrawEnemyThumb(ImGui.GetWindowDrawList(), s.EpisodeIdx, s.BossId,
+                new Vector2(box.Min.X + 7f, box.Min.Y + 1f), new Vector2(box.Min.X + 47f, box.Max.Y - 1f));
             string epTag = _allEpisodes ? $"  ·  Ep {s.Episode}" : "";
-            RowText(box, 10f, $"{s.Level}  #{s.FileNum:00}",
-                $"{s.Boss}  ·  link {s.LinkNum}  ·  armed at t={s.Time}{epTag}", AcEnemy, false, 14f);
+            RowText(box, 52f, $"{s.Level}  #{s.FileNum:00}",
+                $"enemy #{s.BossId}  ·  link {s.LinkNum}  ·  armed at t={s.Time}{epTag}", AcEnemy, false, 14f);
         }
+        ImGui.EndChild();
     }
 
-    private void DrawTwiddleBlock(ItemData d, List<(byte[] Combo, List<int> ShipIds, bool SuperTyrian)> twiddles, string cost)
+    private void DrawTwiddleBlock(ItemData d, int specialId,
+        List<(byte[] Combo, List<int> ShipIds, bool SuperTyrian)> twiddles, string cost)
     {
         UiSection("twiddle codes", AcTwiddle, $"costs {cost}");
         var engage = SuperTyrianLevels();
-        string engageNames = engage.Count > 0 ? string.Join(", ", engage.Select(l => l.Name)) : "Super Tyrian levels";
+        string stalker = SuperTyrianShip < d.Ships.Length ? d.Ships[SuperTyrianShip].Name.Trim() : "";
+        if (stalker.Length == 0) stalker = "The Stalker 21.126";
+        // The one campaign level it works in, then the mode at large.
+        string where = engage.Count > 0
+            ? string.Join(", ", engage.Select(l => l.Name)) + ", any level in Super Tyrian mode"
+            : "any level in Super Tyrian mode";
 
         const float rowH = 34f;
         foreach (var (combo, ships, superT) in twiddles)
@@ -366,22 +442,131 @@ public sealed unsafe partial class App
             string seq = TwiddleSequence(combo);
             foreach (int shipId in ships)
             {
-                string ship = shipId < d.Ships.Length ? d.Ships[shipId].Name.Trim() : $"ship {shipId}";
-                if (ship.Length == 0) ship = $"ship {shipId}";
-                var box = UiRow($"##tw{shipId}_{seq.GetHashCode()}", false, AcTwiddle, rowH);
+                // The table gives two hulls past the reader's cut-off a row apiece. Naming them
+                // without saying so would send you off to fly a combo that cannot go off.
+                bool dead = shipId >= TwiddleShipMax;
+                uint ac = dead ? UiDim : AcTwiddle;
+                var box = UiRow($"##tw{shipId}_{seq.GetHashCode()}", false, ac, rowH);
                 if (box.Clicked) ShowItemTab(0, shipId);
-                if (box.Hovered) ImGui.SetTooltip("open this ship in the Ships tab");
-                RowText(box, 10f, ship, seq, AcTwiddle, false, 14f);
+                if (box.Hovered) ImGui.SetTooltip(dead
+                    ? "shipCombos gives this hull the combo, but the reader gives up on any ship\n" +
+                      "past #14 before it looks at a key -- it can never fire\nopens the ship in the Ships tab"
+                    : "open this ship in the Ships tab");
+                string trail = dead ? "never fires" : "";
+                RowText(box, 10f, ShipName(d, shipId), seq, ac, false,
+                    dead ? TrailRoom(trail) + 14f : 14f);
+                if (dead) RowTrail(box, trail, Shade(ac, 0.95f));
             }
-            // In an engage level every ship gets the shipCombosB set, so this combo is open to all.
+            // Super Tyrian swaps whatever ship's three combos for these 21 -- and it always flies
+            // the Stalker 21.126, so the combo belongs to that ship there, not to "any ship".
             if (superT)
             {
                 var box = UiRow($"##twst{seq.GetHashCode()}", false, AcGo, rowH);
-                if (box.Clicked && engage.Count > 0) SelectLevelFile(engage[0].EpisodeIdx, engage[0].FileNum);
-                if (box.Hovered) ImGui.SetTooltip("any ship can twiddle this in a Super Tyrian level (engage mode)\n" +
-                    (engage.Count > 0 ? $"opens {engage[0].Name}" : ""));
-                RowText(box, 10f, "any ship  ·  Super Tyrian", $"{seq}   ·   {engageNames}", AcGo, false, 14f);
+                if (box.Clicked) ShowItemTab(0, SuperTyrianShip);
+                if (box.Hovered) ImGui.SetTooltip(
+                    "Super Tyrian (ENGAGE mode) flies the Stalker 21.126 with all 21 combos\n" +
+                    (engage.Count > 0 ? $"in-campaign that is {engage[0].Name}; " : "") +
+                    "the ENGAGE title code plays the whole game that way\nopens the ship in the Ships tab");
+                RowText(box, 10f, $"{stalker}  ·  Super Tyrian", $"{seq}   ·   {where}", AcGo, false, 14f);
             }
+        }
+
+        // The rows above are hulls, and player 2 never flies their list -- so a special on the
+        // 2nd-player row is one player 2 always has, on whatever they picked in the shop.
+        if (PlayerTwoTwiddles(specialId))
+        {
+            ImGui.Dummy(new Vector2(0, 3f));
+            ImGui.PushTextWrapPos(0f);
+            ImGui.TextColored(ColorOf(UiFaint),
+                "Player 2 can twiddle it whatever they fly: the reader folds them onto the 2nd-player " +
+                "row, which is the same three combos for every hull.");
+            ImGui.PopTextWrapPos();
+        }
+    }
+
+    /// <summary>
+    /// The same table read from the ship's side, under a hull's stats: the up-to-three twiddles it
+    /// can fly, each naming the special it fires and what that costs. Three hulls are not the plain
+    /// case -- the Stalker 21.126 borrows Super Tyrian's 21, ships past #14 are cut off by the
+    /// reader's own guard, and row 0 is player 2's list rather than a hull's.
+    /// </summary>
+    private void DrawShipTwiddleBlock(ItemData d, int shipId)
+    {
+        var rows = TwiddlesForShip(shipId);
+        bool superT = shipId == SuperTyrianShip;
+        bool unreachable = shipId >= TwiddleShipMax;
+        bool p2 = shipId == PlayerTwoCombos;
+        uint ac = unreachable ? UiDim : AcTwiddle;
+
+        ImGui.Dummy(new Vector2(0, 4f));
+        UiSection("twiddle codes", ac, unreachable || rows.Count == 0 ? "none"
+            : $"{rows.Count} code{(rows.Count == 1 ? "" : "s")}");
+
+        ImGui.PushTextWrapPos(0f);
+        if (unreachable)
+            ImGui.TextColored(ColorOf(UiFaint), rows.Count > 0
+                ? "The reader gives up on any ship past #14 before it looks at a single key, so this hull " +
+                  "cannot twiddle at all -- the rows shipCombos still carries for it are dead data, listed " +
+                  "here as that and nothing more."
+                : "The reader gives up on any ship past #14 before it looks at a single key, and shipCombos " +
+                  "has nothing for this hull either. It cannot twiddle.");
+        else if (p2)
+            ImGui.TextColored(ColorOf(UiFaint),
+                "This row of shipCombos is not a hull anyone buys: player 2 is folded onto it whatever ship " +
+                "they are flying, so these three are player 2's whole move list for the game.");
+        else if (superT)
+            ImGui.TextColored(ColorOf(UiFaint),
+                "Its own shipCombos row is empty. This is the ship Super Tyrian always puts you in, and " +
+                "Super Tyrian swaps any hull's three combos for these 21 -- so this list is what it flies " +
+                "with, and the only place the 21 are ever reachable.");
+        else if (rows.Count == 0)
+            ImGui.TextColored(ColorOf(UiFaint),
+                "shipCombos has no rows for this hull, so it fires only the special it has equipped.");
+        else
+            ImGui.TextColored(ColorOf(UiFaint),
+                "Fly the sequence and the special goes off without being equipped, paid for out of shield " +
+                "or armour. A step is a direction, a direction with fire held, or letting go of everything.");
+        ImGui.PopTextWrapPos();
+        if (rows.Count == 0) return;
+
+        const float rowH = 34f;
+        // Most twiddle-only specials have no shop icon; keep the gutter only if one of them does.
+        bool icons = rows.Any(c => SpecialHasIcon(d, TwiddleSpecialId(c)));
+        float textX = icons ? 50f : 10f;
+        // The Stalker's 21 would otherwise push the whole "where you get it" block off the pane.
+        BeginRowScroll("##shiptwiddles", rows.Count, rowH, reserve: 92f);
+        for (int i = 0; i < rows.Count; i++)
+        {
+            int sid = TwiddleSpecialId(rows[i]);
+            var box = UiRow($"##shtw{i}", false, ac, rowH);
+            if (box.Clicked && SpecialExists(d, sid)) ShowItemTab(5, sid);
+            if (box.Hovered)
+                ImGui.SetTooltip(unreachable
+                    ? "the table gives this hull the combo, but it can never fire it\nopens the special in the Specials tab"
+                    : "open this special in the Specials tab");
+            if (icons && SpecialHasIcon(d, sid))
+                DrawItemIconFor(ImGui.GetWindowDrawList(), d, 5, sid,
+                    new Vector2(box.Min.X + 7f, box.Min.Y + 2f),
+                    new Vector2(box.Min.X + 45f, box.Max.Y - 2f), 1f);
+            string trail = unreachable ? "never fires" : $"#{sid}";
+            RowText(box, textX, SpecialName(d, sid),
+                $"{TwiddleSequence(rows[i])}   ·   {TwiddleCostText(d, sid)}",
+                ac, false, TrailRoom(trail) + 12f);
+            RowTrail(box, trail, Shade(ac, unreachable ? 0.95f : 1.1f));
+        }
+        ImGui.EndChild();
+
+        // Player 2 never gets the hull's own list, which is easy to miss when the pane is a ship.
+        if (!p2 && !unreachable)
+        {
+            var p2Rows = TwiddlesForShip(PlayerTwoCombos)
+                .Select(c => SpecialName(d, TwiddleSpecialId(c))).ToList();
+            ImGui.Dummy(new Vector2(0, 3f));
+            ImGui.PushTextWrapPos(0f);
+            ImGui.TextColored(ColorOf(UiFaint),
+                "In two players this is player 1's list only -- player 2 twiddles " +
+                string.Join(", ", p2Rows) + " out of the 2nd-player row whatever they fly.");
+            ImGui.PopTextWrapPos();
         }
     }
 

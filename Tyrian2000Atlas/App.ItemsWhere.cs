@@ -26,6 +26,10 @@ namespace T2A;
 ///
 /// Both are filtered to the episodes the atlas is showing, so a click always lands on a level
 /// that is in the browse list.
+///
+/// A handful of items are in neither set because the engine hands them over in code rather than
+/// through a shelf or a pickup; <see cref="DrawLoopBackBlock"/> is the one such case that is not
+/// a cheat or a mode -- the SuperCarrot set you can be given for looping the campaign.
 /// </summary>
 public sealed unsafe partial class App
 {
@@ -309,6 +313,10 @@ public sealed unsafe partial class App
     /// </summary>
     private void DrawItemAppearances(ItemData d)
     {
+        // The appended two-player craft has no item id to look up in any shelf or drop table, and
+        // its own detail already says where it comes from -- don't run the sold/found lookups on it.
+        if (_itemTab == 0 && IsSynthShip(d, _itemSelected)) return;
+
         int tab = _itemTab, id = _itemSelected;
         bool sellable = tab != 5;                 // specials are never in a ']I' list
         bool droppable = tab is 1 or 2 or 5;      // ports, sidekicks and specials have pickup codes
@@ -321,6 +329,15 @@ public sealed unsafe partial class App
             ? ItemFoundIn(tab, id).Where(s => shown.Contains(s.EpisodeIdx)).ToList()
             : NoFound;
 
+        // Both Banana Blasts have neither a shelf nor a pickup, so the loop is their whole answer:
+        // lead with it there rather than making the reader scroll past two "none"s to reach it.
+        bool loopLeads = sold.Count == 0 && found.Count == 0 && InLoopBackSet(tab, id);
+        if (loopLeads)
+        {
+            DrawLoopBackBlock(d, tab, id);
+            ImGui.Dummy(new Vector2(0, 4f));
+        }
+
         if (sellable) DrawSoldAtBlock(sold);
         if (droppable)
         {
@@ -329,15 +346,34 @@ public sealed unsafe partial class App
         }
         // A special has three more ways in -- enemy drops, twiddle codes, arcade loadouts.
         if (tab == 5) DrawSpecialExtras(d, id);
+        if (!loopLeads) DrawLoopBackBlock(d, tab, id);
     }
 
     /// <summary>More outposts than this in one episode and the sold-at list folds to a single
     /// summary row -- a ship or starter weapon is on so many that naming each is just noise.</summary>
     private const int SoldCollapse = 6;
 
-    /// <summary>How many levels a found-in list draws before folding the rest into a "+N more"
-    /// line, so a pickup dropped by a common enemy cannot fill the whole pane.</summary>
+    /// <summary>How tall a row list gets, in rows, before it starts scrolling instead -- so a
+    /// pickup dropped by a common enemy cannot fill the whole pane.</summary>
     private const int MaxOutpostRows = 14;
+
+    /// <summary>
+    /// Open a row list that scrolls rather than truncating: every entry stays reachable instead of
+    /// disappearing behind a "+N more" line. It takes the room it needs up to
+    /// <see cref="MaxOutpostRows"/> rows, but never more than the pane has left (less
+    /// <paramref name="reserve"/> for whatever section follows) -- otherwise the box's own scrollbar
+    /// ends up below the fold and you have to scroll the page to reach the scroller. A list that
+    /// fits gets a box of exactly its own height and looks no different.
+    /// Always pair with <c>ImGui.EndChild()</c>.
+    /// </summary>
+    private static void BeginRowScroll(string id, int rowCount, float rowH, float reserve = 0f)
+    {
+        // UiRow consumes exactly rowH with no item spacing, so N rows are N * rowH tall.
+        float h = Math.Min(rowCount, MaxOutpostRows) * rowH;
+        float room = ImGui.GetContentRegionAvail().Y - reserve;
+        if (room >= rowH * 3f) h = Math.Min(h, room);   // a pane too short to split is left alone
+        ImGui.BeginChild(id, new Vector2(0, h));
+    }
 
     private void DrawSoldAtBlock(List<SoldSite> sold)
     {
@@ -425,15 +461,9 @@ public sealed unsafe partial class App
 
         int most = groups.Max(g => g.Count);
         const float rowH = 30f;
-        int shownRows = 0;
+        BeginRowScroll("##foundinlist", groups.Count, rowH);
         foreach (var g in groups)
         {
-            if (shownRows >= MaxOutpostRows)
-            {
-                ImGui.TextColored(ColorOf(UiFaint), $"   +{groups.Count - shownRows} more level{(groups.Count - shownRows == 1 ? "" : "s")}");
-                break;
-            }
-            shownRows++;
             var box = UiRow($"##fnd{g.EpisodeIdx}_{g.FileNum}", false, AcRoutes, rowH);
             if (box.Clicked)
             {
@@ -455,5 +485,82 @@ public sealed unsafe partial class App
             MeterBar(dl, bar, bar + new Vector2(barW, 7f), g.Count / (float)most, AcRoutes);
             if (trail.Length > 0) RowTrail(box, trail, Shade(AcRoutes, 1.1f));
         }
+        ImGui.EndChild();
+    }
+
+    // =====================================================================
+    // The loop-back set (mainint.c:1069-1091)
+    // =====================================================================
+
+    /// <summary>What the wrap-around roll fits, in the order JE_nextEpisode writes it: the item,
+    /// the slot it lands in, and what else changes along with it.</summary>
+    private static readonly (int Tab, int Id, string Slot, string Note)[] LoopBackSet =
+    {
+        (0, 2,  "ship",         "replaces whatever you finished the game in"),
+        (1, 23, "front weapon", "power reset to 1"),
+        (1, 24, "rear weapon",  "power reset to 1  ·  player 2 gets this one too"),
+    };
+
+    /// <summary>The Banana Bomb. Its name puts it with the set above and the SuperCarrot really
+    /// does carry it -- but only in Arcade (SASpecialWeapon, varz.c:47). The roll never writes
+    /// <c>items.special</c> (mainint.c:1077-1090), so a looped run keeps the special it had.</summary>
+    private const int BananaBombSpecial = 11;
+
+    private static readonly uint AcLoop = Gfx.Rgba(255, 150, 70);   // carrot
+
+    private static bool InLoopBackSet(int tab, int id) =>
+        LoopBackSet.Any(g => g.Tab == tab && g.Id == id);
+
+    /// <summary>
+    /// The one loadout the game hands over outright. The campaign always comes back round: clearing
+    /// the last available episode plays the credits and then wraps to Episode 1 (JE_findNextEpisode,
+    /// episodes.c:692) rather than stopping there. One lap in six, JE_nextEpisode refits player 1
+    /// with the SuperCarrot and both Banana Blasts before that first level loads. The ship is on
+    /// three shelves besides, at 65,000 credits, but the two Banana Blasts are stocked by no outpost
+    /// and dropped by no level -- without this block they read as ports that exist in the tables and
+    /// nowhere else.
+    /// </summary>
+    private void DrawLoopBackBlock(ItemData d, int tab, int id)
+    {
+        bool inSet = InLoopBackSet(tab, id);
+        bool bomb = tab == 5 && id == BananaBombSpecial;
+        if (!inSet && !bomb) return;
+
+        ImGui.Dummy(new Vector2(0, 4f));
+        UiSection("carried into the loop", AcLoop, bomb ? "not part of it" : "1 run in 6");
+
+        ImGui.PushTextWrapPos(0f);
+        ImGui.TextColored(ColorOf(UiFaint),
+            "The game always comes back round: finish the last episode, watch the credits, and " +
+            "Episode 1 starts over in the loadout you ended in. One lap in six -- an mt_rand() roll " +
+            "-- swaps this in first instead, no shop and no pickup involved. The wrap also marks the " +
+            "run as repeated, which keeps it off the high-score table from then on.");
+        if (bomb)
+            ImGui.TextColored(ColorOf(UiFaint),
+                "The special slot is left exactly as it was, so this weapon is not handed out with " +
+                "them -- the SuperCarrot only flies with it in Arcade.");
+        ImGui.PopTextWrapPos();
+
+        const float rowH = 30f;
+        foreach (var (t, i, slot, note) in LoopBackSet)
+        {
+            if (!ItemExists(d, t, i)) continue;
+            bool self = t == tab && i == id;
+            string name = (t == 0 ? d.Ships[i].Name : d.Ports[i].Name).Trim();
+            if (name.Length == 0) name = $"item {i}";
+            // Drawn unselected even on the item's own pane. The set is three lines read as one
+            // thing, and a filled row in the middle of it reads as a live selection to act on
+            // rather than as "you are here" -- which the pane's own title already says.
+            var box = UiRow($"##loop{t}_{i}", false, AcLoop, rowH);
+            if (box.Clicked && !self) ShowItemTab(t, i);
+            if (box.Hovered && !self) ImGui.SetTooltip("open this one in its own tab");
+            RowText(box, 10f, $"{name}  #{i}", $"{slot}  ·  {note}", AcLoop, false, 14f);
+        }
+
+        ImGui.PushTextWrapPos(0f);
+        ImGui.TextColored(ColorOf(UiFaint),
+            "In two players the roll reaches player 2's rear port and nothing else -- their ship, " +
+            "front weapon and both powers are left alone.");
+        ImGui.PopTextWrapPos();
     }
 }

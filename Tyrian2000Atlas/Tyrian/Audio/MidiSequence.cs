@@ -27,6 +27,16 @@ public readonly record struct SeqNote(uint Start, uint End, byte Lane, byte Chan
     public uint Length => End > Start ? End - Start : 1;
 
     /// <summary>
+    /// Where the note stops being heard, which is past <see cref="End"/> whenever the OPL is
+    /// still ringing -- see <see cref="MidiSequence.MeasureRingOut"/>. Equal to <c>End</c> when
+    /// the voice really does stop with the key, and when there is no OPL measurement.
+    /// </summary>
+    public uint Ring { get; init; }
+
+    /// <summary>Ticks the note sings on for after its key is released. 0 for most notes.</summary>
+    public uint RingLength => Ring > End ? Ring - End : 0;
+
+    /// <summary>
     /// True when the next note on this lane repeats this pitch and starts the moment this one
     /// ends. The conversion runs a note up to whatever follows it, so a drum part -- one pitch
     /// struck over and over -- comes out as notes that tile the timeline end to start. Drawn
@@ -49,8 +59,17 @@ public sealed class MidiSequence
     public const int LaneCount = 9;
 
     public SeqEvent[] Events { get; private set; } = Array.Empty<SeqEvent>();
-    public SeqNote[] Notes { get; private set; } = Array.Empty<SeqNote>();
     public SeqMarker[] Markers { get; private set; } = Array.Empty<SeqMarker>();
+
+    private SeqNote[] _notes = Array.Empty<SeqNote>();
+
+    /// <summary>
+    /// The notes the note views draw. Replaced whole rather than edited in place:
+    /// <see cref="MeasureRingOut"/> runs on its own thread and publishes a finished array, so
+    /// a frame drawn while it is in flight sees every note without its ring-out rather than
+    /// some notes with and some without.
+    /// </summary>
+    public SeqNote[] Notes => Volatile.Read(ref _notes);
 
     /// <summary>Last event tick.</summary>
     public uint Duration { get; private set; }
@@ -95,6 +114,11 @@ public sealed class MidiSequence
     {
         for (int i = 0; i < LaneCount; i++) { LanePrograms[i] = new List<int>(); LaneChannel[i] = -1; }
     }
+
+    /// <summary>True once <see cref="MeasureRingOut"/> has published the notes' ring-out.
+    /// Read it before <see cref="Notes"/>: false only ever means the tails are not in yet.</summary>
+    public bool HasRingOut => _hasRingOut;
+    private volatile bool _hasRingOut;
 
     /// <summary>Flattens a converted song. Returns null for a song that would not convert.</summary>
     public static MidiSequence? From(LdsMidiSong? song)
@@ -226,17 +250,110 @@ public sealed class MidiSequence
         // Mark the notes a following strike of the same pitch runs into. One backward pass:
         // the list is in start order, so the last note seen per (lane, key) is the next one
         // for whatever came before it.
+        // The same pass seats Ring on the key-off, which is where it stays unless an OPL
+        // measurement moves it out (MeasureRingOut).
         var next = new Dictionary<(byte Lane, byte Key), uint>();
         for (int i = notes.Count - 1; i >= 0; i--)
         {
             var n = notes[i];
             var slot = (n.Lane, n.Key);
-            if (next.TryGetValue(slot, out uint nextStart) && nextStart <= n.End)
-                notes[i] = n with { Restruck = true };
+            bool restruck = next.TryGetValue(slot, out uint nextStart) && nextStart <= n.End;
+            notes[i] = n with { Restruck = restruck, Ring = n.End };
             next[slot] = n.Start;
         }
 
-        Notes = notes.ToArray();
+        _notes = notes.ToArray();
+    }
+
+    /// <summary>
+    /// Fills in each note's <see cref="SeqNote.Ring"/>: where the voice actually stops being
+    /// heard, which is not where its bar ends. A Loudness key-off only drops the OPL's key-on
+    /// bit, putting the operator into its release phase -- it does not silence it, and these
+    /// patches release slowly. CAMANIS is the case that shows it up: 2759 of its 3675 notes
+    /// ring on past their key, by a median of 6 ticks against a median 7-tick bar, so the roll
+    /// draws a field of detached blips where the ear hears a legato arpeggio.
+    ///
+    /// It has to be measured rather than inferred from the patch. Halloween Ramble's release
+    /// rates are slower still, yet its gaps really are silent -- those envelopes have decayed
+    /// to nothing long before the key lifts. So the song is run once through a chip whose
+    /// samples are thrown away and every channel's envelope is read off per tick.
+    ///
+    /// Meant to be called on a thread of its own (MusicTrack.WantRingOut starts one): it is a
+    /// tenth of a second on a long song, and the envelope stepping inside the chip costs the
+    /// same per second of music whatever the sample rate, so there is no rate cheap enough to
+    /// make it free. The rate below is simply where the waveform work stops mattering -- it
+    /// agrees note for note with the same pass at 49716 Hz. The finished notes are published
+    /// in one assignment, so a frame either has every tail or none.
+    /// </summary>
+    public void MeasureRingOut(LdsSong lds)
+    {
+        const int rate = 4000;
+        const float quiet = 0.04f;             // -28 dB from the note's own peak
+        int ticks = (int)Duration + 1;
+        if (ticks < 2 || Notes.Length == 0) return;
+
+        int perTick = Math.Max(1, (int)Math.Round(rate / MusicBank.LdsUpdateRate));
+        var opl = new OplChip(rate);
+        var player = new LdsPlayer(opl);
+        player.Load(lds);
+
+        var level = new float[LaneCount][];
+        for (int i = 0; i < LaneCount; i++) level[i] = new float[ticks];
+        var scratch = new short[perTick];
+
+        // Stepping stops where the conversion stopped -- the song's loop jump, or its end --
+        // but the rendering carries on, which is what lets the last notes ring out.
+        bool running = true;
+        for (int t = 0; t < ticks; t++)
+        {
+            if (running) running = player.Update();
+            opl.GetSample(scratch);
+            for (int ch = 0; ch < LaneCount; ch++) level[ch][t] = (float)opl.ChannelEnvelope(ch);
+        }
+
+        // A floor per lane as well as per note: a note that was quiet to begin with should not
+        // trail a tail of something nothing else in the song would let you hear.
+        var laneFloor = new float[LaneCount];
+        for (int ch = 0; ch < LaneCount; ch++)
+        {
+            float peak = 0f;
+            foreach (float v in level[ch]) if (v > peak) peak = v;
+            laneFloor[ch] = peak * 0.01f;
+        }
+
+        // Whatever is left of a note, the next strike on its lane takes the voice over.
+        var notes = (SeqNote[])Notes.Clone();
+        var limit = new int[notes.Length];
+        var pending = new int[LaneCount];
+        Array.Fill(pending, ticks - 1);
+        for (int i = notes.Length - 1; i >= 0; i--)
+        {
+            int lane = notes[i].Lane;
+            if ((uint)lane >= LaneCount) { limit[i] = ticks - 1; continue; }
+            limit[i] = pending[lane];
+            pending[lane] = (int)Math.Min(notes[i].Start, ticks - 1);
+        }
+
+        for (int i = 0; i < notes.Length; i++)
+        {
+            var n = notes[i];
+            int lane = n.Lane;
+            if ((uint)lane >= LaneCount) continue;
+            int start = (int)Math.Min(n.Start, ticks - 1), end = (int)Math.Min(n.End, ticks - 1);
+
+            float pk = 0f;
+            for (int t = start; t <= end; t++) if (level[lane][t] > pk) pk = level[lane][t];
+            float floor = Math.Max(pk * quiet, laneFloor[lane]);
+            if (pk <= floor) continue;
+
+            int ring = end;
+            while (ring < limit[i] && level[lane][ring] > floor) ring++;
+            if (ring > end) notes[i] = n with { Ring = (uint)ring };
+        }
+
+        // The flag goes last: a reader that sees it set is guaranteed the measured array.
+        Volatile.Write(ref _notes, notes);
+        _hasRingOut = true;
     }
 
     private void BuildMarkers()

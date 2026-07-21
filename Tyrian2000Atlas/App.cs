@@ -98,7 +98,15 @@ public sealed unsafe partial class App
     private bool _clickKillInstant = true;    // ... for everything it has, whatever its armour
     private int _clickKillDamage = DefaultClickKillDamage;   // ... or for this much
     private bool _clickKillExplosions = true; // spawn the death débris, or just vanish
-    private Vector2? _clickKillPress;         // press point, to tell a click from a pan drag
+    // The enemy the overlay's hover box was last drawn around, and the cursor position it was
+    // resolved at. This is the trigger's fallback aim -- see ResolveClickKillTarget.
+    private GameSim.EnemyView? _hoverPick;
+    private Vector2 _hoverPickAt;
+    // How far (screen px, squared) the cursor may sit from where a hover pick was latched and
+    // still fall back to it. Generous on purpose: the fallback only fires when the live pick
+    // already found nothing under the cursor, and the overlay only latches a slot while the
+    // cursor is actually over it, so this just guards against the cursor having jumped clear.
+    private const float HoverLatchRadiusSq = 40f * 40f;
     private bool _draggingPlayer;             // a player-position drag is in progress
     // Which button holds that drag: Left grabbed the marker, Right is the aim-anywhere
     // gesture that works with the marker hidden (or player mode off entirely).
@@ -667,6 +675,7 @@ public sealed unsafe partial class App
         // rather than let the LIVE mark disappear off the bar with no explanation when a
         // loop-cycle or hold-length nudge quietly re-predicts everything.
         bool hadBranch = _playback?.Branched ?? false;
+        _hoverPick = null;   // a slot number from the old run means nothing in the new one
         try
         {
             var sim = new GameSim(_gd, CurEpisode, _level, _shapes)
@@ -1104,81 +1113,78 @@ public sealed unsafe partial class App
         var q = p + new Vector2(w, h);
         var dl = ImGui.GetWindowDrawList();
         float t = (float)ImGui.GetTime();
-        uint ac = AcSim;
+        uint ac = AcLaunch;
+        const float round = 7f;
 
         // Flat, not a gradient: the house rule is that a surface this big shades into a smear.
-        // What makes it feel live is the rail, the ring and the sweep, not the fill.
-        float lit = !ready ? 0f : on ? 0.34f : hot ? 0.15f : 0.06f;
+        // It also stays a dark panel in every state, engaged included. Lighting a slab this size
+        // in the accent does not read as "lit", it reads as a brown block, and it held the eye
+        // for as long as playback was on -- beside it the level list looked switched off. So the
+        // accent is spent only where it is small enough to stay a colour instead of becoming a
+        // background: the border, the glyph and the readout.
+        // Idle sits higher up the ramp than an amber slab needed to. Amber was the one warm
+        // thing in a cool column, so at rest it separated itself; a blue slab is in the same
+        // family as the seven chips above it and reads as one more of them unless the accent is
+        // actually present at rest. Hence a resting border and glyph that are properly lit --
+        // engaged still pulls clear of it on the border, the title and the readout.
+        float lit = !ready ? 0f : on ? 0.15f : hot ? 0.11f : 0.07f;
         FlatRect(dl, p, q, Mix(ready ? UiPanel : Gfx.Rgba(21, 23, 30), ac, lit),
-            Mix(UiPanelHi, ac, lit + (on ? 0.24f : 0.10f)), 7f);
-        dl.AddRect(p, q, !ready ? Gfx.Rgba(36, 40, 51) : on ? Shade(ac, 1.0f, 225)
-            : hot ? Shade(ac, 0.78f, 195) : Mix(UiLineSoft, ac, 0.20f), 7f, ImDrawFlags.None,
-            on ? 1.8f : 1f);
-        if (held) dl.AddRectFilled(p, q, Gfx.Rgba(255, 255, 255, 16), 7f);
+            Mix(UiPanelHi, ac, lit + 0.12f), round);
+        // One border, one weight, the state in its brightness -- and it is the whole of the
+        // slab's lit edge. The chips carry a separate accent rail because their own border is
+        // neutral; here the border is the accent already, so a rail put a second amber vertical
+        // three pixels inside the first, and a 3px sliver cannot take the slab's corner radius
+        // (ImGui clamps a corner to the rect's own width) so it squared off exactly where the
+        // panel curved away. Thickening the border on engage was the other half of that mess:
+        // it moved the slab's edge outwards by a pixel, which read as the panel swelling.
+        dl.AddRect(p, q, !ready ? Gfx.Rgba(36, 40, 51) : on ? Shade(ac, 0.95f, 235)
+            : hot ? Shade(ac, 0.78f, 200) : Mix(UiLineSoft, ac, 0.44f), round);
+        if (held) dl.AddRectFilled(p, q, Gfx.Rgba(255, 255, 255, 14), round);
 
-        // Armed, a slow breathing ring; running, it breathes at twice the rate. The same cue
-        // the level tree puts on the level you are looking at, turned up for the one control
-        // that puts the whole atlas in another mode.
-        if (on)
-        {
-            float pulse = 0.5f + 0.5f * MathF.Sin(t * (_playing ? 4.4f : 2.0f));
-            dl.AddRect(p - new Vector2(2.5f, 2.5f), q + new Vector2(2.5f, 2.5f),
-                Shade(ac, 1.1f, (byte)(45 + 105 * pulse)), 9f, ImDrawFlags.None, 1.7f);
-        }
-
-        // A light running along the top lip while the simulation is actually advancing, so a
-        // running panel never looks identical to a paused one.
+        // The play glyph, and while the run is live one soft ring expanding off it -- the single
+        // thing on this panel that moves because the simulation is moving. It used to be three
+        // at once: this ring, a breathing outline around the whole slab, and a light sweeping
+        // the top lip. That is two more than "it is running" needs, and between them they left
+        // pausing as the only way to get a calm look at the panel.
+        var c = new Vector2(p.X + 28f, (p.Y + q.Y) * 0.5f);
+        dl.AddCircleFilled(c, 13f, on ? Shade(ac, 0.30f, 245) : Gfx.Rgba(28, 32, 41), 28);
+        dl.AddCircle(c, 13f, !ready ? Gfx.Rgba(44, 48, 60) : on ? Shade(ac, 1.15f, 240)
+            : hot ? Shade(ac, 0.95f, 225) : Shade(ac, 0.62f, 215), 28, 1.5f);
         if (on && _playing)
         {
-            float k = (t * 0.5f) % 1f;
-            float x = p.X + 6f + (w - 12f) * k;
-            uint glow = Shade(ac, 1.2f, 200), clear = Shade(ac, 1.2f, 0);
-            float y0 = p.Y + 1f, y1 = p.Y + 3f;
-            float a0 = Math.Max(p.X + 6f, x - 34f), a1 = Math.Min(q.X - 6f, x + 34f);
-            if (x > a0) dl.AddRectFilledMultiColor(new Vector2(a0, y0), new Vector2(x, y1),
-                clear, glow, glow, clear);
-            if (a1 > x) dl.AddRectFilledMultiColor(new Vector2(x, y0), new Vector2(a1, y1),
-                glow, clear, clear, glow);
-        }
-
-        // The lit left edge every toggle chip in this column carries, at this one's size.
-        dl.AddRectFilled(p, new Vector2(p.X + 3.5f, q.Y),
-            !ready ? Gfx.Rgba(46, 50, 62) : Shade(ac, on ? 1.05f : hot ? 0.75f : 0.40f),
-            3f, ImDrawFlags.RoundCornersLeft);
-
-        // The play glyph, and while the run is live an expanding ring off it -- the one thing
-        // on this panel that moves because the simulation is moving.
-        var c = new Vector2(p.X + 27f, (p.Y + q.Y) * 0.5f);
-        dl.AddCircleFilled(c, 13f, on ? Shade(ac, 0.40f, 245) : Gfx.Rgba(28, 32, 41), 28);
-        dl.AddCircle(c, 13f, !ready ? Gfx.Rgba(44, 48, 60) : on ? Shade(ac, 1.15f, 235)
-            : hot ? Shade(ac, 0.80f, 200) : UiLine, 28, 1.5f);
-        if (on && _playing)
-        {
-            float k = (t * 1.15f) % 1f;
-            dl.AddCircle(c, 13f + k * 10f, Shade(ac, 1.1f, (byte)(140 * (1f - k))), 28, 1.6f);
+            float k = t % 1f;
+            dl.AddCircle(c, 13f + k * 9f, Shade(ac, 1.1f, (byte)(105 * (1f - k))), 28, 1.5f);
         }
         dl.AddTriangleFilled(new Vector2(c.X - 3.6f, c.Y - 6.6f), new Vector2(c.X - 3.6f, c.Y + 6.6f),
             new Vector2(c.X + 6.8f, c.Y),
-            // Amber even at rest -- idle, this is a launch key waiting, not a dead one.
-            !ready ? Gfx.Rgba(64, 69, 84) : on ? Gfx.Rgba(255, 248, 232)
-            : hot ? Shade(ac, 1.05f) : Shade(ac, 0.72f));
+            // Fully lit even at rest -- idle, this is a launch key waiting, not a dead one, and
+            // the glyph is small enough to take the accent neat without shouting.
+            !ready ? Gfx.Rgba(64, 69, 84) : on ? Gfx.Rgba(242, 248, 255)
+            : hot ? Shade(ac, 1.15f) : ac);
 
         float line = ImGui.GetTextLineHeight();
         float tx = p.X + 48f, rx = q.X - 11f;
         float titleY = p.Y + 9f, capY = titleY + line * 2f + 4f;
 
-        // The clock rides the title row, right-aligned, and the title is clipped to whatever
-        // that leaves -- a narrowed column loses letters off "PLAYBACK" rather than running
-        // the two into each other.
-        string time = pb != null
-            ? $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.DisplayEnd)}"
-            : "";
-        float timeW = time.Length > 0 ? ImGui.CalcTextSize(time).X + 10f : 0f;
-        ClipScaled(dl, new Vector2(tx, titleY), Math.Max(16f, rx - tx - timeW),
-            !ready ? Gfx.Rgba(72, 78, 94) : on ? Gfx.Rgba(255, 246, 228)
+        // The clock rides the title row, right-aligned, with the elapsed bright and the length
+        // behind it dim. They are one string but not one fact, and set in a single colour they
+        // read as a run of digits you have to take apart before either half is any use. The
+        // title is clipped to whatever they leave -- a narrowed column loses letters off
+        // "PLAYBACK" rather than running the two into each other.
+        string now = pb != null ? SimPlayback.FormatTime(pb.CurrentTick) : "";
+        string span = pb != null ? $" / {SimPlayback.FormatTime(pb.DisplayEnd)}" : "";
+        float spanW = span.Length > 0 ? ImGui.CalcTextSize(span).X : 0f;
+        float clockW = now.Length > 0 ? ImGui.CalcTextSize(now).X + spanW : 0f;
+        ClipScaled(dl, new Vector2(tx, titleY),
+            Math.Max(16f, rx - tx - (clockW > 0f ? clockW + 10f : 0f)),
+            !ready ? Gfx.Rgba(72, 78, 94) : on ? Gfx.Rgba(240, 246, 255)
             : hot ? UiText : Gfx.Rgba(178, 185, 202), 2, "PLAYBACK");
-        if (time.Length > 0)
-            dl.AddText(new Vector2(rx - timeW + 10f, titleY + line * 0.5f), Shade(ac, 1.12f), time);
+        if (clockW > 0f)
+        {
+            float cy = titleY + line * 0.5f;
+            dl.AddText(new Vector2(rx - clockW, cy), Shade(ac, 1.15f), now);
+            dl.AddText(new Vector2(rx - spanW, cy), Alpha(UiDim, 200), span);
+        }
 
         if (pb != null)
         {
@@ -2016,6 +2022,12 @@ public sealed unsafe partial class App
     private const float SplitW = 6f;   // the drag strip between two columns (VSplitter's width)
     private static readonly uint HudBg = Gfx.Rgba(15, 17, 23, 236);
     private static readonly uint AcSim     = Gfx.Rgba(255, 190,  90);
+    // The launch slab's own, deliberately not AcSim: that one is the *subject* accent shared by
+    // the Analysis browser, the turret cards and the HUD's SIMULATION section, and the slab is
+    // not one more reading about the simulation, it is the switch that starts it. Blue because
+    // the transport's own primary key already is (TransportBtn's `primary` face), so the button
+    // that engages playback and the button that runs it are finally the same colour.
+    private static readonly uint AcLaunch  = Gfx.Rgba(105, 170, 255);
     private static readonly uint AcBuild   = Gfx.Rgba(110, 225, 195);
     private static readonly uint AcPlayer  = Gfx.Rgba(120, 210, 250);   // the player glyph's cyan
     private static readonly uint AcEnemy   = Gfx.Rgba(255, 120, 120);
@@ -2498,7 +2510,7 @@ public sealed unsafe partial class App
                 "middle button, and use Fit instead of double-click.\n" +
                 "The hit lands on the live frame: playing on keeps it, seeking\n" +
                 "back restores the keyframe and the enemy with it."))
-        { _clickKill = !_clickKill; _clickKillPress = null; }
+            _clickKill = !_clickKill;
 
         ImGui.SameLine(0, 5);
         ImGui.BeginDisabled(!_clickKill);
@@ -2914,27 +2926,19 @@ public sealed unsafe partial class App
 
     /// <summary>
     /// "Left-click damages enemies": shoot the enemy under the cursor for the configured
-    /// damage. Armed on press and fired on release only if the cursor stayed put, so a
-    /// left-drag still pans the view; <see cref="HandlePlayerMarker"/> runs first, so a press
-    /// that grabbed the player marker never doubles as a shot.
+    /// damage. The shot lands on the press rather than on the release, because the run does not
+    /// stop for a held button and every tick spent waiting moves the target -- see
+    /// <see cref="ResolveClickKillTarget"/>, which is also where the aim comes from.
+    /// <see cref="HandlePlayerMarker"/> runs first, so a press that grabbed the player marker
+    /// never doubles as a shot; with the trigger armed the left button no longer pans the view
+    /// (<see cref="DrawPlaybackCanvas"/>), so there is no drag for a press to be mistaken for.
     /// </summary>
     private void HandleClickKill(in PlayView view, Vector2 mouse, bool viewHovered)
     {
-        if (!_clickKill || _playback == null) return;
+        if (!_clickKill || _playback == null || _draggingPlayer) return;
+        if (!viewHovered || !ImGui.IsMouseClicked(ImGuiMouseButton.Left)) return;
 
-        if (viewHovered && !_draggingPlayer && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
-            _clickKillPress = mouse;
-        if (_clickKillPress is not { } press || !ImGui.IsMouseReleased(ImGuiMouseButton.Left))
-            return;
-
-        _clickKillPress = null;
-        if (Vector2.Distance(mouse, press) > 4f) return;   // that was a pan, not a click
-
-        // Through PlayView, so a shot on an upside-down screen hits the enemy the cursor is
-        // over rather than its reflection across the playfield's middle.
-        var b = view.ToBuffer(press);
-        int slot = _playback.Sim.PickEnemyAt(
-            (int)MathF.Floor(b.X), (int)MathF.Floor(b.Y), _objCatMask);
+        int slot = ResolveClickKillTarget(view, mouse);
         if (slot < 0) return;
 
         int damage = _clickKillInstant ? GameSim.InstantKillDamage : _clickKillDamage;
@@ -2960,6 +2964,49 @@ public sealed unsafe partial class App
         // stepping one here as well was a tick the timeline gained out of nowhere — the frame
         // the shot landed on jumped forward by one and the scroll skipped with it.
         if (!_playing) _playback.Advance(1, audio: true);
+    }
+
+    /// <summary>
+    /// The slot a shot at <paramref name="mouse"/> hits, or -1 for empty space. Two answers, and
+    /// the shot takes whichever lands on something.
+    ///
+    /// First a fresh <see cref="GameSim.PickEnemyAt"/> at the cursor. <see cref="UpdatePlayback"/>
+    /// steps the sim and re-uploads the frame *before* the UI draws, so the picture on screen,
+    /// this pick and the cursor all read the one tick: a live pick is exact whenever the cursor
+    /// is over the enemy in the frame actually shown — paused, slow playback, or a cursor tracking
+    /// a mover — and it is the only thing that picks a *different* enemy the cursor has moved onto.
+    ///
+    /// Failing that, the slot the hover overlay last boxed (<see cref="DrawPlaybackOverlay"/>
+    /// latches it, because the button going down makes the view active and suppresses the overlay
+    /// on the very frame the shot fires). At speed the sim steps several ticks between frames, so
+    /// an enemy boxed when the button went down has already jumped out from under a still cursor —
+    /// the live pick finds empty space there, and this is what catches it. It stands only while
+    /// the slot still holds that same enemy (slots are recycled the instant one dies) and the
+    /// cursor has not wandered far from where it was aimed.
+    ///
+    /// The order matters: latching first, gated by a 2px "cursor hasn't moved" test, dropped the
+    /// shot whenever a click jittered a few pixels or the cursor was tracking a moving target —
+    /// the tight test rejected the latch and the live fallback was then aimed at where the enemy
+    /// had already left, so nothing died. Trying the live pick first and keeping the latch as the
+    /// catch is what makes it fire every time.
+    /// </summary>
+    private int ResolveClickKillTarget(in PlayView view, Vector2 mouse)
+    {
+        // Through PlayView, so a shot on an upside-down screen hits the enemy the cursor is
+        // over rather than its reflection across the playfield's middle.
+        var b = view.ToBuffer(mouse);
+        int fresh = _playback!.Sim.PickEnemyAt(
+            (int)MathF.Floor(b.X), (int)MathF.Floor(b.Y), _objCatMask);
+        if (fresh >= 0) return fresh;
+
+        // Nothing under the cursor now -- but a mover can jump clear between frames at speed, so
+        // fall back to the slot the overlay last boxed, as long as it still holds that enemy and
+        // the cursor is still near where the box was.
+        if (_hoverPick is { } h && _playback.Sim.SlotHolds(h.Slot, h.EnemyId, h.LinkNum) &&
+            Vector2.DistanceSquared(mouse, _hoverPickAt) <= HoverLatchRadiusSq)
+            return h.Slot;
+
+        return -1;
     }
 
     /// <summary>A reticle + ship glyph marking the draggable phantom player. The ship
@@ -3278,6 +3325,13 @@ public sealed unsafe partial class App
             if (e.Size == 1)   // 2x2 occupies four cells: ring it so the footprint reads
                 dl.AddCircle(p, r + 3f, (col & 0x00FFFFFFu) | (110u << 24));
         }
+
+        // Latched for the trigger, which cannot ask this question for itself: the button going
+        // down makes the view active, so the frame a shot is fired on is a frame this overlay
+        // is not drawn on at all. What the box was last drawn around is the aim — see
+        // ResolveClickKillTarget. Written on every hovered frame, empty space included, so it
+        // can never be a target the cursor has since left behind.
+        if (hovered) { _hoverPick = pick; _hoverPickAt = mouse; }
 
         if (!hovered) return;
         if (pick is { } hit)
