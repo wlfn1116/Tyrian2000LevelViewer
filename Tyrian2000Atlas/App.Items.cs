@@ -1,13 +1,13 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The shop's side of the data set: ships, weapon ports, sidekicks, shields, generators and
-/// special weapons, each with the icon the game itself draws for it. The viewer never
+/// special weapons, each with the icon the game itself draws for it. The atlas never
 /// simulates a player, so none of this feeds the sim -- it is here because the tables sit in
 /// the same block as enemyDat and nothing else reads them. See <see cref="ItemData"/>.
 ///
@@ -32,7 +32,7 @@ public sealed unsafe partial class App
     private int _itemCharge;
     private bool _itemChargeAuto = true;
     /// <summary>Which build's shop to show: the tables as Tyrian 2000 shipped them, or with
-    /// the widescreen fork's post-load pass over them (<see cref="ForkRestoration"/>).</summary>
+    /// the Engaged fork's post-load pass over them (<see cref="ForkRestoration"/>).</summary>
     private bool _itemFork = true;
 
     /// <summary>Ticks per charge stage while the fire button is held (mainint.c:7565).</summary>
@@ -93,7 +93,7 @@ public sealed unsafe partial class App
         int build = _itemFork ? 1 : 0;
         if (SegBar("##itembuild", ref build, AcShop, 208f,
                 ("Vanilla", "The item tables exactly as Tyrian 2000 shipped them."),
-                ("Widescreen", "The widescreen fork's post-load pass over the same tables:\n" +
+                ("Engaged", "The Engaged fork's post-load pass over the same tables:\n" +
                                "the restored Charge-Laser Cannon, Wobbley's stray first frame\n" +
                                "snapped to its rest frame, placeholder icons for named items\n" +
                                "that shipped without one, magazine sizes spelled out in the\n" +
@@ -595,7 +595,7 @@ public sealed unsafe partial class App
             ImGui.Indent(11f);
             ImGui.TextColored(ColorOf(Shade(AcGo, 1.1f)),
                 "Restored cut content: Tyrian 2000 dropped this sidekick and reused its slot for\n" +
-                "the Mint-O-Ship. The widescreen build puts it back from the DOS data, into the\n" +
+                "the Mint-O-Ship. The Engaged build puts it back from the DOS data, into the\n" +
                 "first free sidekick slot and six otherwise-unused weapon records.");
             ImGui.Unindent(11f);
             ImGui.Dummy(new Vector2(0, 4f));
@@ -646,7 +646,7 @@ public sealed unsafe partial class App
     }
 
     /// <summary>How many frames of <c>gr</c> the entry actually cycles. The array is 20 long
-    /// and the engine indexes it with <c>ani</c> unchecked, so the clamp is the viewer's.</summary>
+    /// and the engine indexes it with <c>ani</c> unchecked, so the clamp is the atlas's.</summary>
     private static int SidekickFrames(OptionItem o) => Math.Max(1, Math.Min((int)o.Ani, 20));
 
     /// <summary>
@@ -665,7 +665,7 @@ public sealed unsafe partial class App
     /// Which frame the engine would be showing on this tick.
     ///
     /// The frame table is stepped once per tick, but only while the sidekick's animation is
-    /// ARMED, and that is the part the viewer used to leave out. <c>option 1</c> is armed
+    /// ARMED, and that is the part the atlas used to leave out. <c>option 1</c> is armed
     /// forever; <c>option 2</c> is armed by firing a shot and disarms itself the moment the
     /// table wraps, so one shot buys exactly one pass and the pod then sits on gr[0] until the
     /// next one (mainint.c:7529 -- the wrap sets animation_enabled back to <c>option == 1</c>).
@@ -725,8 +725,8 @@ public sealed unsafe partial class App
         ImGui.SameLine(0, 5);
         ImGui.SetNextItemWidth(96);
         ImGui.SliderFloat("##itemspeed", ref _itemAnimSpeed, 0.1f, 3f, "x%.2f");
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("The engine runs at 35 ticks a second; this scales that.");
+        SliderReset(ref _itemAnimSpeed, 1f,
+            "The engine runs at 35 ticks a second; this scales that.", "x1");
 
         // An option-2 sidekick is idle unless it is shooting, so the trigger is the control
         // that decides whether it animates at all -- without it the stage showed a four-frame
@@ -751,6 +751,7 @@ public sealed unsafe partial class App
             ImGui.BeginDisabled(_itemChargeAuto);
             ImGui.SetNextItemWidth(150);
             ImGui.SliderInt("##itemcharge", ref _itemCharge, 0, o.Pwr, "charge %d");
+            SliderReset(ref _itemCharge, 0, "Which charge stage the body is drawn at.");
             ImGui.EndDisabled();
             ImGui.TextColored(ColorOf(UiFaint), $"showing charge {charge} of {o.Pwr}");
         }

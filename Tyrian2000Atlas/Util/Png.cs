@@ -1,6 +1,6 @@
 using System.IO.Compression;
 
-namespace T2LV.Util;
+namespace T2A.Util;
 
 /// <summary>Minimal PNG writer for 32-bit RGBA images (used by export + screenshots).</summary>
 public static class Png

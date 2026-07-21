@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>A run of cube text. The game's fonts treat '~' as a highlight toggle
 /// (font.c:145), so the text arrives already split into plain and emphasised runs.</summary>

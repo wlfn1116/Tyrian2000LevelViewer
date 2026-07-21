@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The three other ways a special weapon reaches a ship, spelled out under a special's detail:

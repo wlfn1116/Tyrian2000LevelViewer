@@ -1,11 +1,11 @@
 using System.Numerics;
 using System.Runtime.Versioning;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 using SdlNs = Hexa.NET.SDL2;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>The Dear ImGui application: navigation, layer/object toggles and the level canvas.</summary>
 public sealed unsafe partial class App
@@ -67,9 +67,14 @@ public sealed unsafe partial class App
     private float _simScrollMult = 1f;
     private int _simDifficulty = 2;          // normal
     private bool _simFire = true;
-    private int _simMaxMinutes = 10;
-    private int _simLoopCycles = 2;          // boss-gate / route-loop repeats kept in the preview
-    private int _simHoldSeconds = 20;        // enemy-gated hold watched (and kept) for this long
+    // Named because they are also what a right-click on the slider goes back to -- see
+    // SliderReset. A default that only exists as a literal in a field initialiser is one the
+    // control cannot offer you.
+    private const int DefaultMaxMinutes = 10, DefaultLoopCycles = 2, DefaultHoldSeconds = 20;
+    private const int DefaultClickKillDamage = 10;
+    private int _simMaxMinutes = DefaultMaxMinutes;
+    private int _simLoopCycles = DefaultLoopCycles;   // boss-gate / route-loop repeats kept
+    private int _simHoldSeconds = DefaultHoldSeconds; // enemy-gated hold watched (and kept)
     private float _playZoom;                 // 0 = fit to the panel automatically
     private Vector2 _playPan;                // manual pan offset, screen px
     private bool _fitAroundHud;              // "UI fit": fit the slice the controls HUD leaves free
@@ -77,10 +82,10 @@ public sealed unsafe partial class App
     private bool _hudDocked;                 // ... and this frame's layout actually had room for it
     private Vector2 _hudPos, _hudSize;       // its rect last frame -- what "UI fit" fits around
     private bool _simExtendedView;           // show beyond the in-game screen
-    private bool _widescreen;                // true-widescreen playback (356px playfield, wider bounds)
-    private bool _expandedParallax;          // widescreen sub-option: wider all-layer parallax sweep (commit edd8118)
-    private bool _mirrorLayers = true;       // widescreen sub-option: mirror layers past their side edges (commit 1f7ba83)
-    private bool _wideStarfield = true;      // the widescreen build's rewritten starfield (either mode)
+    private bool _engaged;                // Engaged playback (356px playfield, wider bounds)
+    private bool _expandedParallax;          // Engaged sub-option: wider all-layer parallax sweep (commit edd8118)
+    private bool _mirrorLayers = true;       // Engaged sub-option: mirror layers past their side edges (commit 1f7ba83)
+    private bool _tallStarfield = true;      // the Engaged build's rewritten starfield (either mode)
     private bool _showScreenFilter = true;   // event-44 hue/brightness filter
     private bool _showTerrainSmoothies = true; // lava/water/ice/blur
     private bool _showSpotlight = true;       // light-cone presentation
@@ -91,7 +96,7 @@ public sealed unsafe partial class App
     private int _simPlayerX = 100, _simPlayerY = 150;  // phantom player pos (sticky; drives parallax/aim)
     private bool _clickKill;                  // left-click damages the enemy under the cursor
     private bool _clickKillInstant = true;    // ... for everything it has, whatever its armour
-    private int _clickKillDamage = 10;        // ... or for this much
+    private int _clickKillDamage = DefaultClickKillDamage;   // ... or for this much
     private bool _clickKillExplosions = true; // spawn the death débris, or just vanish
     private Vector2? _clickKillPress;         // press point, to tell a click from a pan drag
     private bool _draggingPlayer;             // a player-position drag is in progress
@@ -101,15 +106,15 @@ public sealed unsafe partial class App
     // Which HUD sections are unfolded, indexed by PbSec. The HUD window is NoSavedSettings
     // (it is placed over the view, not by the .ini), so this is ours to keep and persist.
     private readonly bool[] _pbOpen = { true, false, false, false, true, false, true, true };
-    // Playfield crop width for the current mode (widescreen 299 / vanilla 264) and the phantom-
-    // player X range derived from it. Vanilla keeps the viewer's historical 36..260; widescreen
-    // uses the widescreen build's ACTUAL ship clamp [SHIP_LEFT_MARGIN, PLAYFIELD_WIDTH -
+    // Playfield crop width for the current mode (Engaged 299 / vanilla 264) and the phantom-
+    // player X range derived from it. Vanilla keeps the atlas's historical 36..260; Engaged
+    // mode uses the build's ACTUAL ship clamp [SHIP_LEFT_MARGIN, PLAYFIELD_WIDTH -
     // SHIP_RIGHT_MARGIN] = [29, 303] -- the expanded-parallax sweep normalizes over exactly this
     // travel, so both walls must be reachable. Field-based (not sim-based) so it is valid before
     // a playback exists (constructor --player clamp).
-    private int PlayfieldW => _widescreen ? GameSim.WideViewW : GameSim.ViewW;
-    private int PlayerXMin => _widescreen ? 29 : 36;
-    private int PlayerXMax => _widescreen ? GameSim.WideViewW + 4 : GameSim.ViewW - 4;   // 303 / 260
+    private int PlayfieldW => _engaged ? GameSim.EngagedViewW : GameSim.ViewW;
+    private int PlayerXMin => _engaged ? 29 : 36;
+    private int PlayerXMax => _engaged ? GameSim.EngagedViewW + 4 : GameSim.ViewW - 4;   // 303 / 260
     private readonly GameViewImage _gameView = new();
     private static readonly float[] SpeedSteps = { 0.25f, 0.5f, 1f, 2f, 4f, 8f };
     private static readonly string[] DifficultyNames =
@@ -137,10 +142,10 @@ public sealed unsafe partial class App
         _settings = settings;
         _window = window;
         if (cliPlaybackTick >= 0) _playbackMode = true;
-        _widescreen = settings.Widescreen;   // needed before the --player clamp (PlayerXMax) below
+        _engaged = settings.Engaged;   // needed before the --player clamp (PlayerXMax) below
         _expandedParallax = settings.ExpandedParallax;
         _mirrorLayers = settings.MirrorLayers;
-        _wideStarfield = settings.WideStarfield;
+        _tallStarfield = settings.TallStarfield;
         if (cliPlayerX >= 0)   // --player x y: start in phantom-player mode at a fixed spot (testing)
         {
             _playerSimMode = true;
@@ -183,6 +188,7 @@ public sealed unsafe partial class App
         if (settings.EnemyListWidth > 100f) _enemyListW = settings.EnemyListWidth;
         if (settings.ItemListWidth > 100f) _itemListW = settings.ItemListWidth;
         _allEpisodes = settings.AllEpisodes;
+        _levelOrder = Math.Clamp(settings.LevelOrder, FileOrder, PlayOrder);
         if (settings.TreeEdgeMask != 0) _treeEdgeMask = settings.TreeEdgeMask;   // 0 = never saved
         if (settings.PbSections >= 0)   // -1 = never saved: keep the defaults above
         {
@@ -197,6 +203,15 @@ public sealed unsafe partial class App
         _fitAroundHud = settings.PbFitAroundHud;
         _levelsHeight = settings.LevelsHeight > 30 ? settings.LevelsHeight : 170f;
         _layersHeight = settings.LayersHeight > 30 ? settings.LayersHeight : 0f;  // 0 = fit to content
+        // Clamped on the way in: the ranges can move between builds, and the layout only
+        // re-clamps the left column against the live window -- the HUD's floating form has no
+        // window to clamp against at all.
+        if (settings.ControlsWidth > 0)
+            _controlsW = Math.Clamp(settings.ControlsWidth, ControlsWMin, ControlsWMax);
+        if (settings.HudWidth > 0)
+            _hudW = Math.Clamp(settings.HudWidth, HudWMin, HudWMax);
+        if (settings.HudColumnWidth > 0)
+            _hudColW = Math.Clamp(settings.HudColumnWidth, HudColWMin, HudColWMax);
         ApplyLayerSettings(settings.Layers);
         LoadRefWindows(settings.RefWindows);
 
@@ -276,10 +291,10 @@ public sealed unsafe partial class App
         s.ObjMode = _objMode;
         s.GameLayerOrder = _gameLayerOrder;
         s.SimExtendedView = _simExtendedView;
-        s.Widescreen = _widescreen;
+        s.Engaged = _engaged;
         s.ExpandedParallax = _expandedParallax;
         s.MirrorLayers = _mirrorLayers;
-        s.WideStarfield = _wideStarfield;
+        s.TallStarfield = _tallStarfield;
         s.ShowScreenFilter = _showScreenFilter;
         s.ShowSmoothies = _showTerrainSmoothies;
         s.ShowSpotlight = _showSpotlight;
@@ -310,6 +325,7 @@ public sealed unsafe partial class App
         s.EnemyMotion = _enemyMotion;
         s.ItemsFork = _itemFork;
         s.AllEpisodes = _allEpisodes;
+        s.LevelOrder = _levelOrder;
         s.TreeEdgeMask = _treeEdgeMask;
         int secBits = 0;
         for (int i = 0; i < _pbOpen.Length; i++) if (_pbOpen[i]) secBits |= 1 << i;
@@ -320,6 +336,9 @@ public sealed unsafe partial class App
         s.PbFitAroundHud = _fitAroundHud;
         s.LevelsHeight = _levelsHeight;
         s.LayersHeight = _layersHeight;
+        s.ControlsWidth = _controlsW;
+        s.HudWidth = _hudW;
+        s.HudColumnWidth = _hudColW;
         s.HasView = _viewInitialized;
         s.Zoom = _zoom; s.ScrollX = _scroll.X; s.ScrollY = _scroll.Y;
         s.Layers = _layers.Select(l => new LayerState { Id = l.Id, Visible = l.Visible, Alpha = l.Alpha }).ToList();
@@ -327,8 +346,9 @@ public sealed unsafe partial class App
     }
 
     /// <summary>A full-height vertical splitter bar; drag it to resize the column at its left.
-    /// Goes between two SameLine'd children.</summary>
-    private void VSplitter(string id, ref float width, float min, float max)
+    /// Goes between two SameLine'd children. <paramref name="sign"/> -1 resizes the column at
+    /// its <em>right</em> instead, which is what the pinned playback column needs.</summary>
+    private void VSplitter(string id, ref float width, float min, float max, float sign = 1f)
     {
         ImGui.PushStyleColor(ImGuiCol.Button, Gfx.Rgba(95, 95, 120, 160));
         ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Gfx.Rgba(130, 130, 175, 230));
@@ -336,7 +356,7 @@ public sealed unsafe partial class App
         ImGui.Button(id, new Vector2(6, -1));
         if (ImGui.IsItemHovered() || ImGui.IsItemActive()) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeEw);
         if (ImGui.IsItemActive())
-            width = Math.Clamp(width + ImGui.GetIO().MouseDelta.X, min, max);
+            width = Math.Clamp(width + ImGui.GetIO().MouseDelta.X * sign, min, max);
         ImGui.PopStyleColor(3);
     }
 
@@ -355,12 +375,26 @@ public sealed unsafe partial class App
 
     private EpisodeInfo? CurEpisode => _gd != null && _episodeIdx < _gd.Episodes.Count ? _gd.Episodes[_episodeIdx] : null;
 
-    /// <summary>One row of the level list: which episode it belongs to and where in it.
-    /// In single-episode mode every row is the current episode; in "All episodes" the
-    /// list runs straight through all five.</summary>
-    private readonly record struct BrowseItem(int Episode, int Level);
+    /// <summary>
+    /// One row of the level list: which episode it belongs to and where in it. In
+    /// single-episode mode every row is the current episode; in "All episodes" the list runs
+    /// straight through all five.
+    ///
+    /// The last two are filled in only in play order (see <see cref="AddEpisodeRows"/>) and
+    /// come from the episode's flow graph: which layer of the route the level sits on, and
+    /// whether a save point is passed on the way in. Deliberately not the outpost the graph
+    /// also knows about — nearly every level has one, so the tag was on nearly every row and
+    /// told you nothing about the one you were reading.
+    /// </summary>
+    private readonly record struct BrowseItem(int Episode, int Level,
+        int Stage = 0, bool Save = false);
 
     private readonly List<BrowseItem> _browse = new();
+
+    /// <summary>The two orderings the level list offers; the index <see cref="_levelOrder"/>
+    /// holds and settings.json persists.</summary>
+    private const int FileOrder = 0, PlayOrder = 1;
+    private int _levelOrder;
 
     /// <summary>Refill the level list for the current episode selection. Returns false if
     /// the selected level fell out of the list, so the caller knows to load another.</summary>
@@ -372,10 +406,9 @@ public sealed unsafe partial class App
         if (_gd == null) return false;
 
         if (_allEpisodes)
-            for (int e = 0; e < _gd.Episodes.Count; e++)
-                for (int l = 0; l < _gd.Episodes[e].Levels.Count; l++) _browse.Add(new BrowseItem(e, l));
+            for (int e = 0; e < _gd.Episodes.Count; e++) AddEpisodeRows(e);
         else if (_episodeIdx < _gd.Episodes.Count)
-            for (int l = 0; l < _gd.Episodes[_episodeIdx].Levels.Count; l++) _browse.Add(new BrowseItem(_episodeIdx, l));
+            AddEpisodeRows(_episodeIdx);
 
         int found = _browse.FindIndex(b =>
             b.Episode == wantEp && _gd.Episodes[b.Episode].Levels[b.Level].FileNum == wantFile);
@@ -383,9 +416,59 @@ public sealed unsafe partial class App
         return found >= 0;
     }
 
-    private string BrowseLabel(BrowseItem b) =>
-        (_allEpisodes ? $"E{_gd!.Episodes[b.Episode].Number}  " : "") +
-        _gd!.Episodes[b.Episode].Levels[b.Level].Display;
+    /// <summary>
+    /// One episode's rows, in whichever order is asked for.
+    ///
+    /// File order is what tyrian%d.lvl holds, which is the order the levels were authored in
+    /// and has nothing much to do with playing them: Episode 1 opens on #1 TYRIAN and then
+    /// runs #3, #4, #6, #7 as secrets nobody reaches before #2. Play order asks the episode
+    /// script instead, through the same flow graph the level tree draws — nodes taken layer by
+    /// layer, and left to right within a layer, so a fork's branches sit side by side in the
+    /// order the tree shows them and a route rejoining is listed once, where it is first
+    /// reached.
+    ///
+    /// A level the script reaches twice (two ']L' lines, or one level on two routes) is listed
+    /// at the first of them; one no route reaches at all still gets a row, at the end, because
+    /// the file holds it and the atlas's job is to show what the file holds.
+    /// </summary>
+    private void AddEpisodeRows(int e)
+    {
+        var ep = _gd!.Episodes[e];
+        EpisodeGraph? g = null;
+        if (_levelOrder == PlayOrder)
+            try { g = _gd.GetGraph(ep); }
+            catch { /* an episode whose script won't resolve simply stays in file order */ }
+
+        if (g == null)
+        {
+            for (int l = 0; l < ep.Levels.Count; l++) _browse.Add(new BrowseItem(e, l));
+            return;
+        }
+
+        var indexOf = new Dictionary<int, int>();
+        for (int l = 0; l < ep.Levels.Count; l++) indexOf.TryAdd(ep.Levels[l].FileNum, l);
+
+        // Campaign cuts first, whatever layer they sit on, then the Timed Battle arenas. An
+        // arena hangs straight off the episode start, so by depth alone it would sort in among
+        // the opening levels as though the campaign began with it -- and where one level is
+        // both (Episode 1's #5 is arena DELI at layer 1 and the campaign's DELIANI at layer
+        // 10), the first cut reached is the one the dedupe keeps, so sorting by depth alone
+        // filed the level under the arena and lost the stage it is really played at.
+        var placed = new bool[ep.Levels.Count];
+        foreach (var node in g.Nodes
+                     .Where(nd => nd.Kind == GraphNodeKind.Level)
+                     .OrderBy(nd => g.OnCampaignRoute(nd) ? 0 : 1)
+                     .ThenBy(nd => nd.Depth).ThenBy(nd => nd.X))
+        {
+            if (!indexOf.TryGetValue(node.LvlFileNum, out int l) || placed[l]) continue;
+            placed[l] = true;
+            _browse.Add(g.OnCampaignRoute(node)
+                ? new BrowseItem(e, l, node.Depth, node.SavePoint)
+                : new BrowseItem(e, l));   // no stage: it is not on the route at all
+        }
+        for (int l = 0; l < ep.Levels.Count; l++)
+            if (!placed[l]) _browse.Add(new BrowseItem(e, l));
+    }
 
     /// <summary>
     /// The episode picker, shared by the side panel and the tree/datacube windows so the
@@ -414,7 +497,7 @@ public sealed unsafe partial class App
         else SelectLevel(_levelIdx, ensureVisible: true);
     }
 
-    /// <summary>Select a level in whatever the viewer is browsing; in "All episodes" this
+    /// <summary>Select a level in whatever the atlas is browsing; in "All episodes" this
     /// also makes that level's episode the active one.</summary>
     private void SelectLevel(int browseIdx, bool ensureVisible = false)
     {
@@ -436,6 +519,10 @@ public sealed unsafe partial class App
             _objects = ObjectPlacer.Place(_gd, ep, _level, _enemyData, null, _layerScroll);
             if (_gameLayerOrder)
                 _layers = LayerStack.GameOrder(_layers, _level.ComputeStartFlags());
+            // Both are answers about the level being left behind: the flags the stack asked the
+            // old simulation for, and the order that simulation was last seen drawing in.
+            _layerOrderFlags = null;
+            _layerLiveSeenValid = false;
             _playback = null;
             _playing = false;
             _playPan = Vector2.Zero;   // keep the zoom level, recenter the view
@@ -446,7 +533,7 @@ public sealed unsafe partial class App
             _status = $"Ep {ep.Number} #{fileNum} '{name}'  ({_level.Events.Length} events, {_objects.Count} objects)";
             if (!_window.IsNull)
                 SdlNs.SDL.SetWindowTitle(_window,
-                    $"{(name.Length > 0 ? name : "(unnamed)")} · Episode {ep.Number} #{fileNum} - Tyrian 2000 Level Viewer");
+                    $"{(name.Length > 0 ? name : "(unnamed)")} · Episode {ep.Number} #{fileNum} - Tyrian 2000 Atlas");
         }
         catch (Exception ex)
         {
@@ -481,7 +568,7 @@ public sealed unsafe partial class App
     }
 
     /// <summary>
-    /// Where a browser's "open" link wants the viewer to land. <see cref="Time"/> is a map
+    /// Where a browser's "open" link wants the atlas to land. <see cref="Time"/> is a map
     /// position, and both canvases honour it their own way: the map scrolls to the objects
     /// authored there, playback seeks to the tick the sim spawned them on. The entry ids narrow
     /// down which of the enemies alive around that moment are the ones that were asked for.
@@ -513,7 +600,7 @@ public sealed unsafe partial class App
     }
 
     /// <summary>
-    /// Viewer-wide shortcuts: Up/Down switch levels, PageUp/PageDown pan the canvas a
+    /// Atlas-wide shortcuts: Up/Down switch levels, PageUp/PageDown pan the canvas a
     /// screenful, Home/End jump to the level top/bottom. In playback mode Space
     /// plays/pauses and Left/Right step ticks (Shift = 1 second). Inactive while
     /// typing a path or while a combo popup is open.
@@ -560,7 +647,7 @@ public sealed unsafe partial class App
             if (ImGui.IsKeyPressed(ImGuiKey.LeftArrow, true))
             { _playing = false; _playback.SeekTo(_playback.CurrentTick - step); }
             if (ImGui.IsKeyPressed(ImGuiKey.Home)) _playback.SeekTo(1);
-            if (ImGui.IsKeyPressed(ImGuiKey.End)) _playback.SeekTo(_playback.Duration);
+            if (ImGui.IsKeyPressed(ImGuiKey.End)) _playback.SeekTo(_playback.DisplayEnd);
             return;
         }
 
@@ -576,6 +663,10 @@ public sealed unsafe partial class App
     {
         if (_gd == null || _level == null || _shapes == null || CurEpisode == null) return;
         int keepTick = _playback?.CurrentTick ?? 1;
+        // A rebuild is a fresh run of the level, so a live branch cannot survive it -- say so
+        // rather than let the LIVE mark disappear off the bar with no explanation when a
+        // loop-cycle or hold-length nudge quietly re-predicts everything.
+        bool hadBranch = _playback?.Branched ?? false;
         try
         {
             var sim = new GameSim(_gd, CurEpisode, _level, _shapes)
@@ -584,10 +675,10 @@ public sealed unsafe partial class App
                 ScrollMult = _simScrollMult,
                 FireEnabled = _simFire,
                 ExtendedDraw = _simExtendedView,
-                Widescreen = _widescreen,
-                ExpandedParallax = _widescreen && _expandedParallax,   // widescreen-only sub-option
-                MirrorLayers = _widescreen && _mirrorLayers,           // widescreen-only sub-option (draw-only)
-                WideStarfield = _wideStarfield,                        // available in both modes
+                Engaged = _engaged,
+                ExpandedParallax = _engaged && _expandedParallax,   // Engaged-only sub-option
+                MirrorLayers = _engaged && _mirrorLayers,           // Engaged-only sub-option (draw-only)
+                TallStarfield = _tallStarfield,                        // available in both modes
                 ShowScreenFilter = _showScreenFilter,
                 ShowTerrainSmoothies = _showTerrainSmoothies,
                 ShowSpotlight = _showSpotlight,
@@ -606,7 +697,8 @@ public sealed unsafe partial class App
                 (_playback.EndedNaturally ? _playback.LoopDetected
                         ? $"(level end; {_playback.LoopSummary})" : "(level end)"
                     : _playback.LoopDetected ? $"({_playback.LoopSummary})" : "(capped)") +
-                $", built in {_playback.PrecomputeMs} ms";
+                $", built in {_playback.PrecomputeMs} ms" +
+                (hadBranch ? " -- the live branch was discarded with the old run" : "");
         }
         catch (Exception ex)
         {
@@ -623,10 +715,14 @@ public sealed unsafe partial class App
     /// simulation itself is untouched and scrubbing stays exact. Per-layer opacity has no
     /// equivalent on the sim's 8-bit palette surface, so alpha 0 reads as hidden and any
     /// other value as visible.
+    ///
+    /// The stack's <em>order</em> goes across too, through <see cref="SyncPlaybackLayerOrder"/>
+    /// — see App.Layers.cs for why that is four engine flags rather than a permutation.
     /// </summary>
     private void SyncPlaybackVisibility()
     {
         var sim = _playback!.Sim;
+        bool redraw = SyncPlaybackLayerOrder(sim);
         bool bg1 = true, bg2 = true, bg3 = true, star = true;
         int mask = 0;
         foreach (var l in _layers)
@@ -646,7 +742,7 @@ public sealed unsafe partial class App
         // in either case the simulation stops drawing them and the overlay takes over.
         if (_objMode != 0) mask = 0;
 
-        if (sim.ShowBg1 == bg1 && sim.ShowBg2 == bg2 && sim.ShowBg3 == bg3 &&
+        if (!redraw && sim.ShowBg1 == bg1 && sim.ShowBg2 == bg2 && sim.ShowBg3 == bg3 &&
             sim.ShowStarfield == star && sim.ObjectCategoryMask == mask)
             return;
 
@@ -661,7 +757,10 @@ public sealed unsafe partial class App
         if (_pendingJump is { } jump) { _pendingJump = null; SeekPlaybackTo(jump); }
         SyncPlaybackVisibility();
         UpdateGameAudio();
-        if (_playing)
+        // Self-healing: the flag is set from the timeline, which is not drawn in every mode,
+        // so a drag that ends somewhere else must not leave the clock held for good.
+        if (_tlScrubbing && !ImGui.IsMouseDown(ImGuiMouseButton.Left)) _tlScrubbing = false;
+        if (_playing && !_tlScrubbing)
         {
             _playAccum += ImGui.GetIO().DeltaTime * (float)GameSim.TicksPerSecond * _playSpeed;
             int n = (int)_playAccum;
@@ -853,26 +952,42 @@ public sealed unsafe partial class App
             ImGuiWindowFlags.NoNavFocus);
         ImGui.PopStyleVar();
 
-        ImGui.BeginChild("controls", new Vector2(340, 0), ImGuiChildFlags.Borders);
+        // Both side columns are dragged rather than fixed, so they are clamped against the
+        // window that is actually there first -- a width dragged out on a wide screen, or
+        // restored from settings, must not survive into a small window as a canvas of nothing.
+        // Whether the HUD gets its own column is settled in the same breath: it is the first
+        // thing to give, since a floating HUD still shows everything and a squeezed canvas
+        // shows nothing. Both before the canvas draws, because the overlay inside it has to
+        // know which of the two HUD forms is in play.
+        float room = ImGui.GetContentRegionAvail().X;
+        _hudDocked = _playbackMode && _playback != null && _hudPinRight &&
+                     room - _controlsW - SplitW * 2 > _hudColW + MinCanvasW;
+        float rightSide = _hudDocked ? _hudColW + SplitW : 0f;
+        float controlsMax = Math.Max(ControlsWMin,
+            Math.Min(ControlsWMax, room - SplitW - rightSide - MinCanvasW));
+        _controlsW = Math.Clamp(_controlsW, ControlsWMin, controlsMax);
+
+        ImGui.BeginChild("controls", new Vector2(_controlsW, 0), ImGuiChildFlags.Borders);
         DrawControls();
         ImGui.EndChild();
-        ImGui.SameLine();
+        ImGui.SameLine(0, 0);
+        VSplitter("##colsplit", ref _controlsW, ControlsWMin, controlsMax);
+        ImGui.SameLine(0, 0);
 
         // Pinned, the playback HUD is a column of its own on the right -- the mirror of the
         // controls column -- so the canvas gives up that width instead of being covered by it.
-        // Too narrow a window to spare it and the HUD falls back to floating, rather than
-        // leaving a squeezed canvas or no HUD at all. Settled here, before the canvas draws,
-        // because the overlay inside it has to know which of the two forms is in play.
-        _hudDocked = _playbackMode && _playback != null && _hudPinRight &&
-                     ImGui.GetContentRegionAvail().X > HudColW + MinCanvasW;
-        float canvasW = _hudDocked ? -(HudColW + ImGui.GetStyle().ItemSpacing.X) : 0f;
-        ImGui.BeginChild("canvas", new Vector2(canvasW, 0), ImGuiChildFlags.Borders,
+        ImGui.BeginChild("canvas", new Vector2(-rightSide, 0), ImGuiChildFlags.Borders,
             ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
         DrawCanvas();
         ImGui.EndChild();
         if (_hudDocked)
         {
-            ImGui.SameLine();
+            ImGui.SameLine(0, 0);
+            // Mirrored: this strip has the column on its right, so dragging it right makes
+            // that column narrower -- hence the inverted sign.
+            float hudMax = Math.Min(HudColWMax, room - _controlsW - SplitW * 2 - MinCanvasW);
+            VSplitter("##hudsplit", ref _hudColW, HudColWMin, Math.Max(HudColWMin, hudMax), -1f);
+            ImGui.SameLine(0, 0);
             DrawSimColumn();
         }
         ImGui.End();
@@ -894,12 +1009,12 @@ public sealed unsafe partial class App
     /// <summary>
     /// The reference browsers: everything the data set holds that is not the level in the
     /// viewport. They are toggles rather than a menu because each is a window you leave open
-    /// beside the viewer. The first pair reads the episode the picker above is on; the rest
+    /// beside the atlas. The first pair reads the episode the picker above is on; the rest
     /// span the whole data set.
     /// </summary>
     private void DrawReferenceButtons()
     {
-        ImGui.SeparatorText("Reference");
+        UiSection("Reference", AcData, "windows");
         float w = (ImGui.GetContentRegionAvail().X - 5f) / 2f;
         if (Chip("Level tree", _showTree, AcRoutes, w,
                 "The episode's level tree: which level leads to which, including the\n" +
@@ -949,7 +1064,7 @@ public sealed unsafe partial class App
             _showSounds = !_showSounds;
 
         if (Chip("Search  (Ctrl+F)", _showSearch, AcPlayer, -1f,
-                "One box over levels, enemies, items, datacubes and sprites."))
+                "One box over levels, enemies, items, pickups, outposts, datacubes and sprites."))
             OpenSearch();
     }
 
@@ -958,7 +1073,7 @@ public sealed unsafe partial class App
     /// <em>drawn</em>; this one hands the level to the engine and lets it run, which is a
     /// different order of thing entirely -- and as a checkbox filed between the object display
     /// mode and the palette it read as one more of them. So it is a slab instead: the column's
-    /// one big key, sized and lit to say that pressing it changes what the viewer <em>is</em>.
+    /// one big key, sized and lit to say that pressing it changes what the atlas <em>is</em>.
     ///
     /// Armed, it keeps carrying the run -- transport state, speed, position in the timeline --
     /// so the column still reports what the simulation is doing with the playback HUD closed.
@@ -1003,7 +1118,7 @@ public sealed unsafe partial class App
 
         // Armed, a slow breathing ring; running, it breathes at twice the rate. The same cue
         // the level tree puts on the level you are looking at, turned up for the one control
-        // that puts the whole viewer in another mode.
+        // that puts the whole atlas in another mode.
         if (on)
         {
             float pulse = 0.5f + 0.5f * MathF.Sin(t * (_playing ? 4.4f : 2.0f));
@@ -1056,7 +1171,7 @@ public sealed unsafe partial class App
         // that leaves -- a narrowed column loses letters off "PLAYBACK" rather than running
         // the two into each other.
         string time = pb != null
-            ? $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.Duration)}"
+            ? $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.DisplayEnd)}"
             : "";
         float timeW = time.Length > 0 ? ImGui.CalcTextSize(time).X + 10f : 0f;
         ClipScaled(dl, new Vector2(tx, titleY), Math.Max(16f, rx - tx - timeW),
@@ -1097,147 +1212,255 @@ public sealed unsafe partial class App
                 ? "Simulate the level exactly like in-game: enemies move, fire and\n" +
                   "launch, all level events run, camera locked to the player's view.\n" +
                   "Space = play/pause, Left/Right = step (Shift = 1 s)."
-                : "Playback runs the level the viewer has open -- load one first.");
+                : "Playback runs the level the atlas has open -- load one first.");
         ImGui.Dummy(new Vector2(0, 2f));
     }
 
+    // The controls column's own accents. The reference chips already carry their windows'
+    // colours; these are for the sections that belong to the column itself, so that a heading,
+    // its rule and the controls under it read as one block the way they do in every browser.
+    private static readonly uint AcData  = Gfx.Rgba(142, 158, 188);   // where the game lives
+    private static readonly uint AcLevel = Gfx.Rgba(120, 210, 165);   // the level list
+    private static readonly uint AcView  = Gfx.Rgba(168, 176, 202);   // zoom and framing
+
+    /// <summary>
+    /// The controls column. Everything in it is drawn in the same visual language as the seven
+    /// reference browsers -- <see cref="UiSection"/> headings, wells, chips and drawn buttons --
+    /// rather than in ImGui's defaults. It was the last part of the app still speaking the old
+    /// dialect: SeparatorText headings that centre their label, a Combo captioned "display", a
+    /// bordered child of Selectables. Nothing about the arrangement changed; what changed is
+    /// that the column now looks like the windows it opens.
+    /// </summary>
     private void DrawControls()
     {
+        // The same metrics the playback HUD lays out against, so the two columns either side of
+        // the canvas are built to one measure.
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(5, 3));
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(7, 5));
+        DrawControlsBody();
+        ImGui.PopStyleVar(2);
+    }
+
+    private void DrawControlsBody()
+    {
+        float w = ImGui.GetContentRegionAvail().X;
+
         // --- Data folder (always available) ---
-        ImGui.SeparatorText("Tyrian folder");
-        string shown = _dataDir.Length == 0 ? "(none)" : Shorten(_dataDir, 38);
-        ImGui.TextWrapped(shown);
-        ImGui.BeginDisabled(_pickActive);
-        if (ImGui.Button("Browse...")) StartBrowse();
-        ImGui.EndDisabled();
-        ImGui.SameLine(); if (ImGui.Button(_showDirInput ? "Hide path" : "Type path...")) _showDirInput = !_showDirInput;
-        if (_gd != null) { ImGui.SameLine(); if (ImGui.Button("Reload")) LoadData(_dataDir); }
-        if (_pickActive) ImGui.TextDisabled("(choosing folder...)");
+        UiSection("Tyrian folder", AcData);
+        // Cut from the LEFT, not with ClipText's ellipsis on the right: on a path it is the
+        // tail that identifies the folder, and "D:\Projects\Tyrian2000Leve..." says nothing the
+        // heading has not already said. Sized to the column rather than to a fixed character
+        // count, so widening it shows more of the path.
+        float ch = Math.Max(1f, ImGui.CalcTextSize("M").X);
+        UiTextClip(_dataDir.Length == 0 ? "(none)" : Shorten(_dataDir, (int)(w / ch)), UiText, w);
+        if (_dataDir.Length > 0 && ImGui.IsItemHovered()) ImGui.SetTooltip(_dataDir);
+
+        float bw = (w - 10f) / 3f;
+        if (UiButton("Browse...", AcData, "Pick the folder the game's data files are in",
+                bw, _pickActive))
+            StartBrowse();
+        ImGui.SameLine(0, 5);
+        if (UiButton(_showDirInput ? "Hide path" : "Type path", AcData,
+                "Type or paste the folder instead", bw))
+            _showDirInput = !_showDirInput;
+        ImGui.SameLine(0, 5);
+        if (UiButton("Reload", AcData, "Read every data file again", bw, _gd == null) && _gd != null)
+            LoadData(_dataDir);
+        if (_pickActive) ImGui.TextColored(ColorOf(UiFaint), "(choosing folder...)");
         if (_showDirInput) DataDirInput();
 
         if (_gd == null)
         {
-            ImGui.Separator();
+            UiSection("Status", AcStatus);
+            ImGui.PushTextWrapPos(0f);
             ImGui.TextWrapped(_status);
+            ImGui.PopTextWrapPos();
             return;
         }
 
         // --- Episode ---
-        ImGui.SeparatorText("Episode");
-        var ep = CurEpisode!;
+        UiSection("Episode", AcData);
         ImGui.SetNextItemWidth(-1);
         EpisodeCombo("##episode");
 
         DrawReferenceButtons();
         DrawPlaybackLaunch();
 
-        // --- Levels (resizable) ---
-        ImGui.SeparatorText($"Levels ({_browse.Count})");
-        ImGui.BeginChild("levellist", new Vector2(0, _levelsHeight), ImGuiChildFlags.Borders);
-        int shownEp = -1;
-        for (int i = 0; i < _browse.Count; i++)
-        {
-            if (_allEpisodes && _browse[i].Episode != shownEp)
-            {
-                shownEp = _browse[i].Episode;
-                ImGui.SeparatorText($"Episode {_gd.Episodes[shownEp].Number}");
-            }
-            if (ImGui.Selectable(BrowseLabel(_browse[i]) + $"##lvl{i}", i == _levelIdx))
-                SelectLevel(i);
-            if (_scrollLevelListToSelection && i == _levelIdx)
-                ImGui.SetScrollHereY(0.5f);
-        }
-        _scrollLevelListToSelection = false;
-        ImGui.EndChild();
-        HSplitter("##lvlsplit", ref _levelsHeight, 40f, 600f);
+        DrawLevelList(w);
+        DrawLayersPanel();
 
-        // --- Layers (resizable, drag to reorder) ---
-        ImGui.SeparatorText("Layers");
-        bool gameOrder = _gameLayerOrder;
-        if (ImGui.Checkbox("In-game draw order", &gameOrder))
-        {
-            _gameLayerOrder = gameOrder;
-            if (gameOrder && _level != null)
-            {
-                _layers = LayerStack.GameOrder(_layers, _level.ComputeStartFlags());
-                _composeDirty = true;
-            }
-        }
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Order each continuous section the way the level draws it in-game\n(background2over / background3over / topEnemyOver events).\nDragging a layer switches back to manual order.");
-        // Wrapped: the playback line is wider than the 340px panel, and TextDisabled would
-        // otherwise run straight out through the clip rect where it can never be read.
-        ImGui.PushTextWrapPos(0f);
-        ImGui.TextDisabled(_playbackMode
-            ? "playback: visibility applies · order/opacity are the engine's"
-            : "drag a name or use arrows · top = front");
-        ImGui.PopTextWrapPos();
-        if (_layersHeight <= 30)   // first run: size the list to fit every row
-            _layersHeight = _layers.Count * (ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.Y)
-                + ImGui.GetStyle().WindowPadding.Y * 2f + 2f;
-        DrawLayerList();
-        HSplitter("##laysplit", ref _layersHeight, 60f, 700f);
-
-        // --- Objects / view ---
-        ImGui.SeparatorText("Objects (enemies / items)");
+        // --- Objects ---
+        UiSection("Objects", AcDisplay, "enemies / items");
         int mode = _objMode;
-        if (ImGui.Combo("display", &mode, new[] { "Sprites", "Markers", "Off" }, 3)) { _objMode = mode; _composeDirty = true; }
-        if (ImGui.IsItemHovered() && _playbackMode)
-            ImGui.SetTooltip("Markers: category dots instead of sprites, live from the simulation.\nOff hides both. Hovering the game view reports whatever is under the\ncursor in any mode.");
+        if (SegBar("##objmode", ref mode, AcDisplay, w,
+                ("Sprites", "Draw the objects the map places, as the game draws them."),
+                ("Markers", _playbackMode
+                    ? "Category dots instead of sprites, live from the simulation."
+                    : "A coloured dot per object instead of its sprite -- the colours\nare the swatches in the layer list."),
+                ("Off", "Neither. Hovering the view still reports what is under the cursor.")))
+        { _objMode = mode; _composeDirty = true; }
 
         // Playback itself is launched from the slab under the Reference chips, not from here:
         // it is not a display option, and sitting between two of them is what made it look
         // like one.
 
         // --- Palette ---
-        ImGui.SeparatorText("Palette");
+        bool game = _palette == AppSettings.GamePalette;
+        UiSection("Palette", AcSprite, game ? "in-game" : $"#{_palette}");
+        float palW = game ? w : w - 66f;
+        ImGui.SetNextItemWidth(palW);
         int pal = _palette;
-        if (ImGui.SliderInt("index", &pal, 0, Math.Max(0, _gd.Palettes.Count - 1)))
+        if (ImGui.SliderInt("##palidx", &pal, 0, Math.Max(0, _gd.Palettes.Count - 1)))
         { _palette = pal; _composeDirty = true; }
-        if (_palette != AppSettings.GamePalette)
+        if (SliderReset(ref pal, AppSettings.GamePalette,
+                $"Which of the game's {_gd.Palettes.Count} palettes to decode through.\n" +
+                $"Gameplay always runs in palette {AppSettings.GamePalette}.",
+                $"{AppSettings.GamePalette} (in-game)"))
+        { _palette = pal; _composeDirty = true; }
+        if (!game)
         {
-            ImGui.SameLine();
-            if (ImGui.SmallButton($"in-game ({AppSettings.GamePalette})"))
+            ImGui.SameLine(0, 5);
+            if (UiButton("in-game", AcSprite, $"Back to palette {AppSettings.GamePalette}", 61f))
             { _palette = AppSettings.GamePalette; _composeDirty = true; }
         }
-        else ImGui.TextDisabled($"palette {AppSettings.GamePalette} = the in-game gameplay palette");
 
-        // --- View ---
-        ImGui.SeparatorText("View");
+        // --- View, level info, status ---
+        // None of the three belongs to a running simulation. The map view's zoom and scroll are
+        // not what playback draws (it has its own fit / zoom / pin on the transport row), the
+        // level PNG is not what is being looked at, and the two readouts are about the run --
+        // so in playback the whole block moves to the HUD instead of sitting here inert.
+        if (HudLive) return;
+
+        UiSection("View", AcView, $"{_zoom * 100:0}%");
+        ImGui.SetNextItemWidth(w);
         float z = _zoom;
-        if (ImGui.SliderFloat("zoom", &z, MinZoom, MaxZoom, "%.2f", ImGuiSliderFlags.Logarithmic))
+        if (ImGui.SliderFloat("##zoom", &z, MinZoom, MaxZoom, "%.2fx", ImGuiSliderFlags.Logarithmic))
             _zoom = Math.Clamp(z, MinZoom, MaxZoom);
-        if (ImGui.Button("Fit width")) FitWidth();
-        ImGui.SameLine(); if (ImGui.Button("1:1")) { _zoom = 1f; CenterBottom(); }
-        ImGui.SameLine(); if (ImGui.Button("Top")) _scroll.Y = 0;
-        ImGui.SameLine(); if (ImGui.Button("Bottom")) _scroll.Y = _canvasAvail.Y - CanvasHeight() * _zoom;
+        if (SliderReset(ref z, 1f, "How far the map is blown up. Also the wheel over the canvas.", "1:1"))
+        { _zoom = 1f; CenterBottom(); }
 
-        // In playback the map image is not what is being looked at, so the same button saves the
-        // game view instead -- whatever the simulation is currently showing.
-        bool shot = _playbackMode && _playback != null;
-        ImGui.BeginDisabled(_exportActive || _pickActive || (shot ? _gameView.W <= 0 : _level == null));
-        if (ImGui.Button(shot ? "Take screenshot..." : "Save level PNG..."))
-        {
-            if (shot) BeginSaveScreenshot(); else BeginSaveLevelPng();
-        }
-        ImGui.EndDisabled();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(shot
-                ? "Save the current frame exactly as shown: palette, layer visibility,\nwidescreen and extended view all included, at 1:1 pixels."
-                : "Write the whole composited level (current layers/palette) as a PNG.");
-        if (_exportActive) { ImGui.SameLine(); ImGui.TextDisabled("(saving...)"); }
+        float vw = (w - 15f) / 4f;
+        if (UiButton("Fit width", AcView, "Scale the whole map into the canvas width", vw)) FitWidth();
+        ImGui.SameLine(0, 5);
+        if (UiButton("1:1", AcView, "Actual size, at the bottom of the map", vw))
+        { _zoom = 1f; CenterBottom(); }
+        ImGui.SameLine(0, 5);
+        if (UiButton("Top", AcView, "Jump to the top of the map", vw)) _scroll.Y = 0;
+        ImGui.SameLine(0, 5);
+        if (UiButton("Bottom", AcView, "Jump to the bottom -- where the level starts", vw))
+            _scroll.Y = _canvasAvail.Y - CanvasHeight() * _zoom;
+
+        if (UiButton(_exportActive ? "saving..." : "Save level PNG...", AcView,
+                "Write the whole composited level (current layers/palette) as a PNG.", w,
+                _exportActive || _pickActive || _level == null))
+            BeginSaveLevelPng();
 
         if (_level != null)
         {
-            ImGui.SeparatorText("Level info");
-            ImGui.Text($"shapes{char.ToLower(_level.ShapeChar)}.dat   events {_level.Events.Length}");
-            ImGui.Text($"objects {_objects.Count}   enemy pool {_level.LevelEnemy.Length}");
-            if (_timeline?.IsUnrolled == true)
-                ImGui.Text($"continuous length {_timeline.Distance:N0} px");
+            UiSection("Level info", AcLevel);
+            DrawLevelInfoLines();
         }
-        ImGui.SeparatorText("Status");
+        UiSection("Status", AcStatus);
+        ImGui.PushTextWrapPos(0f);
         ImGui.TextWrapped(_status);
-        if (_hoverInfo.Length > 0) ImGui.TextWrapped(_hoverInfo);
+        if (_hoverInfo.Length > 0) ImGui.TextColored(ColorOf(Shade(AcView, 1.05f)), _hoverInfo);
+        ImGui.PopTextWrapPos();
+    }
+
+    /// <summary>
+    /// The level list: a well of two-line rows, the same shape every browser's list has, with
+    /// the episode's own name over the file number it loads from. It was a bordered child of
+    /// bare Selectables, which is the one list in the app that did not look like the others.
+    /// </summary>
+    private void DrawLevelList(float w)
+    {
+        UiSection("Levels", AcLevel, _allEpisodes ? $"{_browse.Count} · all episodes"
+            : $"{_browse.Count}");
+
+        int order = _levelOrder;
+        if (SegBar("##lvlorder", ref order, AcLevel, w,
+                ("file order", "The order the episode's .lvl file holds them in, which is the\n" +
+                    "order they were authored rather than the order they are played:\n" +
+                    "Episode 1 opens on #1 and then runs four levels nobody reaches\n" +
+                    "before #2."),
+                ("play order", "The order the episode script actually plays them in, taken from\n" +
+                    "the same flow graph the level tree draws: layer by layer down the\n" +
+                    "route, branches side by side. Each row says which stage it is on,\n" +
+                    "and whether a save point comes just before it.\n\n" +
+                    "A level two routes reach is listed where it is first reached; one\n" +
+                    "no route reaches at all goes to the end, marked as such.")))
+        {
+            _levelOrder = order;
+            RebuildBrowseList();
+            _scrollLevelListToSelection = true;
+        }
+
+        float rowH = ImGui.GetTextLineHeight() * 2f + 6f;
+        if (_levelsHeight < 40f) _levelsHeight = 170f;
+
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, Gfx.Rgba(0, 0, 0, 0));
+        WellBegin("levellist", new Vector2(w, _levelsHeight), AcLevel, 4f, 4f);
+        int shownEp = -1;
+        for (int i = 0; i < _browse.Count; i++)
+        {
+            var b = _browse[i];
+            if (_allEpisodes && b.Episode != shownEp)
+            {
+                shownEp = b.Episode;
+                UiSection($"Episode {_gd!.Episodes[shownEp].Number}", AcLevel);
+            }
+            var info = _gd!.Episodes[b.Episode].Levels[b.Level];
+            var box = UiRow($"##lvl{i}", i == _levelIdx, AcLevel, rowH);
+            if (box.Clicked) SelectLevel(i);
+            if (_scrollLevelListToSelection && i == _levelIdx) ImGui.SetScrollHereY(0.5f);
+
+            // The second line is only what the name does not already say -- how the level is
+            // reached, and whether it is one of the odd ones. Display would have repeated the
+            // name here, which is what a two-line row must never do.
+            var tags = new List<string>();
+            if (_levelOrder == PlayOrder)
+            {
+                // What the row's position means, spelled out: in play order the sequence is
+                // the information, and a row that says nothing about where it sits leaves you
+                // counting rows to find out.
+                if (b.Stage > 0)
+                {
+                    tags.Add($"stage {b.Stage}");
+                    if (b.Save) tags.Add("save");
+                }
+                // No stage means no campaign route reaches it. Being an arena is a reason, and
+                // the tag below gives it, so saying both would only be saying it twice.
+                else if (!info.TimedBattle) tags.Add("off the route");
+            }
+            if (info.TimedBattle) tags.Add("timed battle");
+            if (info.SecretLevel) tags.Add("secret");
+            if (info.DifficultyGate.Length > 0) tags.Add(info.DifficultyGate.ToLowerInvariant());
+            if (info.BonusLevel) tags.Add("bonus");
+            if (info.GalagaMode) tags.Add("galaga");
+            string trail = $"#{info.FileNum}";
+            RowText(box, 10f, info.Name.Trim().Length > 0 ? info.Name.Trim() : "(unnamed)",
+                string.Join(" · ", tags), AcLevel, box.Selected, TrailRoom(trail));
+            RowTrail(box, trail, box.Selected ? Shade(AcLevel, 1.1f) : UiFaint);
+        }
+        _scrollLevelListToSelection = false;
+        WellEnd();
+        ImGui.PopStyleColor();
+        HSplitter("##lvlsplit", ref _levelsHeight, 40f, 600f);
+    }
+
+    /// <summary>Playback is live and its HUD is on screen -- the panel that carries the view
+    /// controls, the level info and the status line while the simulation runs.</summary>
+    private bool HudLive => _playbackMode && _playback != null;
+
+    /// <summary>What the loaded level is made of. Shown in the controls column normally, and
+    /// in the HUD's STATUS section during playback -- the same three lines either way.</summary>
+    private void DrawLevelInfoLines()
+    {
+        if (_level == null) return;
+        ImGui.Text($"shapes{char.ToLower(_level.ShapeChar)}.dat   events {_level.Events.Length}");
+        ImGui.Text($"objects {_objects.Count}   enemy pool {_level.LevelEnemy.Length}");
+        if (_timeline?.IsUnrolled == true)
+            ImGui.Text($"continuous length {_timeline.Distance:N0} px");
     }
 
     private void DataDirInput()
@@ -1288,7 +1511,7 @@ public sealed unsafe partial class App
 
     /// <summary>
     /// Snapshot the playback frame and ask where to put it. The source is the texture the view
-    /// is drawing, so widescreen, extended view, palette and layer visibility all come along;
+    /// is drawing, so Engaged mode, extended view, palette and layer visibility all come along;
     /// the ImGui overlays on top of it (markers, boxes, OSD) do not.
     /// </summary>
     private void BeginSaveScreenshot()
@@ -1297,7 +1520,7 @@ public sealed unsafe partial class App
         _pendingPixels = _gameView.Snapshot();
         _pendingW = _gameView.W; _pendingH = _gameView.H;
         string name = LevelFileStem() + $"_t{_playback.CurrentTick}" +
-            (_widescreen ? "_wide" : "") + (_simExtendedView ? "_ext" : "") + ".png";
+            (_engaged ? "_engaged" : "") + (_simExtendedView ? "_ext" : "") + ".png";
         StartSavePng("Save the screenshot", name);
     }
 
@@ -1386,81 +1609,6 @@ public sealed unsafe partial class App
     }
 
     private static string Shorten(string s, int max) => s.Length <= max ? s : "..." + s[^(max - 3)..];
-
-    /// <summary>
-    /// The reorderable layer stack. Each row: visibility checkbox, colour swatch (object
-    /// categories), the name (grab and drag it onto another row to reorder), ▲▼ buttons
-    /// for one-step moves, and an opacity slider. Top of the list = drawn in front.
-    /// </summary>
-    private void DrawLayerList()
-    {
-        ImGui.BeginChild("layerlist", new Vector2(0, _layersHeight), ImGuiChildFlags.Borders);
-
-        int moveFrom = -1, moveTo = -1;   // applied after the loop
-        for (int i = 0; i < _layers.Count; i++)
-        {
-            var ly = _layers[i];
-            ImGui.PushID(ly.Id);
-
-            bool vis = ly.Visible;
-            if (ImGui.Checkbox("##vis", &vis)) { ly.Visible = vis; _composeDirty = true; }
-            ImGui.SameLine(0, 4);
-
-            // colour swatch for object categories (spacer otherwise, to keep names aligned)
-            float h = ImGui.GetTextLineHeight();
-            var p = ImGui.GetCursorScreenPos();
-            if (ly.Kind == LayerKind.Objects)
-                ImGui.GetWindowDrawList().AddRectFilled(new Vector2(p.X, p.Y + 2), new Vector2(p.X + h, p.Y + h), ly.Swatch);
-            ImGui.Dummy(new Vector2(h, h));
-            ImGui.SameLine(0, 4);
-
-            // name = drag handle (drag-and-drop source + target)
-            ImGui.Selectable(ly.Name, false, ImGuiSelectableFlags.None, new Vector2(128, 0));
-            if (ImGui.IsItemHovered() && !ImGui.IsMouseDragging(ImGuiMouseButton.Left)) ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-            if (ImGui.BeginDragDropSource(ImGuiDragDropFlags.None))
-            {
-                int payload = i;
-                ImGui.SetDragDropPayload("LAYER", &payload, (nuint)sizeof(int));
-                ImGui.Text(ly.Name);            // "ghost" that follows the cursor
-                ImGui.EndDragDropSource();
-            }
-            if (ImGui.BeginDragDropTarget())
-            {
-                var pl = ImGui.AcceptDragDropPayload("LAYER");
-                if (pl.Handle != null && pl.Data != null) { moveFrom = *(int*)pl.Data; moveTo = i; }
-                ImGui.EndDragDropTarget();
-            }
-
-            // ▲▼ one-step moves (reliable fallback for dragging)
-            ImGui.SameLine(0, 4);
-            ImGui.BeginDisabled(i == 0);
-            if (ImGui.ArrowButton("##up", ImGuiDir.Up)) { moveFrom = i; moveTo = i - 1; }
-            ImGui.EndDisabled();
-            ImGui.SameLine(0, 2);
-            ImGui.BeginDisabled(i == _layers.Count - 1);
-            if (ImGui.ArrowButton("##dn", ImGuiDir.Down)) { moveFrom = i; moveTo = i + 1; }
-            ImGui.EndDisabled();
-
-            ImGui.SameLine(0, 4);
-            int pct = (int)MathF.Round(ly.Alpha / 255f * 100f);
-            ImGui.PushItemWidth(52);
-            if (ImGui.SliderInt("##op", &pct, 0, 100, "%d%%"))
-            { ly.Alpha = (int)MathF.Round(Math.Clamp(pct, 0, 100) / 100f * 255f); _composeDirty = true; }
-            ImGui.PopItemWidth();
-
-            ImGui.PopID();
-        }
-        ImGui.EndChild();
-
-        if (moveFrom >= 0 && moveTo >= 0 && moveFrom != moveTo)
-        {
-            var item = _layers[moveFrom];
-            _layers.RemoveAt(moveFrom);
-            _layers.Insert(Math.Clamp(moveTo, 0, _layers.Count), item);
-            _gameLayerOrder = false;   // manual order takes over until re-checked
-            _composeDirty = true;
-        }
-    }
 
     /// <summary>Is the object category visible per the layer stack? (used for markers)</summary>
     private bool CategoryVisible(ObjCategory cat)
@@ -1593,8 +1741,15 @@ public sealed unsafe partial class App
     //  button rect from simple triangles and bars.
     // =====================================================================
     // Stop / Loop / MarkA / MarkB were added for the music player's transport; the first six
-    // are the playback bar's and are unchanged.
-    private enum Glyph { JumpStart, Rewind, Play, Pause, FastFwd, JumpEnd, Stop, Loop, MarkA, MarkB }
+    // are the playback bar's and are unchanged. StepBack / StepFwd and the three layout marks
+    // came with the timeline redesign -- the single-tick steps and the fit/pin toggles were
+    // text ("-1", "Fit", "Pin right"), which is what kept crowding the row out on a narrow
+    // canvas; the layout marks each show a panel with the shape the toggle gives it.
+    private enum Glyph
+    {
+        JumpStart, Rewind, Play, Pause, FastFwd, JumpEnd, Stop, Loop, MarkA, MarkB,
+        StepBack, StepFwd, Fit, FitUi, PinRight, Revert,
+    }
 
     private static void TriRight(ImDrawListPtr dl, Vector2 c, float r, uint col)
         => dl.AddTriangleFilled(
@@ -1667,6 +1822,65 @@ public sealed unsafe partial class App
                 break;
             }
 
+            // A play mark against a bar: one frame that way, as against Rewind's two triangles
+            // for continuous motion. The bar is on the side travelled towards, so the pair
+            // mirror each other around the hero key between them.
+            case Glyph.StepBack:
+                TriLeft(dl, new Vector2(c.X + r * 0.30f, c.Y), r * 0.92f, col);
+                VBar(dl, c.X - r * 0.86f, c.Y, r * 0.92f, tk * 0.85f, col);
+                break;
+            case Glyph.StepFwd:
+                TriRight(dl, new Vector2(c.X - r * 0.30f, c.Y), r * 0.92f, col);
+                VBar(dl, c.X + r * 0.86f, c.Y, r * 0.92f, tk * 0.85f, col);
+                break;
+
+            // The three layout marks are the same panel outline with different contents, so
+            // they read as a set: the frame filled edge to edge, the frame sharing the space
+            // with a floating card, and the card taken out to the edge as a column.
+            case Glyph.Fit:
+            {
+                var a = new Vector2(c.X - r * 1.15f, c.Y - r * 0.86f);
+                var b = new Vector2(c.X + r * 1.15f, c.Y + r * 0.86f);
+                dl.AddRect(a, b, col, 1.5f, 0, 1.3f);
+                dl.AddRectFilled(a + new Vector2(2f, 2f), b - new Vector2(2f, 2f), col, 1f);
+                break;
+            }
+            case Glyph.FitUi:
+            {
+                var a = new Vector2(c.X - r * 1.15f, c.Y - r * 0.86f);
+                var b = new Vector2(c.X + r * 1.15f, c.Y + r * 0.86f);
+                dl.AddRect(a, b, col, 1.5f, 0, 1.3f);
+                float split = c.X + r * 0.18f;
+                dl.AddRectFilled(a + new Vector2(2f, 2f), new Vector2(split - 1.5f, b.Y - 2f),
+                    Alpha(col, 120), 1f);
+                dl.AddRectFilled(new Vector2(split, a.Y + 1.5f), b - new Vector2(1.5f, 1.5f), col, 1f);
+                break;
+            }
+            case Glyph.PinRight:
+            {
+                var a = new Vector2(c.X - r * 1.15f, c.Y - r * 0.86f);
+                var b = new Vector2(c.X + r * 1.15f, c.Y + r * 0.86f);
+                dl.AddRect(a, b, col, 1.5f, 0, 1.3f);
+                dl.AddRectFilled(new Vector2(c.X + r * 0.30f, a.Y), b, col, 1.5f);
+                break;
+            }
+
+            // Undo: the loop ring run the other way, so "put it back" is visibly the reverse
+            // of the repeat mark rather than a new idea.
+            case Glyph.Revert:
+            {
+                float rr = r * 0.95f;
+                dl.PathArcTo(c, rr, -1.28f * MathF.PI, 0.38f * MathF.PI, 24);
+                dl.PathStroke(col, ImDrawFlags.None, MathF.Max(1.5f, tk));
+                var tip = new Vector2(c.X + rr * MathF.Cos(0.38f * MathF.PI),
+                    c.Y + rr * MathF.Sin(0.38f * MathF.PI));
+                float a2 = r * 0.62f;
+                dl.AddTriangleFilled(tip + new Vector2(a2 * 0.9f, -a2 * 0.1f),
+                    tip + new Vector2(-a2 * 0.45f, -a2 * 0.8f),
+                    tip + new Vector2(-a2 * 0.2f, a2 * 0.7f), col);
+                break;
+            }
+
             case Glyph.MarkA:
             case Glyph.MarkB:
             {
@@ -1682,39 +1896,79 @@ public sealed unsafe partial class App
         }
     }
 
-    /// <summary>A transport button with a vector-drawn icon; returns true on click.</summary>
+    /// <summary>
+    /// A transport button with a vector-drawn icon; returns true on click. Sitting in the
+    /// well the transport row draws behind them, the ordinary keys are nearly transparent
+    /// and earn their fill by being hovered -- so the eye goes to the two that are coloured
+    /// on purpose: the hero play key, and whichever mode is currently running.
+    /// </summary>
     private bool TransportBtn(string id, Glyph g, string tip, Vector2 size,
         bool primary = false, bool active = false, float gap = 4f)
     {
-        int pushed = 0;
-        if (primary)
-        {
-            ImGui.PushStyleColor(ImGuiCol.Button, Gfx.Rgba(58, 104, 182));
-            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Gfx.Rgba(78, 128, 212));
-            ImGui.PushStyleColor(ImGuiCol.ButtonActive, Gfx.Rgba(98, 150, 232));
-            pushed = 3;
-        }
-        else if (active)
-        {
-            ImGui.PushStyleColor(ImGuiCol.Button, Gfx.Rgba(150, 92, 52));
-            ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Gfx.Rgba(184, 116, 68));
-            ImGui.PushStyleColor(ImGuiCol.ButtonActive, Gfx.Rgba(206, 138, 84));
-            pushed = 3;
-        }
+        uint face = primary ? Gfx.Rgba(52, 100, 180) : active ? Gfx.Rgba(150, 92, 52)
+            : Gfx.Rgba(44, 47, 58, 190);
+        ImGui.PushStyleColor(ImGuiCol.Button, face);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, Shade(face, 1.32f, 245));
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, Shade(face, 1.55f));
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 4f);
 
         bool hit = ImGui.Button(id, size);
         if (ImGui.IsItemHovered()) ImGui.SetTooltip(tip);
 
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(3);
+
         var mn = ImGui.GetItemRectMin();
         var mx = ImGui.GetItemRectMax();
+        var dl = ImGui.GetWindowDrawList();
+
+        // A hairline lip along the top edge, and -- on the two keys that mean something is
+        // running -- a lit bar along the bottom, which is what carries "this mode is on"
+        // once the faces themselves are this quiet.
+        dl.AddLine(new Vector2(mn.X + 3f, mn.Y + 0.5f), new Vector2(mx.X - 3f, mn.Y + 0.5f),
+            Gfx.Rgba(255, 255, 255, (byte)(primary || active ? 55 : 26)));
+        if (primary || active)
+            dl.AddRectFilled(new Vector2(mn.X + 3f, mx.Y - 2f), new Vector2(mx.X - 3f, mx.Y - 0.5f),
+                Shade(face, 2.1f, 235), 1f);
+
         var c = new Vector2((mn.X + mx.X) * 0.5f, (mn.Y + mx.Y) * 0.5f);
         float r = MathF.Max(3f, MathF.Round((mx.Y - mn.Y) * 0.22f));
         float tk = MathF.Max(1.5f, r * 0.28f);
-        uint col = Gfx.Rgba(241, 241, 247);
-        PaintGlyph(ImGui.GetWindowDrawList(), c, r, tk, col, col, g);
+        uint col = primary || active ? Gfx.Rgba(255, 255, 255) : Gfx.Rgba(214, 218, 232);
+        PaintGlyph(dl, c, r, tk, col, col, g);
 
-        if (pushed > 0) ImGui.PopStyleColor(pushed);
         ImGui.SameLine(0, gap);
+        return hit;
+    }
+
+    /// <summary>
+    /// <see cref="Chip"/>'s toggle, wearing a glyph instead of a label. The transport row's
+    /// layout toggles are the same kind of thing the HUD's chips are -- a flag that lights up
+    /// in its section's accent -- but that row has to survive a canvas barely wider than the
+    /// controls themselves, and three words were the first thing it had to give up.
+    /// </summary>
+    private bool IconChip(string id, Glyph g, bool on, uint accent, float w, string tip)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Button, on ? Shade(accent, 0.42f, 235) : Gfx.Rgba(40, 42, 52, 220));
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, on ? Shade(accent, 0.58f, 245) : Gfx.Rgba(58, 62, 76, 235));
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, on ? Shade(accent, 0.74f) : Gfx.Rgba(74, 80, 96));
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3f);
+        bool hit = ImGui.Button(id, new Vector2(w, ImGui.GetFrameHeight()));
+        ImGui.PopStyleVar();
+        ImGui.PopStyleColor(3);
+        if (ImGui.IsItemHovered()) ImGui.SetTooltip(tip);
+
+        var mn = ImGui.GetItemRectMin();
+        var mx = ImGui.GetItemRectMax();
+        var dl = ImGui.GetWindowDrawList();
+        if (on) dl.AddRectFilled(mn, new Vector2(mn.X + 2.5f, mx.Y), accent, 2f);
+
+        var c = new Vector2((mn.X + mx.X) * 0.5f, (mn.Y + mx.Y) * 0.5f);
+        // Larger than the transport keys' marks: these are panel diagrams rather than
+        // silhouettes, and the difference between them is a few pixels of where the fill is.
+        float r = MathF.Max(4f, MathF.Round((mx.Y - mn.Y) * 0.30f));
+        uint col = on ? Gfx.Rgba(246, 249, 255) : Gfx.Rgba(158, 163, 178);
+        PaintGlyph(dl, c, r, MathF.Max(1.5f, r * 0.28f), col, col, g);
         return hit;
     }
 
@@ -1732,14 +1986,34 @@ public sealed unsafe partial class App
     // Appended, never reordered: the persisted fold state is a bitmask indexed by this.
     private enum PbSec { Sim, Build, Player, Enemies, Display, Routes, Status, Audio }
 
-    private const float HudW = 258f;      // fixed content width, so the chip grid comes out even
-    // Pinned, the HUD is a column: its content width plus the padding either side and room for
-    // a scrollbar, so unfolding every section never squeezes the chip grid.
-    private const float HudColW = HudW + 40f;
+    // The HUD's content width -- everything in it lays out against this, so the chip grid comes
+    // out even at any size and fills whatever the panel actually gives it. Measured, never
+    // assumed: each form owns its own outer size (the window's edge when floating, _hudColW
+    // when pinned) and this is read back off it, which is the only way a chip row and the panel
+    // holding it cannot drift apart by a padding or a scrollbar.
+    private float _hudW = HudWDefault;
+    private const float HudWDefault = 258f, HudWMin = 210f, HudWMax = 620f;
+    // Floating, the window is that much wider than its content: PushHudMetrics' padding on
+    // both sides. What the width constraints and the first-run size are expressed in.
+    private const float HudChromeW = 22f;
+    /// <summary>Height the floating HUD's body needed last frame; the next frame's constraint.</summary>
+    private float _hudAutoH;
+    // Pinned, the HUD is a column, and the column is what its splitter drags -- the content
+    // width follows from it, not the other way round. The default is the old fixed column, so
+    // the panel is the width it always was; what changed is that the chips now reach its edge.
+    private float _hudColW = HudWDefault + 40f;
+    private const float HudColWMin = HudWMin + HudChromeW;
+    private const float HudColWMax = HudWMax + HudChromeW + 16f;   // + room for the scrollbar
     // What the canvas must keep for the column to be worth giving up the width: the transport
     // row's own floor, every control on it at its shortest (measured: ~442px at the default
     // font). Under that the HUD goes back to floating rather than leave a row that clips.
     private const float MinCanvasW = 460f;
+
+    // The controls column on the left, likewise draggable. Its floor is the widest thing in it
+    // that cannot reflow -- the layer rows' arrows and alpha field beside a readable name.
+    private float _controlsW = ControlsWDefault;
+    private const float ControlsWDefault = 340f, ControlsWMin = 260f, ControlsWMax = 720f;
+    private const float SplitW = 6f;   // the drag strip between two columns (VSplitter's width)
     private static readonly uint HudBg = Gfx.Rgba(15, 17, 23, 236);
     private static readonly uint AcSim     = Gfx.Rgba(255, 190,  90);
     private static readonly uint AcBuild   = Gfx.Rgba(110, 225, 195);
@@ -1832,9 +2106,16 @@ public sealed unsafe partial class App
         dl.AddRectFilled(new Vector2(mn.X - 7f, mn.Y + 1f), new Vector2(mn.X - 4f, mx.Y - 1f), accent);
         if (badge.Length > 0)
         {
-            var sz = ImGui.CalcTextSize(badge);
-            dl.AddText(new Vector2(mx.X - sz.X - 6f, mn.Y + (mx.Y - mn.Y - sz.Y) * 0.5f),
-                Shade(accent, 0.95f, 170), badge);
+            // Cut to whatever the title leaves. A badge is live text -- a song name, a device,
+            // a coordinate -- and right-aligned text that outgrows its room grows leftwards:
+            // AUDIO's badge carries the level's song title, and "opl . gyges, will you please
+            // help me?" ran straight through the word AUDIO. The header's own arrow is a square
+            // of the font size, and the title starts one frame padding after it.
+            float titleEnd = mn.X + ImGui.GetFontSize() + ImGui.GetStyle().FramePadding.X * 2f
+                + ImGui.CalcTextSize(title).X;
+            float lh = ImGui.GetTextLineHeight();
+            ClipTextRight(dl, mx.X - 6f, mn.Y + (mx.Y - mn.Y - lh) * 0.5f,
+                mx.X - 6f - titleEnd - 8f, Shade(accent, 0.95f, 170), badge);
         }
         return open;
     }
@@ -1854,10 +2135,22 @@ public sealed unsafe partial class App
         var hudEdge = ImGui.GetMainViewport().WorkPos;
         if (_hudSize.X > 0f && (_hudPos.X < hudEdge.X || _hudPos.Y < hudEdge.Y))
             ImGui.SetNextWindowPos(Vector2.Max(_hudPos, hudEdge));
-        // Auto-sized, but never taller than the view it floats over: unfold every section on a
-        // short window and the HUD scrolls instead of running off the bottom of the screen.
-        ImGui.SetNextWindowSizeConstraints(Vector2.Zero,
-            new Vector2(4096f, Math.Max(220f, viewSize.Y - 24f)));
+        // Width is the user's -- drag an edge like any other window -- while the height still
+        // follows the content, which is what makes folding a section actually shrink the panel.
+        // AlwaysAutoResize gives the second for free but turns manual resizing off altogether,
+        // so the height is pinned through the size constraint instead (min and max the same
+        // value), measured off the body's own cursor at the end of the previous frame. Capped at
+        // the view it floats over: unfold everything on a short window and the HUD scrolls
+        // rather than running off the bottom of the screen.
+        float capH = Math.Max(220f, viewSize.Y - 24f);
+        float wantH = Math.Clamp(_hudAutoH > 0f ? _hudAutoH : 520f, 120f, capH);
+        // Room for a scrollbar on top of the padding, since with every section unfolded there
+        // will be one -- without it the default width lands 14px short of the pinned column's
+        // and the header pills clip.
+        float chrome = HudChromeW + ImGui.GetStyle().ScrollbarSize;
+        ImGui.SetNextWindowSize(new Vector2(_hudW + chrome, wantH), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSizeConstraints(
+            new Vector2(HudWMin + HudChromeW, wantH), new Vector2(HudWMax + chrome, wantH));
 
         ImGui.PushStyleColor(ImGuiCol.WindowBg, HudBg);
         ImGui.PushStyleColor(ImGuiCol.Border, Gfx.Rgba(92, 104, 140, 210));
@@ -1868,13 +2161,19 @@ public sealed unsafe partial class App
         PushHudMetrics();
 
         bool hudOpen = ImGui.Begin("Playback controls##pbhud",
-            ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.AlwaysAutoResize |
+            ImGuiWindowFlags.NoSavedSettings |
             ImGuiWindowFlags.NoNavInputs | ImGuiWindowFlags.NoNavFocus |
             ImGuiWindowFlags.NoFocusOnAppearing);
         // Its rect, collapsed or not, is what "UI fit" keeps the game view clear of.
         _hudPos = ImGui.GetWindowPos();
         _hudSize = ImGui.GetWindowSize();
-        if (hudOpen) DrawHudBody(pb);
+        if (hudOpen)
+        {
+            DrawHudBody(pb);
+            // What the next frame's height constraint is. Cursor-relative, so it is the height
+            // the body actually needs whether or not this frame had to scroll to show it.
+            _hudAutoH = ImGui.GetCursorPosY() + ImGui.GetStyle().WindowPadding.Y;
+        }
         ImGui.End();
         PopHudMetrics();
         ImGui.PopStyleColor(4);
@@ -1890,7 +2189,7 @@ public sealed unsafe partial class App
         var pb = _playback!;
         ImGui.PushStyleColor(ImGuiCol.ChildBg, HudBg);
         PushHudMetrics();
-        ImGui.BeginChild("pbcolumn", new Vector2(HudColW, 0), ImGuiChildFlags.Borders);
+        ImGui.BeginChild("pbcolumn", new Vector2(_hudColW, 0), ImGuiChildFlags.Borders);
         // Nothing overlaps the view in this mode, but keep the rect live so an unpin lands
         // "UI fit" on a truthful rectangle on the very next frame.
         _hudPos = ImGui.GetWindowPos();
@@ -1916,8 +2215,14 @@ public sealed unsafe partial class App
     {
         var sim = pb.Sim;
 
+        // Everything below lays out against the panel's content width, so take it from the
+        // panel -- the window's, floating, the column's when pinned. Safe in both because
+        // neither outer size is derived from this: measuring is the whole point, since the
+        // column used to hand its chips a fixed width and keep the padding difference as a
+        // dead strip down its right edge.
+        _hudW = Math.Clamp(ImGui.GetContentRegionAvail().X, HudWMin, HudWMax);
         // Pin the width so folding sections never reflows the chip grid.
-        ImGui.Dummy(new Vector2(HudW, 0));
+        ImGui.Dummy(new Vector2(_hudW, 0));
         DrawHudHeader(pb);
 
         if (Section(PbSec.Sim, "SIMULATION", AcSim,
@@ -1925,7 +2230,7 @@ public sealed unsafe partial class App
             DrawSimSection();
 
         if (Section(PbSec.Build, "ENGINE BUILD", AcBuild,
-                _widescreen ? $"widescreen {GameSim.WideViewW}" : $"vanilla {GameSim.ViewW}"))
+                _engaged ? $"engaged {GameSim.EngagedViewW}" : $"vanilla {GameSim.ViewW}"))
             DrawBuildSection(sim);
 
         if (Section(PbSec.Player, "PLAYER", AcPlayer, $"{_simPlayerX}, {_simPlayerY}"))
@@ -1941,7 +2246,9 @@ public sealed unsafe partial class App
         if (Section(PbSec.Audio, "AUDIO", AcMusic, AudioBadge()))
             DrawAudioSection();
 
-        if (Section(PbSec.Routes, "ROUTES & GATES", AcRoutes, $"{pb.LoopRegions.Count}"))
+        if (Section(PbSec.Routes, "ROUTES & GATES", AcRoutes,
+                pb.Branched ? $"{pb.LoopRegions.Count} +{pb.BranchRegions.Count} live"
+                            : $"{pb.LoopRegions.Count}"))
             DrawRoutesAndGates(pb);
 
         if (Section(PbSec.Status, "STATUS", AcStatus, $"{sim.EnemyOnScreen} on screen"))
@@ -1952,34 +2259,50 @@ public sealed unsafe partial class App
     /// where the playhead is -- then the one-click presets.</summary>
     private void DrawHudHeader(SimPlayback pb)
     {
-        Pill(_widescreen ? $"WIDE {GameSim.WideViewW}" : $"VANILLA {GameSim.ViewW}",
-            _widescreen ? AcBuild : AcIdle);
+        // Three pills on one row, and at the narrow end of the HUD's width they do not fit --
+        // a pill lays out at the size of its own text, so the third simply ran off the panel.
+        // The build word gives up its number first, then the row breaks after the second pill,
+        // which is the last thing that still leaves all three readable.
+        string build = _engaged ? $"ENGAGED {GameSim.EngagedViewW}" : $"VANILLA {GameSim.ViewW}";
+        string state = _playing
+            ? _playDirection > 0 ? $">> x{_playSpeed:0.##}" : $"<< x{_playSpeed:0.##}"
+            : "paused";
+        // Against DisplayEnd, not Duration: a live branch can outrun the predicted length, and
+        // this read "9:20.0 / 8:09.1" -- a clock past its own total -- for as long as it did.
+        string clock =
+            $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.DisplayEnd)}";
+        float PillW(string s) => ImGui.CalcTextSize(s).X + 12f;
+
+        if (PillW(build) + PillW(state) + PillW(clock) + 8f > _hudW)
+            build = _engaged ? "ENGAGED" : "VANILLA";
+        bool oneRow = PillW(build) + PillW(state) + PillW(clock) + 8f <= _hudW;
+
+        Pill(build, _engaged ? AcBuild : AcIdle);
         ImGui.SameLine(0, 4);
-        Pill(_playing ? _playDirection > 0 ? $">> x{_playSpeed:0.##}" : $"<< x{_playSpeed:0.##}" : "paused",
-            _playing ? AcGo : AcIdle);
-        ImGui.SameLine(0, 4);
-        Pill($"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.Duration)}", AcStatus);
+        Pill(state, _playing ? AcGo : AcIdle);
+        if (oneRow) ImGui.SameLine(0, 4);
+        Pill(clock, pb.Branched ? TlLive : AcStatus);
 
         // Presets. Each is lit while the current flags already match it, so the row doubles
         // as a readout of which build you are watching.
-        float w = (HudW - 10f) / 3f;
-        bool vanillaNow = !_widescreen && !_wideStarfield;
-        bool wideNow = _widescreen && !_expandedParallax && _mirrorLayers && _wideStarfield;
+        float w = (_hudW - 10f) / 3f;
+        bool vanillaNow = !_engaged && !_tallStarfield;
+        bool engagedNow = _engaged && !_expandedParallax && _mirrorLayers && _tallStarfield;
         bool cleanNow = FxLayerCount() == 0;
 
         if (Chip("Vanilla", vanillaNow, AcSim, w,
                 "The DOS game exactly: 264px playfield and the original starfield.\n" +
                 "With these two off, playback is byte-for-byte the original.", true))
-        { _wideStarfield = false; SetWidescreen(false); }
+        { _tallStarfield = false; SetEngaged(false); }
         ImGui.SameLine(0, 5);
-        if (Chip("Widescreen", wideNow, AcBuild, w,
-                "The widescreen build: 299px playfield, mirrored layers and the\n" +
+        if (Chip("Engaged", engagedNow, AcBuild, w,
+                "The Engaged build: 299px playfield, mirrored layers and the\n" +
                 "rewritten full-height starfield. Extra parallax is left off --\n" +
                 "it re-spaces every layer, so it is opt-in from ENGINE BUILD.", true))
         {
             _expandedParallax = false;
-            _mirrorLayers = _wideStarfield = true;
-            SetWidescreen(true);
+            _mirrorLayers = _tallStarfield = true;
+            SetEngaged(true);
         }
         ImGui.SameLine(0, 5);
         if (Chip("Clean", cleanNow, AcDisplay, w,
@@ -1988,67 +2311,90 @@ public sealed unsafe partial class App
                 "reading the level itself. Press it again to put them all back.\n" +
                 "Draw-only -- the simulation is untouched."))
             SetAllFx(cleanNow);
+
+        // The one action that belongs to the frame rather than to the run, so it rides with the
+        // presets in the always-visible header instead of inside a section that folds shut. The
+        // controls column no longer carries it: in playback that column saves the map, and the
+        // map is not what is on screen.
+        ImGui.BeginDisabled(_exportActive || _pickActive || _gameView.W <= 0);
+        if (Chip(_exportActive ? "saving..." : "Take screenshot...", false, AcStatus, _hudW,
+                "Save the current frame exactly as shown: palette, layer visibility,\n" +
+                "Engaged mode and extended view all included, at 1:1 pixels.\n" +
+                "The markers, boxes and OSD drawn over it are not included."))
+            BeginSaveScreenshot();
+        ImGui.EndDisabled();
     }
 
     private void DrawSimSection()
     {
-        ImGui.PushItemWidth(HudW - 84f);
+        ImGui.PushItemWidth(_hudW - 84f);
         int dif = _simDifficulty;
         if (ImGui.Combo("difficulty", &dif, DifficultyNames, DifficultyNames.Length))
         { _simDifficulty = dif; BuildPlayback(); }
 
+        // Every slider below rebuilds the timeline when it is let go, which is what makes the
+        // right-click reset worth having here above all: trying a value costs a rebuild, and
+        // getting back from one used to mean remembering the number and dialling it in. The
+        // reset rebuilds too -- IsItemDeactivatedAfterEdit never fires for a click that was
+        // not a drag, so the rebuild hangs off the reset's own return instead.
         float mult = _simScrollMult;
         if (ImGui.SliderFloat("scroll speed", &mult, 0.25f, 3f, "x%.2f"))
             _simScrollMult = mult;
-        if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("What-if terrain scroll multiplier. The level's own variable\nscroll-rate events still apply on top; the event clock follows\nthe terrain, so spawn pacing changes with it.");
+        bool reset = SliderReset(ref mult, 1f,
+            "What-if terrain scroll multiplier. The level's own variable\nscroll-rate events still apply on top; the event clock follows\nthe terrain, so spawn pacing changes with it.", "x1");
+        if (reset) _simScrollMult = mult;
+        if (reset || ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
 
         int cap = _simMaxMinutes;
         if (ImGui.SliderInt("cap (min)", &cap, 1, 30))
             _simMaxMinutes = cap;
-        if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
+        reset = SliderReset(ref cap, DefaultMaxMinutes,
+            "How far the precompute is allowed to run before it gives up\nand calls the timeline capped.", "10 min");
+        if (reset) _simMaxMinutes = cap;
+        if (reset || ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
 
         int loops = _simLoopCycles;
         if (ImGui.SliderInt("loop cycles", &loops, 1, 8))
             _simLoopCycles = loops;
-        if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("How many times each boss gate / route loop repeats in the\npreview before it continues as if the gate was cleared. The\nloop still plays once on the way in. Higher = watch more\nrepeats, but a longer build and timeline.");
+        reset = SliderReset(ref loops, DefaultLoopCycles,
+            "How many times each boss gate / route loop repeats in the\npreview before it continues as if the gate was cleared. The\nloop still plays once on the way in. Higher = watch more\nrepeats, but a longer build and timeline.");
+        if (reset) _simLoopCycles = loops;
+        if (reset || ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
 
         int hold = _simHoldSeconds;
         if (ImGui.SliderInt("enemy hold", &hold, 1, 120, "%d s"))
             _simHoldSeconds = hold;
-        if (ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("The other kind of gate: the map stops with live enemies on it\nand no script left to release them -- it waits for the player to\nkill them. Nothing repeats, so this is simply how long that\nstandoff is watched before the preview destroys them and moves\non, and how much of it the timeline keeps to inspect.");
+        reset = SliderReset(ref hold, DefaultHoldSeconds,
+            "The other kind of gate: the map stops with live enemies on it\nand no script left to release them -- it waits for the player to\nkill them. Nothing repeats, so this is simply how long that\nstandoff is watched before the preview destroys them and moves\non, and how much of it the timeline keeps to inspect.", "20 s");
+        if (reset) _simHoldSeconds = hold;
+        if (reset || ImGui.IsItemDeactivatedAfterEdit()) BuildPlayback();
         ImGui.PopItemWidth();
 
-        if (Chip("enemy fire", _simFire, AcSim, HudW,
+        if (Chip("enemy fire", _simFire, AcSim, _hudW,
                 "Simulate enemy turrets firing and launching.", true))
         { _simFire = !_simFire; BuildPlayback(); }
     }
 
-    /// <summary>Which engine the playback is: playfield width and the widescreen build's
+    /// <summary>Which engine the playback is: playfield width and the Engaged build's
     /// three enhancements. Everything here except mirroring changes the simulation.</summary>
     private void DrawBuildSection(GameSim sim)
     {
-        float w = (HudW - 5f) / 2f;
+        float w = (_hudW - 5f) / 2f;
 
-        if (Chip("widescreen", _widescreen, AcBuild, w,
-                "Play in true widescreen (299px playfield vs the vanilla 264),\n" +
-                "exactly like the widescreen game build: wider view and player\n" +
-                "range, parallax, spotlight, terrain filters and starfield across\n" +
-                "the full 356px surface, and enemies / shots that persist across\n" +
-                "the widened edges. The build's bigger starfield draws from the\n" +
-                "same RNG as the level, so spawns differ from vanilla -- as they\n" +
-                "do in the real build.", true))
-            SetWidescreen(!_widescreen);
+        if (Chip("engaged", _engaged, AcBuild, w,
+                "Play as the Engaged build does: a 299px playfield instead of\n" +
+                "the vanilla 264, with wider view and player range, parallax,\n" +
+                "spotlight, terrain filters and starfield across the full 356px\n" +
+                "surface, and enemies / shots that persist across the widened\n" +
+                "edges. The build's bigger starfield draws from the same RNG as\n" +
+                "the level, so spawns differ from vanilla -- as they do in the\n" +
+                "real build.", true))
+            SetEngaged(!_engaged);
         ImGui.SameLine(0, 5);
-        // Not a widescreen sub-option: vanilla's starfield stops seven rows above the
+        // Not an Engaged sub-option: vanilla's starfield stops seven rows above the
         // playfield bottom at either width, so the rewrite is worth having in both modes.
-        if (Chip("tall starfield", _wideStarfield, AcBuild, w,
-                "Widescreen build's rewritten starfield: 330 stars that only\n" +
+        if (Chip("tall starfield", _tallStarfield, AcBuild, w,
+                "Engaged build's rewritten starfield: 330 stars that only\n" +
                 "ever move down, filling the playfield to its bottom edge and out\n" +
                 "to the full screen width, recycling above the top instead of\n" +
                 "popping in. Off = vanilla's 100 stars on a 16-bit position, which\n" +
@@ -2057,13 +2403,13 @@ public sealed unsafe partial class App
                 "leaving it on is the one way vanilla playback is not byte-for-byte.\n" +
                 "The two seed different counts from the level RNG, so spawns shift\n" +
                 "-- as they do between the real builds.", true))
-        { _wideStarfield = !_wideStarfield; BuildPlayback(); }
+        { _tallStarfield = !_tallStarfield; BuildPlayback(); }
 
-        // The remaining two are widescreen-only: shown disabled rather than hidden, so the
+        // The remaining two are Engaged-only: shown disabled rather than hidden, so the
         // build's full feature set stays visible from vanilla mode.
-        ImGui.BeginDisabled(!_widescreen);
-        if (Chip("extra parallax", _widescreen && _expandedParallax, AcBuild, w,
-                "Wider parallax (widescreen build's Extra Parallax): the terrain\n" +
+        ImGui.BeginDisabled(!_engaged);
+        if (Chip("extra parallax", _engaged && _expandedParallax, AcBuild, w,
+                "Wider parallax (Engaged build's Extra Parallax): the terrain\n" +
                 "layer pans edge-to-edge across its full 336px map over the\n" +
                 "player's travel -- nothing left hidden off either side -- and the\n" +
                 "mid/deep layers sweep proportionally further (uncovering their\n" +
@@ -2071,8 +2417,8 @@ public sealed unsafe partial class App
                 "and slide much further too.", true))
         { _expandedParallax = !_expandedParallax; BuildPlayback(); }
         ImGui.SameLine(0, 5);
-        if (Chip("mirror layers", _widescreen && _mirrorLayers, AcBuild, w,
-                "Widescreen build's Mirrored Layers: where the parallax pans a\n" +
+        if (Chip("mirror layers", _engaged && _mirrorLayers, AcBuild, w,
+                "Engaged build's Mirrored Layers: where the parallax pans a\n" +
                 "background layer past its own side edge, the layer continues as\n" +
                 "a seamless mirror image of itself instead of wrapping into the\n" +
                 "adjacent map row. Also carries each row one clipped tile past\n" +
@@ -2083,11 +2429,11 @@ public sealed unsafe partial class App
         {
             // Draw-only (tile reads/flips at blit time), so no timeline rebuild needed.
             _mirrorLayers = !_mirrorLayers;
-            sim.MirrorLayers = _widescreen && _mirrorLayers;
+            sim.MirrorLayers = _engaged && _mirrorLayers;
             _playback!.RedrawCurrent();
         }
         ImGui.EndDisabled();
-        if (!_widescreen) ImGui.TextDisabled("(those two are widescreen-only)");
+        if (!_engaged) ImGui.TextDisabled("(those two are Engaged-only)");
     }
 
     /// <summary>The phantom player: the marker toggles, and its position with the jump
@@ -2095,7 +2441,7 @@ public sealed unsafe partial class App
     /// so the readout stays available in every mode.</summary>
     private void DrawPlayerSection()
     {
-        float w = (HudW - 5f) / 2f;
+        float w = (_hudW - 5f) / 2f;
         if (Chip("drag player", _playerSimMode, AcPlayer, w,
                 "Show a draggable player marker on the view. The parallax\nbackground scroll, the light cone and enemy aim/fire all\nfollow it, exactly as the engine derives them in-game.\nThe position sticks when you turn the marker back off.\nRight-drag on the view moves the player whether or not\nthe marker is shown."))
         {
@@ -2112,7 +2458,7 @@ public sealed unsafe partial class App
         ImGui.EndDisabled();
 
         // Playfield-centre targets, from the phantom-player -> buffer mapping.
-        // cX widens with the playfield (149 vanilla / 166 widescreen).
+        // cX widens with the playfield (149 vanilla / 166 Engaged).
         int cX = GameSim.OX + GameSim.ViewX + PlayfieldW / 2 - PlayerBufOX;
         const int cY = GameSim.OY + GameSim.ViewH / 2 - PlayerBufOY;                  // 80
         void SetPlayer(int px, int py)
@@ -2142,7 +2488,7 @@ public sealed unsafe partial class App
 
     private void DrawEnemySection()
     {
-        float w = (HudW - 5f) / 2f;
+        float w = (_hudW - 5f) / 2f;
         if (Chip("click damages", _clickKill, AcEnemy, w,
                 "Click an enemy in the view to shoot it. Killing one segment of\n" +
                 "a linked enemy destroys the whole formation, and whatever it\n" +
@@ -2177,9 +2523,10 @@ public sealed unsafe partial class App
             int dmg = _clickKillDamage;
             if (ImGui.SliderInt("damage", &dmg, 1, 254))
                 _clickKillDamage = dmg;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Armor removed per click. Enemy armor tops out at 254; 255\n" +
-                    "means invulnerable, which only an instant kill gets through.");
+            if (SliderReset(ref dmg, DefaultClickKillDamage,
+                    "Armor removed per click. Enemy armor tops out at 254; 255\n" +
+                    "means invulnerable, which only an instant kill gets through."))
+                _clickKillDamage = dmg;
             ImGui.PopItemWidth();
         }
     }
@@ -2216,9 +2563,9 @@ public sealed unsafe partial class App
 
     /// <summary>Switch playfield width. The player range and the fitted view both change with
     /// it, and so does the simulation (parallax, cull bounds, starfield), so it rebuilds.</summary>
-    private void SetWidescreen(bool ws)
+    private void SetEngaged(bool ws)
     {
-        _widescreen = ws;
+        _engaged = ws;
         _draggingPlayer = false;
         _simPlayerX = Math.Clamp(_simPlayerX, PlayerXMin, PlayerXMax);  // keep the marker inside the new bounds
         _playZoom = 0; _playPan = Vector2.Zero;                         // refit the view to the new width
@@ -2227,7 +2574,7 @@ public sealed unsafe partial class App
 
     private void DrawDisplaySection()
     {
-        float w = (HudW - 5f) / 2f;
+        float w = (_hudW - 5f) / 2f;
         void Fx(string label, ref bool field, string tip)
         {
             if (Chip(label, field, AcDisplay, w, tip)) { field = !field; ApplyDisplayFlags(); }
@@ -2278,55 +2625,96 @@ public sealed unsafe partial class App
         var dl = ImGui.GetWindowDrawList();
         const float gh = 40f;
         var p = ImGui.GetCursorScreenPos();
-        ImGui.Dummy(new Vector2(HudW, gh));
-        dl.AddRectFilled(p, p + new Vector2(HudW, gh), Gfx.Rgba(22, 24, 31, 235), 3f);
+        ImGui.Dummy(new Vector2(_hudW, gh));
+        dl.AddRectFilled(p, p + new Vector2(_hudW, gh), Gfx.Rgba(22, 24, 31, 235), 3f);
 
+        // Read through SimPlayback.DensityAt, so once the run has diverged the sparkline is of
+        // the branch the playhead is actually on -- past the predicted end there is no entry in
+        // the precomputed array at all, and this drew a flat empty graph beside a screen full
+        // of enemies.
         const int half = 160;                        // ~4.5 s of game time either side
         int t0 = pb.CurrentTick - half, t1 = pb.CurrentTick + half;
         int peak = 4;   // a floor, so a quiet stretch doesn't scale two enemies to full height
-        for (int t = Math.Max(1, t0); t <= Math.Min(pb.Density.Length, t1); t++)
-            if (pb.Density[t - 1] > peak) peak = pb.Density[t - 1];
+        for (int t = Math.Max(1, t0); t <= t1; t++)
+            peak = Math.Max(peak, pb.DensityAt(t));
 
         // The top band stays clear for the caption, so a busy stretch can't swallow it.
         const float top = 15f, floorY = gh - 2f;
-        for (int x = 0; x < (int)HudW; x++)
+        for (int x = 0; x < (int)_hudW; x++)
         {
-            int t = t0 + (int)((long)x * (t1 - t0) / (int)HudW);
-            if (t < 1 || t > pb.Density.Length) continue;
-            float bh = pb.Density[t - 1] / (float)peak * (floorY - top);
+            int t = t0 + (int)((long)x * (t1 - t0) / (int)_hudW);
+            int d = pb.DensityAt(t);
+            if (d < 0) continue;
+            float bh = d / (float)peak * (floorY - top);
             dl.AddLine(new Vector2(p.X + x, p.Y + floorY - bh), new Vector2(p.X + x, p.Y + floorY),
-                t <= pb.CurrentTick ? Gfx.Rgba(110, 180, 250, 205) : Gfx.Rgba(88, 106, 145, 150));
+                t > pb.CurrentTick ? Gfx.Rgba(88, 106, 145, 150)
+                    : pb.Branched && t >= pb.BranchTick ? Alpha(TlLive, 215)
+                    : Gfx.Rgba(110, 180, 250, 205));
         }
-        float cx = p.X + HudW * 0.5f;
+        float cx = p.X + _hudW * 0.5f;
         dl.AddLine(new Vector2(cx, p.Y + top - 2f), new Vector2(cx, p.Y + gh - 1f), Gfx.Rgba(255, 235, 130, 225));
-        dl.AddText(p + new Vector2(5, 2), Gfx.Rgba(138, 146, 166), "enemies on screen");
+        // The caption and its numbers share one line, and on a narrowed HUD they do not both
+        // fit: the numbers keep their room and the words give way, since "peak 30" is the part
+        // that changes.
         string peakTag = $"now {sim.EnemyOnScreen} · peak {peak}";
-        dl.AddText(new Vector2(p.X + HudW - ImGui.CalcTextSize(peakTag).X - 5f, p.Y + 2f),
+        float tagW = ImGui.CalcTextSize(peakTag).X;
+        ClipText(dl, p + new Vector2(5, 2), _hudW - tagW - 14f,
+            Gfx.Rgba(138, 146, 166), "enemies on screen");
+        dl.AddText(new Vector2(p.X + _hudW - tagW - 5f, p.Y + 2f),
             Gfx.Rgba(138, 146, 166), peakTag);
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip($"Enemies on screen over the {half * 2 / (int)GameSim.TicksPerSecond} s " +
                 "around the playhead\n(centre line), from the precomputed density.");
 
         ImGui.PushTextWrapPos(0f);
-        ImGui.TextDisabled($"tick {pb.CurrentTick}/{pb.Duration}   loc {sim.CurLoc}   " +
+        ImGui.TextDisabled($"tick {pb.CurrentTick}/{pb.DisplayEnd}   loc {sim.CurLoc}   " +
             $"enemies {sim.EnemyOnScreen}");
         var (b1, b2, b3) = sim.BackMoves;
         ImGui.TextDisabled($"scroll {b1}/{b2}/{b3}   built in {pb.PrecomputeMs} ms");
         ImGui.TextDisabled(pb.EndedNaturally
             ? pb.LoopDetected ? $"ends naturally; {pb.LoopSummary}" : "ends naturally"
             : pb.LoopDetected ? pb.LoopSummary : "capped (no natural end)");
+        if (pb.Branched)
+            ImGui.TextDisabled($"live since {SimPlayback.FormatTime(pb.BranchTick)} " +
+                $"({pb.Interferences} interference{(pb.Interferences == 1 ? "" : "s")}); " +
+                (pb.BranchDone
+                    ? $"the branch ended at {SimPlayback.FormatTime(pb.BranchEnd)}"
+                    : $"recorded to {SimPlayback.FormatTime(pb.BranchEnd)} and still running"));
         ImGui.PopTextWrapPos();
+
+        // What the run is made of, and the atlas's own status line. Both used to sit at the
+        // foot of the controls column, where playback leaves them stranded under a stack of
+        // map-view controls that no longer do anything -- here they are beside the numbers
+        // they belong with.
+        if (_level != null)
+        {
+            ImGui.Separator();
+            DrawLevelInfoLines();
+        }
+        if (_status.Length > 0)
+        {
+            ImGui.Separator();
+            ImGui.TextWrapped(_status);
+        }
     }
 
     /// <summary>
-    /// The loop/gate inventory the precompute found: every boss gate, enemy hold and route
-    /// loop, with its start time and retained-cycle count (set by "loop cycles"). Each row
-    /// seeks to that section on click; the section under the playhead is highlighted. The
-    /// textual companion to the hatched regions on the timeline.
+    /// The loop/gate inventory: every boss gate, enemy hold and route loop, with its start
+    /// time and retained-cycle count (set by "loop cycles"). Each row seeks to that section on
+    /// click; the section under the playhead is highlighted. The textual companion to the
+    /// bracketed regions on the timeline.
+    ///
+    /// Once the run has diverged the two lists are shown together — the prediction's, with
+    /// anything the branch has already overtaken struck out to a dimmer row, then whatever the
+    /// live run found instead. A gate that was shot away simply has no live counterpart, which
+    /// is the readable form of "that standoff is over".
     /// </summary>
     private void DrawRoutesAndGates(SimPlayback pb)
     {
-        if (pb.LoopRegions.Count == 0)
+        var rows = pb.LoopRegions.Select(r => (R: r, Live: false))
+            .Concat(pb.BranchRegions.Select(r => (R: r, Live: true)))
+            .ToList();
+        if (rows.Count == 0)
         {
             ImGui.TextDisabled(pb.EndedNaturally
                 ? "none - level plays straight through"
@@ -2342,10 +2730,12 @@ public sealed unsafe partial class App
 
         var dl = ImGui.GetWindowDrawList();
         float h = ImGui.GetTextLineHeight();
-        for (int i = 0; i < pb.LoopRegions.Count; i++)
+        for (int i = 0; i < rows.Count; i++)
         {
-            var r = pb.LoopRegions[i];
-            bool active = pb.CurrentTick >= r.StartTick && pb.CurrentTick <= r.EndTick;
+            var (r, live) = rows[i];
+            // Superseded: a predicted section the branch has already played through differently.
+            bool stale = !live && pb.Branched && r.EndTick > pb.BranchTick;
+            bool active = !stale && pb.CurrentTick >= r.StartTick && pb.CurrentTick <= r.EndTick;
             int n = r.CycleEnds.Length;
             (string kind, string amount, uint swatch) = r.Kind switch
             {
@@ -2360,18 +2750,35 @@ public sealed unsafe partial class App
                     Gfx.Rgba(230, 120, 210)),
             };
 
-            // colour swatch (boss = orange, route = blue, hold = magenta), then the row.
+            // colour swatch (boss = orange, route = blue, hold = magenta), then the row. A live
+            // row's swatch is split with the branch green, so which run a section belongs to
+            // is answerable without reading the tail of the line.
             var p = ImGui.GetCursorScreenPos();
-            dl.AddRectFilled(new Vector2(p.X, p.Y + 2), new Vector2(p.X + h, p.Y + h), swatch);
+            dl.AddRectFilled(new Vector2(p.X, p.Y + 2), new Vector2(p.X + h, p.Y + h),
+                stale ? Alpha(swatch, 70) : swatch);
+            if (live)
+                dl.AddRectFilled(new Vector2(p.X, p.Y + 2), new Vector2(p.X + 3f, p.Y + h), TlLive);
             ImGui.Dummy(new Vector2(h, h));
             ImGui.SameLine(0, 4);
 
-            if (ImGui.Selectable($"{kind,-10} {Mmss(r.StartTick),5}  {amount}##g{i}", active))
+            // The row's own text is drawn rather than handed to the Selectable: a Selectable
+            // declares its label's width as its item width, so "enemy hold  1:23  20s kept
+            // (until destroyed)" quietly asked the HUD to be four hundred pixels wide and got a
+            // horizontal scrollbar under the panel instead. Given a width, it stays inside it
+            // and the line is cut with an ellipsis like every other value in this UI.
+            float rowW = Math.Max(40f, _hudW - h - 4f);
+            if (ImGui.Selectable($"##g{i}", active, ImGuiSelectableFlags.None, new Vector2(rowW, h)))
             { pb.SeekTo(r.StartTick); _playing = false; }
+            ClipText(dl, ImGui.GetItemRectMin(), rowW - 4f,
+                stale ? Gfx.Rgba(110, 116, 132) : live ? Shade(TlLive, 1.05f) : UiText,
+                $"{kind,-10} {Mmss(r.StartTick),5}  {amount}");
             if (ImGui.IsItemHovered())
                 ImGui.SetTooltip(
                     $"{kind} at {SimPlayback.FormatTime(r.StartTick)} - {SimPlayback.FormatTime(r.EndTick)}\n" +
-                    $"{amount}\nclick to jump here");
+                    $"{amount}\n" +
+                    (live ? "found by the live run, after the divergence\n"
+                        : stale ? "predicted, but the live run has already played past it\n" : "") +
+                    "click to jump here");
         }
     }
 
@@ -2533,6 +2940,11 @@ public sealed unsafe partial class App
         int damage = _clickKillInstant ? GameSim.InstantKillDamage : _clickKillDamage;
         if (!_playback.Sim.DamageEnemy(slot, damage, _clickKillExplosions)) return;
 
+        // The run has just stopped being the one the timeline predicted. From here it records
+        // itself: the bar branches at this tick and follows what actually happens, including
+        // past the predicted end -- which is the whole point of shooting a boss out of a hold.
+        _playback.NoteLiveChange();
+
         // The hit queued its own sound (the short boom, or the low one for a big enemy).
         // Drain it here: the tick below clears the queue before it runs. Sounds only --
         // the music events of whatever tick ran last are still latched.
@@ -2604,7 +3016,7 @@ public sealed unsafe partial class App
         if (avail.X < 60 || avail.Y < 100) return;
         _canvasAvail = avail;
 
-        float controlsH = ImGui.GetFrameHeightWithSpacing() + 34f;
+        float controlsH = ImGui.GetFrameHeightWithSpacing() + TimelineH + 14f;
         var viewSize = new Vector2(avail.X, Math.Max(60, avail.Y - controlsH));
         var pos = ImGui.GetCursorScreenPos();
         var dl = ImGui.GetWindowDrawList();
@@ -2685,8 +3097,10 @@ public sealed unsafe partial class App
         HandlePlayerMarker(dl, view, mouse, viewHovered, pos, viewSize);
         HandleClickKill(view, mouse, viewHovered);
         string loopOsd = "";
-        var activeGate = pb.LoopRegions.FirstOrDefault(r =>
-            pb.CurrentTick >= r.StartTick && pb.CurrentTick <= r.EndTick);
+        // From whichever run owns this tick. A gate shot out of the way stops being reported
+        // the moment the branch passes where it used to be, instead of the readout insisting
+        // on a standoff the player has just ended.
+        var activeGate = pb.RegionAt(pb.CurrentTick);
         if (activeGate != null)
         {
             if (activeGate.Kind == SimPlayback.HoldLoopKind.ScriptedLoop)
@@ -2709,7 +3123,7 @@ public sealed unsafe partial class App
             }
             else loopOsd = "   [enemy gate: holds until destroyed]";
         }
-        string osd = $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.Duration)}" +
+        string osd = $"{SimPlayback.FormatTime(pb.CurrentTick)} / {SimPlayback.FormatTime(pb.DisplayEnd)}" +
             (_playing ? _playDirection > 0 ? $"   >> x{_playSpeed:0.##}" : $"   << x{_playSpeed:0.##}" : "   paused") +
             $"   zoom {scale * 100:0}%" + loopOsd;
         // A soft backdrop keeps the readout legible over bright terrain.
@@ -2724,256 +3138,9 @@ public sealed unsafe partial class App
         // window, so it leaves the canvas layout cursor untouched.
         DrawSimOverlay(pos, viewSize);
 
-        // --- transport row ---
-        float fh = ImGui.GetFrameHeight();
-        var bsz = new Vector2(MathF.Round(fh * 1.5f), fh);        // step / skip buttons
-        var psz = new Vector2(MathF.Round(fh * 2.1f), fh);        // hero play / pause
-
-        // A plain text button matched to the icon buttons' height.
-        bool TextBtn(string label, Vector2 size, string tip, float gap = 4f)
-        {
-            bool hit = ImGui.Button(label, size);
-            if (ImGui.IsItemHovered()) ImGui.SetTooltip(tip);
-            ImGui.SameLine(0, gap);
-            return hit;
-        }
-
-        bool fwd = _playing && _playDirection > 0;
-        bool rewinding = _playing && _playDirection < 0;
-
-        if (TransportBtn("##pbstart", Glyph.JumpStart, "Jump to start", bsz))
-        { pb.SeekTo(1); _playing = false; }
-        if (TransportBtn("##pbrewind", Glyph.Rewind, rewinding ? "Stop rewind" : "Play backwards",
-                bsz, active: rewinding))
-        {
-            if (rewinding) _playing = false;
-            else { _playing = true; _playDirection = -1; _playAccum = 0; }
-        }
-        if (TextBtn("-1", bsz, "Step one tick back (Left)"))
-        { pb.SeekTo(pb.CurrentTick - 1); _playing = false; }
-
-        if (TransportBtn("##pbplay", fwd ? Glyph.Pause : Glyph.Play,
-                fwd ? "Pause (Space)" : "Play (Space)", psz, primary: true))
-        {
-            if (fwd) _playing = false;
-            else { if (pb.AtEnd) pb.SeekTo(1); _playing = true; _playDirection = 1; _playAccum = 0; }
-        }
-
-        if (TextBtn("+1", bsz, "Step one tick forward (Right)"))
-        { pb.SeekTo(pb.CurrentTick + 1); _playing = false; }
-        if (TransportBtn("##pbff", Glyph.FastFwd,
-                "Fast-forward (cycles 2x / 4x / 8x; Play resets to 1x)", bsz,
-                active: fwd && _playSpeed > 1f))
-        {
-            _playing = true; _playDirection = 1; _playAccum = 0;
-            _playSpeed = _playSpeed switch { < 2f => 2f, < 4f => 4f, < 8f => 8f, _ => 1f };
-        }
-        if (TransportBtn("##pbend", Glyph.JumpEnd, "Jump to end", bsz, gap: 12f))
-        { pb.SeekTo(pb.Duration); _playing = false; }
-
-        // The tail of the row has to survive a narrow canvas -- pinning the HUD into its own
-        // column takes ~300px out of it. Nothing here wraps or scrolls, so instead the parts
-        // give way in order of how well they earn their space, and the controls never move.
-        const float comboW = 64f;
-        float fitW = MathF.Round(fh * 1.7f);
-        float W(string s) => ImGui.CalcTextSize(s).X;
-        float ChipW(string s) => MathF.Ceiling(W(s) + ImGui.GetStyle().FramePadding.X * 2f + 10f);
-
-        // First to give: the layout chips' labels, down to a word each, once the full ones
-        // would crowd out the speed control. The ## ids stay fixed so the buttons do not
-        // lose their hover/active state as the labels change.
-        bool roomy = ImGui.GetContentRegionAvail().X >=
-            fitW + 5f + ChipW("UI fit") + 4f + ChipW("Pin right") + 12f + comboW;
-        string uiLbl = roomy ? "UI fit" : "UI", pinLbl = roomy ? "Pin right" : "Pin";
-
-        if (TextBtn("Fit", new Vector2(fitW, fh),
-                "Fit the whole panel, zoom and pan reset (or double-click the view).\n" +
-                "The frame is free to sit under the controls HUD.\nwheel = zoom, drag = pan", 5f))
-        { _fitAroundHud = false; _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
-
-        // The two layout toggles: fit clear of the HUD, and keep the HUD somewhere to be clear of.
-        // Sized off the label rather than a multiple of the row height, which clipped them.
-        if (Chip($"{uiLbl}##uifit", _fitAroundHud, AcDisplay, ChipW(uiLbl),
-                "Fit the view into what the floating \"Playback controls\" HUD leaves free,\n" +
-                "so the frame sits beside the panel instead of under it. Stays armed:\n" +
-                "resizes and folding HUD sections re-fit to the space actually left.\n" +
-                "Pinned right, the HUD is already out of the view and this does nothing."))
-        { _fitAroundHud = !_fitAroundHud; _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
-        ImGui.SameLine(0, 4);
-        if (Chip($"{pinLbl}##pinright", _hudPinRight, AcDisplay, ChipW(pinLbl),
-                "Turn the \"Playback controls\" HUD into a fixed column down the right edge\n" +
-                "of the window -- the mirror of the controls column on the left -- instead\n" +
-                "of a panel floating over the playfield. The view keeps the rest."))
-        { _hudPinRight = !_hudPinRight; _playZoom = 0; _playPan = System.Numerics.Vector2.Zero; }
-        ImGui.SameLine(0, 12);
-
-        // What is actually left for the tail, measured rather than modelled.
-        float left = ImGui.GetContentRegionAvail().X;
-        string endTag = pb.LoopDetected
-            ? $"  [{pb.LoopRegions.Count} loop/hold section{(pb.LoopRegions.Count == 1 ? "" : "s")} previewed]"
-            : pb.EndedNaturally ? "" : "  [capped]";
-        string ticks = $"{pb.CurrentTick}/{pb.Duration}";
-        float TailW(bool word, string tick) => (word ? W("speed") + 6f : 0f) + comboW
-            + (tick.Length > 0 ? 14f + W(tick) : 0f);
-
-        // Richest tail that fits. The loop/cap tag goes first (the timeline marks those
-        // sections anyway), then the labelling words, then the tick counter itself -- the
-        // OSD over the view still has the clock. The last entry is the combo alone, which
-        // always fits: the fallback to a floating HUD keeps the canvas wider than that.
-        var tails = new (bool Word, string Tick)[]
-        {
-            (true,  $"tick {ticks}{endTag}"),
-            (true,  $"tick {ticks}"),
-            (true,  ticks),
-            (false, ticks),
-            (false, ""),
-        };
-        var tail = tails.FirstOrDefault(t => TailW(t.Word, t.Tick) <= left, tails[^1]);
-
-        if (tail.Word)
-        {
-            ImGui.AlignTextToFramePadding();
-            ImGui.TextDisabled("speed");
-            ImGui.SameLine(0, 6);
-        }
-        ImGui.SetNextItemWidth(comboW);
-        int speedIdx = Array.IndexOf(SpeedSteps, _playSpeed);
-        if (speedIdx < 0) speedIdx = 2;
-        var speedNames = SpeedSteps.Select(s => $"x{s:0.##}").ToArray();
-        if (ImGui.Combo("##speed", &speedIdx, speedNames, speedNames.Length))
-            _playSpeed = SpeedSteps[speedIdx];
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("Playback speed (game runs at 35 ticks/s)");
-
-        if (tail.Tick.Length > 0)
-        {
-            ImGui.SameLine(0, 14);
-            ImGui.AlignTextToFramePadding();
-            ImGui.TextDisabled(tail.Tick);
-            if (endTag.Length > 0 && !tail.Tick.EndsWith(']') && ImGui.IsItemHovered())
-                ImGui.SetTooltip(endTag.Trim());
-        }
-
+        // The transport row and the timeline under it: App.Timeline.cs.
+        DrawTransportRow(pb);
         DrawTimeline(pb);
-    }
-
-    /// <summary>The scrubbable duration bar: enemy-density strip, event markers, playhead.</summary>
-    private void DrawTimeline(SimPlayback pb)
-    {
-        var dl = ImGui.GetWindowDrawList();
-        var pos = ImGui.GetCursorScreenPos();
-        float w = ImGui.GetContentRegionAvail().X;
-        const float h = 26f;
-        if (w < 40) return;
-
-        ImGui.InvisibleButton("timeline", new Vector2(w, h));
-        bool hovered = ImGui.IsItemHovered();
-        bool active = ImGui.IsItemActive();
-        var mouse = ImGui.GetMousePos();
-        float mouseFrac = Math.Clamp((mouse.X - pos.X) / w, 0f, 1f);
-
-        if (active)
-            pb.SeekTo(1 + (int)MathF.Round(mouseFrac * (pb.Duration - 1)));
-
-        dl.AddRectFilled(pos, pos + new Vector2(w, h), Gfx.Rgba(28, 28, 34));
-
-        // enemy-density strip (bottom-anchored bars)
-        if (pb.Density.Length > 1)
-        {
-            int cols = (int)w;
-            for (int x = 0; x < cols; x++)
-            {
-                int t0 = (int)((long)x * pb.Density.Length / cols);
-                int t1 = Math.Max(t0 + 1, (int)((long)(x + 1) * pb.Density.Length / cols));
-                int peak = 0;
-                for (int t = t0; t < t1 && t < pb.Density.Length; t++)
-                    if (pb.Density[t] > peak) peak = pb.Density[t];
-                if (peak == 0) continue;
-                float bh = Math.Min(1f, peak / 24f) * (h - 8);
-                dl.AddLine(new Vector2(pos.X + x, pos.Y + h - 1 - bh),
-                    new Vector2(pos.X + x, pos.Y + h - 1), Gfx.Rgba(120, 60, 60, 200));
-            }
-        }
-
-        // Enemy-gated regions are embedded in the complete route. Each hatch stops at
-        // the simulated defeat point; the authored post-boss level continues after it.
-        float TickX(int t)
-        {
-            t = Math.Clamp(t, 1, pb.Duration);
-            return pos.X + (pb.Duration <= 1 ? 0 : (t - 1) / (float)(pb.Duration - 1)) * w;
-        }
-        foreach (var region in pb.LoopRegions)
-        {
-            float lx = TickX(region.StartTick);
-            float rx = TickX(region.EndTick);
-            dl.AddRectFilled(new Vector2(lx, pos.Y), new Vector2(rx, pos.Y + h),
-                Gfx.Rgba(255, 150, 40, 34));
-            for (float sx = lx; sx < rx; sx += 9f)   // diagonal hatching
-                dl.AddLine(new Vector2(sx, pos.Y + h - 1),
-                    new Vector2(Math.Min(sx + 6f, rx), pos.Y + 1),
-                    Gfx.Rgba(255, 150, 40, 70));
-            dl.AddLine(new Vector2(lx, pos.Y), new Vector2(lx, pos.Y + h), Gfx.Rgba(255, 150, 40, 200));
-            dl.AddLine(new Vector2(rx, pos.Y), new Vector2(rx, pos.Y + h), Gfx.Rgba(255, 150, 40, 200));
-            foreach (int cycleEnd in region.CycleEnds)
-            {
-                float cx = TickX(cycleEnd);
-                dl.AddLine(new Vector2(cx, pos.Y), new Vector2(cx, pos.Y + h),
-                    Gfx.Rgba(255, 205, 120, 170), 1.5f);
-            }
-            if (rx - lx >= 52)
-            {
-                string loopLabel = region.Kind == SimPlayback.HoldLoopKind.ScriptedLoop
-                    ? $"gate x{region.CycleEnds.Length}"
-                    : region.Kind == SimPlayback.HoldLoopKind.RouteLoop
-                        ? $"route x{region.CycleEnds.Length}" : "enemy hold";
-                dl.AddText(new Vector2(lx + 4, pos.Y + h - 14),
-                    Gfx.Rgba(255, 190, 90, 230), loopLabel);
-            }
-        }
-
-        // progress fill
-        float frac = pb.Duration <= 1 ? 0f : (pb.CurrentTick - 1) / (float)(pb.Duration - 1);
-        dl.AddRectFilled(pos, new Vector2(pos.X + w * frac, pos.Y + h), Gfx.Rgba(90, 130, 200, 60));
-
-        // event markers (top half ticks, one class per colour)
-        foreach (var e in pb.Events)
-        {
-            uint col;
-            switch (e.Type)
-            {
-                case 2 or 3 or 30: col = Gfx.Rgba(80, 210, 230); break;      // scroll speed
-                case 4 or 83: col = Gfx.Rgba(255, 90, 90); break;            // map stop
-                case 38 or 54 or 70 or 71 or 75 or 76: col = Gfx.Rgba(255, 170, 60); break; // flow
-                case 11 or 36: col = Gfx.Rgba(240, 240, 240); break;         // level end
-                case 79: col = Gfx.Rgba(230, 90, 220); break;                // boss bar
-                default: continue;
-            }
-            float ex = TickX(e.Tick);
-            dl.AddLine(new Vector2(ex, pos.Y + 1), new Vector2(ex, pos.Y + 9), col);
-        }
-
-        // playhead
-        float px = pos.X + w * frac;
-        dl.AddLine(new Vector2(px, pos.Y), new Vector2(px, pos.Y + h), Gfx.Rgba(255, 235, 130), 2f);
-        dl.AddRect(pos, pos + new Vector2(w, h), Gfx.Rgba(90, 90, 105));
-
-        if (hovered || active)
-        {
-            int t = 1 + (int)MathF.Round(mouseFrac * (pb.Duration - 1));
-            var hoverGate = pb.LoopRegions.FirstOrDefault(r => t >= r.StartTick && t <= r.EndTick);
-            string loopNote = hoverGate != null
-                ? hoverGate.Kind == SimPlayback.HoldLoopKind.ScriptedLoop
-                    ? $"\nhatched = enemy-gated script: repeats until the boss/linked enemies die;\n{hoverGate.CycleEnds.Length} cycles are retained, separated by bright lines"
-                    : hoverGate.Kind == SimPlayback.HoldLoopKind.RouteLoop
-                        ? $"\nhatched = conditional route loop; {hoverGate.CycleEnds.Length} cycles are retained, then playback continues"
-                        : $"\nhatched = enemy-gated hold: gameplay waits until the boss/linked enemies die;\n{SimPlayback.RegionSeconds(hoverGate)} seconds " +
-                          (SimPlayback.RegionSeconds(hoverGate) < pb.Sim.PreviewHoldSeconds
-                              ? "of it were watched before the cap ended the run"
-                              : "are retained for inspection")
-                : "";
-            ImGui.SetTooltip($"{SimPlayback.FormatTime(t)}  (tick {t})\n" +
-                "cyan = scroll speed  red = map stop  orange = jump/flow\nwhite = level end  magenta = boss bar" +
-                loopNote);
-        }
     }
 
     /// <summary>Keep at least a sliver of the level inside the viewport so it can't be lost.</summary>

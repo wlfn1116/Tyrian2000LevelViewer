@@ -1,7 +1,7 @@
 using Hexa.NET.ImGui;
 using SdlNs = Hexa.NET.SDL2;
 
-namespace T2LV.Render;
+namespace T2A.Render;
 
 /// <summary>Small interop helpers shared by the rendering code.</summary>
 public static unsafe class Gfx

@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>One LDS instrument ("patch") -- the OPL2 operator settings plus the
 /// General-MIDI hints the LOUDNESS editor stored alongside them.</summary>
@@ -221,7 +221,7 @@ public sealed class LdsPlayer
     public int AllVolume => _allvolume;
 
     /// <summary>Per-channel mute, applied at the OPL key-on bit so the shadow register
-    /// state stays intact and unmuting resumes cleanly. Viewer-only; not in the game.</summary>
+    /// state stays intact and unmuting resumes cleanly. Atlas-only; not in the game.</summary>
     public readonly bool[] ChannelMuted = new bool[9];
 
     /// <summary>Last instrument each channel was told to play, for the UI's channel strip. -1 = none.</summary>
@@ -698,7 +698,7 @@ public sealed class LdsPlayer
                     SetRegsAdv((byte)(0x43 + regnum), 0xc0, (byte)(((((c.volcar & 0x3f) * _allvolume) >> 8) ^ 0x3f) & 0x3f));
             }
 
-            // Viewer-only: hold a muted channel's key-on bit low at the chip without
+            // Atlas-only: hold a muted channel's key-on bit low at the chip without
             // touching the shadow registers, so unmuting picks the song back up cleanly.
             if (ChannelMuted[chan])
                 _opl?.Write(0xb0 + chan, (byte)(_fmchip[0xb0 + chan] & 0xdf));

@@ -1,10 +1,10 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
-using T2LV.Tyrian.Audio;
+using T2A.Render;
+using T2A.Tyrian;
+using T2A.Tyrian.Audio;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The level tree: how an episode's levels lead into each other, including the branches
@@ -180,6 +180,8 @@ public sealed unsafe partial class App
         float z = _treeZoom;
         if (ImGui.SliderFloat("##treezoom", &z, TreeMinZoom, TreeMaxZoom, "%.2fx", ImGuiSliderFlags.Logarithmic))
             _treeZoom = Math.Clamp(z, TreeMinZoom, TreeMaxZoom);
+        if (SliderReset(ref z, 1f, "How far the graph is zoomed.", "1:1"))
+            { _treeZoom = 1f; _treeFitEpisode = TreeFitKey; }
 
         BandDivider();
         UiToggle("labels", ref _treeLabels, AcRoutes,
@@ -402,7 +404,7 @@ public sealed unsafe partial class App
                 dl.AddRect(p, q, Shade(accent, current ? 1.15f : 0.80f, alpha),
                     round, ImDrawFlags.None, (current ? 2.4f : 1.2f) * Math.Max(0.8f, zoom));
 
-                // The level in the viewer gets a slow breathing ring, so it is findable in a
+                // The level in the atlas gets a slow breathing ring, so it is findable in a
                 // wall of boxes without hunting for a slightly brighter outline.
                 if (current)
                 {
@@ -795,7 +797,7 @@ public sealed unsafe partial class App
             ImGui.Dummy(new Vector2(0, 3f));
             ImGui.TextColored(ColorOf(UiFaint), node.CubeStops.Count > 0
                 ? "click to open this level  ·  right-click to read its datacubes"
-                : "click to open this level in the viewer");
+                : "click to open this level in the atlas");
         }
         ImGui.PopTextWrapPos();
         ImGui.EndTooltip();

@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>
 /// The General MIDI program names. The LOUDNESS editor stored a GM instrument

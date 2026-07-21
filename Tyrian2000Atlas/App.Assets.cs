@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>Which store a sprite comes out of. The data set keeps four quite different ones.</summary>
 public enum SpriteStore
@@ -316,9 +316,13 @@ public sealed unsafe partial class App
     private bool FilterBox(string id, string hint, byte[] buf, float width)
     {
         Span<byte> idb = stackalloc byte[64];
-        Span<byte> hb = stackalloc byte[64];
+        // Clipped rather than sized exactly: GetBytes throws when the destination is short, so a
+        // hint that outgrew its buffer took the whole frame down with it instead of losing a
+        // word off the end of a line ImGui was going to clip anyway.
+        Span<byte> hb = stackalloc byte[160];
         int n = System.Text.Encoding.ASCII.GetBytes(id, idb); idb[n] = 0;
-        int m = System.Text.Encoding.ASCII.GetBytes(hint, hb); hb[m] = 0;
+        int m = System.Text.Encoding.ASCII.GetBytes(
+            hint.Length > hb.Length - 1 ? hint[..(hb.Length - 1)] : hint, hb); hb[m] = 0;
         ImGui.SetNextItemWidth(width);
         fixed (byte* ip = idb)
         fixed (byte* hp = hb)

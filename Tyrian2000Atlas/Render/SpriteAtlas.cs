@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Tyrian;
+using T2A.Tyrian;
 using SdlNs = Hexa.NET.SDL2;
 
-namespace T2LV.Render;
+namespace T2A.Render;
 
 /// <summary>
 /// A whole sprite bank packed into one SDL texture on a fixed grid, so a browser can put

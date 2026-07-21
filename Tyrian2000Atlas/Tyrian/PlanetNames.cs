@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
 /// pName[21] from tyrian.hdt — the galaxy-map planet names the outpost's "next level"

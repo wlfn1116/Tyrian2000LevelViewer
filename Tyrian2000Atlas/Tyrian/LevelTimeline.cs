@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 public readonly record struct EventOccurrence(
     int Index, EventRec Event, int PathDistance,
@@ -280,7 +280,7 @@ public sealed class LevelTimeline
                     case 4:
                     case 83:
                         // Map stops are released by the live enemy state, which a static
-                        // viewer cannot simulate. Continue with the engine's resume speeds.
+                        // atlas cannot simulate. Continue with the engine's resume speeds.
                         move1 = 1; move2 = 2; move3 = 3;
                         delay1 = delay1Max = delay2 = delay2Max = 1;
                         break;
@@ -539,7 +539,7 @@ public sealed class LevelTimeline
         // The 1:1 texture canvas only spans recorded content: the longest layer history
         // plus room for spawns anchored while their carrier was stopped. Slower layers
         // simply end where their history ends — the engine never shows a player the map
-        // beyond that point, so the viewer must not invent it either.
+        // beyond that point, so the atlas must not invent it either.
         int uniformExtent = Math.Max(spawnExtent,
             Math.Max(layerDistance[0], Math.Max(layerDistance[1], layerDistance[2])));
 

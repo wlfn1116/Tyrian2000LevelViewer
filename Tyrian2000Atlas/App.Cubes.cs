@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The datacube reader: the readings the outposts hand out between levels, with the
@@ -293,7 +293,7 @@ public sealed unsafe partial class App
         ClipText(dl, new Vector2(p.X + 9f, p.Y + 3f), w - 26f - nsz.X,
             hot ? Gfx.Rgba(250, 250, 255) : Gfx.Rgba(232, 234, 244), text);
         dl.AddText(new Vector2(q.X - nsz.X - 8f, p.Y + 3f), UiFaint, n);
-        if (hot) ImGui.SetTooltip("open this level in the viewer");
+        if (hot) ImGui.SetTooltip("open this level in the atlas");
         if (hit) open?.Invoke();
     }
 

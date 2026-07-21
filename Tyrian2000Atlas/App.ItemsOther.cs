@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The Other tab: every field pickup that is not one of the six shop tables -- weapon power-ups,
@@ -472,6 +472,8 @@ public sealed unsafe partial class App
         ImGui.SameLine(0, 5);
         ImGui.SetNextItemWidth(96);
         ImGui.SliderFloat("##otherspeed", ref _itemAnimSpeed, 0.1f, 3f, "x%.2f");
+        SliderReset(ref _itemAnimSpeed, 1f,
+            "The engine runs at 35 ticks a second; this scales that.", "x1");
         ImGui.EndGroup();
 
         ImGui.Dummy(new Vector2(0, 4f));

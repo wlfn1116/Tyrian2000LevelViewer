@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>A decoded sprite: 12px-wide indexed bitmap, 0 = transparent.</summary>
 public sealed class Sprite

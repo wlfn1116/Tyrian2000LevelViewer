@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The sprite browser: every bank in the data set laid out as an atlas -- the 36 enemy
@@ -111,8 +111,8 @@ public sealed unsafe partial class App
         BandLabel("palette");
         ImGui.SetNextItemWidth(120);
         ImGui.SliderInt("##sprpal", ref _sprPalette, 0, _gd!.Palettes.Count - 1);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Which of the game's palettes to decode through.\nGameplay always runs in palette 5.");
+        SliderReset(ref _sprPalette, AppSettings.GamePalette,
+            "Which of the game's palettes to decode through.\nGameplay always runs in palette 5.");
         if (_sprPalette != AppSettings.GamePalette)
         {
             ImGui.SameLine(0, 5);
@@ -216,15 +216,16 @@ public sealed unsafe partial class App
         BandLabel("zoom");
         ImGui.SetNextItemWidth(112);
         ImGui.SliderFloat("##sprzoom", ref _sprZoom, 1f, 8f, "%.0fx");
+        SliderReset(ref _sprZoom, 2f, "How far the grid's cells are blown up.", "2x");
 
         BandDivider(9f);
         BandLabel("columns");
         ImGui.SetNextItemWidth(112);
         ImGui.SliderInt("##sprcols", ref _sprCols, 0, 40, _sprCols == 0 ? "fit" : "%d");
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("How many sprites per row. 0 fits as many as the panel is wide.\n" +
-                "The sheets are laid out 19 to a row, so 19 (or 38) lines the\n" +
-                "2x2 icons up into whole pictures.");
+        SliderReset(ref _sprCols, 0,
+            "How many sprites per row. 0 fits as many as the panel is wide.\n" +
+            "The sheets are laid out 19 to a row, so 19 (or 38) lines the\n" +
+            "2x2 icons up into whole pictures.", "fit");
         ImGui.SameLine(0, 5);
         if (UiButton(_sprCols == 19 ? "fit" : "19", AcSprite,
                 _sprCols == 19 ? "back to fitting the panel width" : "the sheets' own row stride"))

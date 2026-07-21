@@ -1,4 +1,4 @@
-namespace T2LV.Util;
+namespace T2A.Util;
 
 /// <summary>Writes 16-bit PCM WAVE files -- the one format everything can open.</summary>
 public static class Wav

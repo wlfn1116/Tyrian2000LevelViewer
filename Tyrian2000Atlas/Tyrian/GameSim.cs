@@ -1,6 +1,6 @@
 ﻿using System.Runtime.CompilerServices;
 
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 [InlineArray(20)] public struct UShort20 { private ushort _e0; }
 [InlineArray(3)] public struct Byte3 { private byte _e0; }
@@ -19,29 +19,29 @@ public sealed class GameSim
 {
     public const int ScreenW = 320, ScreenH = 200, Pitch = 320;   // vanilla engine surface
     public const int ViewX = 24, ViewW = 264, ViewH = 184;        // playfield crop (JE_starShowVGA)
-    /// <summary>Widescreen playfield crop width: the widescreen build widens vga_width to
+    /// <summary>Engaged playfield crop width: the build widens vga_width to
     /// 356 and crops PLAYFIELD_WIDTH = 356 - HUD 57 = 299 (video.h / notes.md §Widescreen).
     /// <see cref="ViewW"/> is the vanilla 264; <see cref="PlayfieldWidth"/> picks between
-    /// them per <see cref="Widescreen"/>. ViewX (PLAYFIELD_LEFT crop) stays 24 either way.</summary>
-    public const int WideViewW = 299;
-    /// <summary>Background/object horizontal phase in widescreen (video.h PLAYFIELD_X_SHIFT):
+    /// them per <see cref="Engaged"/>. ViewX (PLAYFIELD_LEFT crop) stays 24 either way.</summary>
+    public const int EngagedViewW = 299;
+    /// <summary>Background/object horizontal phase in Engaged mode (video.h PLAYFIELD_X_SHIFT):
     /// every background row AND every enemy/shot tempMapXOfs shifts left by this, so terrain and
-    /// objects stay locked together as the playfield widens (the widescreen build applies it in
+    /// objects stay locked together as the playfield widens (the Engaged build applies it in
     /// backgrnd.c and to every JE_drawEnemy pass). Vanilla applies no shift. notes.md §Widescreen.</summary>
     private const int PlayfieldXShift = -12;
 
-    // Widescreen gameplay/cull bounds, mirrored from the widescreen source's video.h macros
+    // Engaged-mode gameplay/cull bounds, mirrored from the Engaged source's video.h macros
     // (PLAYFIELD_LEFT=24, PLAYFIELD_WIDTH=299, PLAYFIELD_RIGHT=322, vga_width=356). Each is
-    // used only when Widescreen is set; the vanilla path keeps its own literals unchanged, so
-    // normal playback stays byte-for-byte identical. The widescreen author deliberately
+    // used only when Engaged is set; the vanilla path keeps its own literals unchanged, so
+    // normal playback stays byte-for-byte identical. The Engaged author deliberately
     // retuned several of these (not a pure width shift) — see tyrian2.c/shots.c comments.
-    private const int WsDrawGateL  = -28;  // enemy draw/animate gate, left   (vanilla -29)
-    private const int WsDrawGateR  = 360;  // enemy draw/animate gate, right = PLAYFIELD_RIGHT+38 (vanilla 300)
-    private const int WsEnemyCullR = 376;  // enemy despawn X                 = vga_width+20      (vanilla 340)
-    private const int WsScoreParkL = 19;   // score-item park, left           = PLAYFIELD_LEFT-5  (vanilla -5)
-    private const int WsScoreParkR = 305;  // score-item park, right          = PLAYFIELD_RIGHT-17 (vanilla 245)
-    private const int WsOnScreenR  = 332;  // enemyOnScreen count gate, right = vga_width-24      (vanilla 296)
-    private const int WsShotCullR  = 335;  // enemy-shot despawn X            = PLAYFIELD_RIGHT+13 (vanilla 275)
+    private const int EngDrawGateL  = -28;  // enemy draw/animate gate, left   (vanilla -29)
+    private const int EngDrawGateR  = 360;  // enemy draw/animate gate, right = PLAYFIELD_RIGHT+38 (vanilla 300)
+    private const int EngEnemyCullR = 376;  // enemy despawn X                 = vga_width+20      (vanilla 340)
+    private const int EngScoreParkL = 19;   // score-item park, left           = PLAYFIELD_LEFT-5  (vanilla -5)
+    private const int EngScoreParkR = 305;  // score-item park, right          = PLAYFIELD_RIGHT-17 (vanilla 245)
+    private const int EngOnScreenR  = 332;  // enemyOnScreen count gate, right = vga_width-24      (vanilla 296)
+    private const int EngShotCullR  = 335;  // enemy-shot despawn X            = PLAYFIELD_RIGHT+13 (vanilla 275)
     // Extended render buffer: the vanilla surface plus margins so the view can zoom out
     // and show terrain/enemies before they reach the screen. Vanilla (x, y) lives at
     // buffer (x + OX, y + OY).
@@ -51,13 +51,13 @@ public sealed class GameSim
     /// <summary>How many repetitions of a player-gated (boss) loop the preview keeps
     /// before it continues as though the gate was cleared. The loop body still plays
     /// once on the way in, so the retained region spans this many marked cycles.
-    /// Settable per run (the viewer exposes it); a change needs a rebuild.</summary>
+    /// Settable per run (the atlas exposes it); a change needs a rebuild.</summary>
     public int PreviewLoopCycles = 2;
     /// <summary>How long (seconds) an enemy-gated hold — a stopped map with live enemies and
     /// no further events, which no script will ever release — is watched before the preview
     /// destroys those enemies and moves on. Also the length of the retained hold region, and
     /// the tail <see cref="SimPlayback"/> keeps when it finds the same stall without a gate.
-    /// Settable per run (the viewer exposes it); a change needs a rebuild.</summary>
+    /// Settable per run (the atlas exposes it); a change needs a rebuild.</summary>
     public int PreviewHoldSeconds = 20;
 
     // --- static level data (not part of snapshots) ---
@@ -91,46 +91,47 @@ public sealed class GameSim
     public bool PreviewEnemyGates = true; // keep PreviewLoopCycles boss loops, then continue as if defeated
     public int PlayerX = 100, PlayerY = 180;   // phantom player (aim/chase target)
     public uint RngSeed = 5489;
-    /// <summary>True-widescreen playback, mirroring the widescreen game build: the playfield
-    /// widens from 264 to 299px and the player range, parallax, spotlight and enemy/shot cull
-    /// bounds all follow, exactly as the widescreen source derives them (notes.md §Widescreen).
+    /// <summary>Engaged playback, mirroring the OpenTyrian2000-Engaged game build: the
+    /// playfield widens from 264 to 299px and the player range, parallax, spotlight and
+    /// enemy/shot cull bounds all follow, exactly as the Engaged source derives them
+    /// (notes.md §Widescreen).
     /// A sim parameter — it changes the simulation, so a change requires a rebuild. Off =
-    /// vanilla, byte-for-byte (the one exception being <see cref="WideStarfield"/>, which is
+    /// vanilla, byte-for-byte (the one exception being <see cref="TallStarfield"/>, which is
     /// offered in both modes).</summary>
-    public bool Widescreen;
-    /// <summary>Widescreen-only "Extra Parallax" (OpenTyrian2000-Engaged commits edd8118 +
+    public bool Engaged;
+    /// <summary>Engaged-only "Extra Parallax" (OpenTyrian2000-Engaged commits edd8118 +
     /// ae13d1c): the near terrain layer pans across EXACTLY its 336px map — mapXOfs sweeps 36
     /// (far-left flush) to -1 (far-right flush), normalized over the ship's actual travel — so
     /// a strafe runs it edge to edge with 0px spilling off either side; the mid/deep layers keep
     /// the original coupled 4:2:1 ratio and intentionally over-pan/uncover their edges at
     /// far-left. Bound ground enemies ride the same offsets, so they slide much further too.
-    /// Only meaningful with <see cref="Widescreen"/>; a sim parameter, so a change requires a
+    /// Only meaningful with <see cref="Engaged"/>; a sim parameter, so a change requires a
     /// rebuild.</summary>
     public bool ExpandedParallax;
-    /// <summary>Run the widescreen build's rewritten starfield instead of vanilla's. Off
+    /// <summary>Run the Engaged build's rewritten starfield instead of vanilla's. Off
     /// restores the original 100 stars on a 16-bit linear position, which stop seven rows above
     /// the playfield bottom (at either width) and never reach the widened right edge. A sim
     /// parameter, not a draw option: the two fields hold different state and draw a different
     /// number of stars from the level's RNG at init, so switching needs a rebuild — and shifts
     /// enemy spawns, exactly as the difference does between the real builds. Unlike
     /// <see cref="ExpandedParallax"/> / <see cref="MirrorLayers"/> this is NOT gated on
-    /// <see cref="Widescreen"/>: the bug it fixes is just as visible at the vanilla width. It is
+    /// <see cref="Engaged"/>: the bug it fixes is just as visible at the vanilla width. It is
     /// therefore the one setting that can make vanilla playback differ from the stock engine —
     /// leave it off for a byte-for-byte vanilla run.</summary>
-    public bool WideStarfield = true;
-    /// <summary>Playfield crop width in effect: <see cref="WideViewW"/> (299) in widescreen,
+    public bool TallStarfield = true;
+    /// <summary>Playfield crop width in effect: <see cref="EngagedViewW"/> (299) in Engaged mode,
     /// else vanilla <see cref="ViewW"/> (264). Drives the display crop, screen filter, flip
     /// and spotlight geometry.</summary>
-    public int PlayfieldWidth => Widescreen ? WideViewW : ViewW;
-    /// <summary>The widescreen build's surface width (video.h vga_width). The playfield's
+    public int PlayfieldWidth => Engaged ? EngagedViewW : ViewW;
+    /// <summary>The Engaged build's surface width (video.h vga_width). The playfield's
     /// right edge (PLAYFIELD_RIGHT = 322) lives past the vanilla 320, so anything the engine
     /// walks per scanline has to run this far.</summary>
     private const int VgaWidth = 356;
     /// <summary>Width of the engine surface the frame is composed on: <see cref="VgaWidth"/>
-    /// in widescreen, else the vanilla <see cref="ScreenW"/>. Everything the engine derives
+    /// in Engaged mode, else the vanilla <see cref="ScreenW"/>. Everything the engine derives
     /// from surface->w / surface->pitch follows it — the smoothie filters, the mirrored-layer
     /// edge strip and the starfield's spread.</summary>
-    public int SurfaceWidth => Widescreen ? VgaWidth : ScreenW;
+    public int SurfaceWidth => Engaged ? VgaWidth : ScreenW;
 
     // --- view options (draw-only; safe to change without a rebuild + redraw) ---
     public bool ExtendedDraw;           // render beyond the vanilla screen bounds
@@ -140,21 +141,60 @@ public sealed class GameSim
     public bool ShowScreenFlip = true;      // JE_starShowVGA vertical flip
     public bool ShowBossBars = true;        // draw_boss_bar armor readouts
 
-    /// <summary>Widescreen-only "Mirrored Layers" (commit 1f7ba83): background columns panned
+    /// <summary>Engaged-only "Mirrored Layers" (commit 1f7ba83): background columns panned
     /// past a layer's side edge re-read the same row's edge columns in reflected order and draw
     /// horizontally FLIPPED, so the layer continues past its edge as a seamless mirror image
     /// (mirrored-repeat) instead of wrapping into the adjacent map row. Independent of
-    /// <see cref="ExpandedParallax"/> — the stock widescreen span already uncovers ~12px of
+    /// <see cref="ExpandedParallax"/> — the stock Engaged span already uncovers ~12px of
     /// layer 3 at far-left. Draw-only (a redraw suffices; no rebuild). App gates it on
-    /// <see cref="Widescreen"/>.</summary>
+    /// <see cref="Engaged"/>.</summary>
     public bool MirrorLayers;
 
-    // Layer-stack visibility, mirrored from the viewer's layer list. These gate blitting
+    // Layer-stack visibility, mirrored from the atlas's layer list. These gate blitting
     // only — scroll cursors, star positions and enemy logic all still run, so a hidden
     // layer cannot desync the simulation and scrubbing stays exact.
     public bool ShowBg1 = true, ShowBg2 = true, ShowBg3 = true, ShowStarfield = true;
     /// <summary>Bit per <see cref="ObjCategory"/>; cleared bits hide that category.</summary>
     public int ObjectCategoryMask = ~0;
+
+    /// <summary>
+    /// Draw order forced from outside, in place of the level's own: the same four flags events
+    /// 21/22/42 (background3over), 43 (background2over), 28/29 (topEnemyOver) and 73
+    /// (skyEnemyOverAll) set. Null — the default — leaves the level in charge of its own stack,
+    /// events and all.
+    ///
+    /// This is what makes the atlas's layer list mean something during playback. Visibility
+    /// alone could be a blit gate; order cannot, because in this engine the stack is not a list
+    /// of layers to sort but the sequence of the gameplay loop itself — the bands are drawn
+    /// where they are drawn, and moving one means calling it somewhere else. So the override is
+    /// expressed in the engine's own vocabulary rather than as a free permutation, and the
+    /// atlas's stack is snapped to what these four flags can say (LayerStack.GameOrder is the
+    /// same mapping in reverse).
+    ///
+    /// Draw-only: every layer is still drawn exactly once per tick, so nothing here can make
+    /// the simulation drift or leave a scroll cursor unstepped. What it does move is where
+    /// <see cref="DrawBackground3"/>'s step lands relative to the enemy bands that read its
+    /// return value — the same few pixels of difference the engine itself produces between two
+    /// levels whose flags differ.
+    /// </summary>
+    public LevelStartFlags? DrawOrder;
+
+    private int Bg2Over => DrawOrder?.Background2Over ?? _s.background2over;
+    private int Bg3Over => DrawOrder?.Background3Over ?? _s.background3over;
+    private bool TopEnemyOverNow => DrawOrder?.TopEnemyOver ?? _s.topEnemyOver;
+    private bool SkyEnemyOverAllNow => DrawOrder?.SkyEnemyOverAll ?? _s.skyEnemyOverAll;
+
+    /// <summary>The draw order the current frame actually used — the level's own where
+    /// <see cref="DrawOrder"/> is null, the override where it is not. What the atlas's layer
+    /// panel reads back to show the stack the engine is really running.</summary>
+    public LevelStartFlags LiveDrawOrder => new()
+    {
+        Background2Over = Bg2Over,
+        Background3Over = Bg3Over,
+        TopEnemyOver = TopEnemyOverNow,
+        SkyEnemyOverAll = SkyEnemyOverAllNow,
+        Background2NotTransparent = _s.background2notTransparent,
+    };
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool CategoryVisible(byte cat) => (ObjectCategoryMask & (1 << cat)) != 0;
@@ -200,7 +240,7 @@ public sealed class GameSim
 
     // =====================================================================
     //  Live inspection: what the current frame actually contains, in buffer
-    //  coordinates, so the viewer can put markers and hover readouts over it.
+    //  coordinates, so the atlas can put markers and hover readouts over it.
     // =====================================================================
 
     /// <summary>One live enemy/pickup as of the frame just drawn. Positions are buffer
@@ -219,7 +259,7 @@ public sealed class GameSim
     private static int BandDrawRank(int band) => band switch { 25 => 0, 75 => 1, 0 => 2, _ => 3 };
 
     /// <summary>
-    /// Every live enemy in the current frame, front-most band last so the viewer can
+    /// Every live enemy in the current frame, front-most band last so the atlas can
     /// hit-test in reverse and pick what visually sits on top. <paramref name="categoryMask"/>
     /// is the layer list's own visibility (bit per <see cref="ObjCategory"/>) — deliberately
     /// separate from <see cref="ObjectCategoryMask"/>, which only gates sprite blitting, so
@@ -236,7 +276,7 @@ public sealed class GameSim
             int cyc = Math.Clamp(e.enemycycle - 1, 0, 19);
             if (e.egr[cyc] == 999) continue;           // the engine frees these on sight
             int sx = e.ex + e.mapoffset;
-            bool onScreen = Widescreen ? (sx > WsDrawGateL && sx < WsDrawGateR)
+            bool onScreen = Engaged ? (sx > EngDrawGateL && sx < EngDrawGateR)
                                        : (sx > -29 && sx < 300);
             if (!onScreen && !ExtendedDraw) continue;   // not drawn this frame
 
@@ -263,7 +303,7 @@ public sealed class GameSim
     /// <summary>
     /// Which slots hold a live enemy right now, drawn this frame or not. Unlike
     /// <see cref="CollectEnemies"/> this says nothing about what is visible — it is the raw
-    /// occupancy, which is what a viewer needs to follow one particular spawn across the
+    /// occupancy, which is what this tool needs to follow one particular spawn across the
     /// frames after it, before any of it has reached the playfield.
     /// </summary>
     public void CollectLiveSlots(HashSet<int> into)
@@ -305,7 +345,7 @@ public sealed class GameSim
             // every coin and powerup on screen, and a level raining money is not a hard level.
             if (e.armorleft == 0) continue;
             int sx = e.ex + e.mapoffset;
-            bool onScreen = Widescreen ? (sx > WsDrawGateL && sx < WsDrawGateR)
+            bool onScreen = Engaged ? (sx > EngDrawGateL && sx < EngDrawGateR)
                                        : (sx > -29 && sx < 300);
             if (!onScreen) continue;
 
@@ -341,7 +381,7 @@ public sealed class GameSim
     /// <summary>
     /// Slot of the front-most enemy whose sprite cell contains the buffer-space point, or -1.
     /// Uses <see cref="CollectEnemies"/>'s own footprints and visibility rules, so what the
-    /// viewer boxes on hover is exactly what a click hits. Score items (already-dropped
+    /// atlas boxes on hover is exactly what a click hits. Score items (already-dropped
     /// pickups) are skipped, matching the engine's shot test — it only collides with slots in
     /// the live state.
     /// </summary>
@@ -538,12 +578,12 @@ public sealed class GameSim
     private int[] BgProbeOrder()
     {
         var backToFront = new List<int> { 0 };
-        if (_s.background2over is 0 or 3) backToFront.Add(1);
-        if (_s.background2over == 1) backToFront.Add(1);
-        if (_s.background3over == 2) backToFront.Add(2);
-        if (_s.background3over == 0) backToFront.Add(2);
-        if (_s.background3over == 1) backToFront.Add(2);
-        if (_s.background2over == 2) backToFront.Add(1);
+        if (Bg2Over is 0 or 3) backToFront.Add(1);
+        if (Bg2Over == 1) backToFront.Add(1);
+        if (Bg3Over == 2) backToFront.Add(2);
+        if (Bg3Over == 0) backToFront.Add(2);
+        if (Bg3Over == 1) backToFront.Add(2);
+        if (Bg2Over == 2) backToFront.Add(1);
         backToFront.Reverse();
         return backToFront.ToArray();
     }
@@ -562,7 +602,7 @@ public sealed class GameSim
             // Layer 2 rides layer 1's X phase while the water smoothie welds them (see
             // Bg2WaterSync); the blend variant never does, and only background2over == 3
             // draws layer 2 unblended without background2notTransparent.
-            bool bg2Blend = !_s.background2notTransparent && _s.background2over != 3;
+            bool bg2Blend = !_s.background2notTransparent && Bg2Over != 3;
             bool bg2Sync = Bg2WaterSync(bg2Blend);
             (int posIdx, int bp, int xPos, int backPos) = layer switch
             {
@@ -574,12 +614,12 @@ public sealed class GameSim
             int cols = layer == 2 ? 15 : 14;
             var map = _map[layer];
 
-            // Mirror DrawBgLayer's widescreen shift / mirror / suppression exactly, so hover
+            // Mirror DrawBgLayer's Engaged shift / mirror / suppression exactly, so hover
             // reports the tile actually drawn under the cursor.
-            int xshift = Widescreen ? PlayfieldXShift : 0;
-            int start = posIdx + bp - (Widescreen ? 14 : 12);
+            int xshift = Engaged ? PlayfieldXShift : 0;
+            int start = posIdx + bp - (Engaged ? 14 : 12);
             int col0 = cols == 15 ? bp : bp - 1;
-            bool mirror = MirrorLayers && Widescreen;
+            bool mirror = MirrorLayers && Engaged;
             if (mirror) { if (start - col0 < 0) { start = 0; col0 = 0; } }
             else if (ExpandedParallax && start < 0) start = 0;
             int i = FloorDiv(bufY - OY - backPos, 28);
@@ -594,7 +634,7 @@ public sealed class GameSim
             }
             // Mirror off: expanded parallax's phantom-copy tiles are not drawn -> not pickable.
             else if (ExpandedParallax && bp <= 0 &&
-                FloorDiv(idx, cols) != FloorDiv(rowBase + (Widescreen ? 13 : 11), cols)) continue;
+                FloorDiv(idx, cols) != FloorDiv(rowBase + (Engaged ? 13 : 11), cols)) continue;
             if ((uint)idx >= (uint)map.Length || map[idx] == null) continue;
 
             int row = FloorDiv(idx, cols);
@@ -631,7 +671,7 @@ public sealed class GameSim
         public int enemydie;
         public bool enemyground, scoreitem, special, setto, edamaged;
         public int explonum, mapoffset, flagnum, iced;
-        public byte objCat;           // ObjCategory, for the viewer's per-category toggles
+        public byte objCat;           // ObjCategory, for the atlas's per-category toggles
         public int xminbounce, xmaxbounce, yminbounce, ymaxbounce;
         public int parkedTicks;       // consecutive ticks frozen above the top edge (sky bank)
     }
@@ -646,7 +686,7 @@ public sealed class GameSim
     internal struct Expl { public int ttl, x, y, sprite, deltaY; public bool fixedPosition; }
     internal struct RepExpl { public int delay, ttl, x, y; public bool big; }
     /// <summary><see cref="position"/> is the vanilla star (one JE_word linear offset that
-    /// relies on 16-bit overflow to wrap); <see cref="x"/>/<see cref="y"/> are the widescreen
+    /// relies on 16-bit overflow to wrap); <see cref="x"/>/<see cref="y"/> are the Engaged
     /// build's, where only the row advances. Each path uses its own fields.</summary>
     internal struct Star { public ushort position; public int x; public float y; public int speed; public byte color; }
 
@@ -686,7 +726,7 @@ public sealed class GameSim
         public int difficultyLevel;
         public int galagaShotFreq;                     // galagaMode fire chance, in 400
         public int starfieldSpeed;
-        /// <summary>Widescreen starfield only: rotates the above-screen respawn height so
+        /// <summary>Tall starfield only: rotates the above-screen respawn height so
         /// consecutive recycles stagger across the spawn band. RNG-free by design — the
         /// per-tick starfield must never touch the gameplay stream.</summary>
         public int starSpawnPhase;
@@ -713,6 +753,10 @@ public sealed class GameSim
         internal S s;
         internal int dat0Egr0, dat0Armor;
         internal ushort[] gateLoopVisits = Array.Empty<ushort>();
+        // Half of a gate's preview record: the visit counts say which cycle is running, these
+        // say what tick each earlier cycle ended on. Restoring one without the other left a
+        // re-simulated gate stamping its region with tick numbers from the run before it.
+        internal int[] gateLoopTicks = Array.Empty<int>();
         internal int releaseGateEvent;
         internal (uint[] X, int P0, int P1, int Pm) rng;
         public int Tick;
@@ -732,6 +776,7 @@ public sealed class GameSim
         dat0Egr0 = _dat0Egr0,
         dat0Armor = _dat0Armor,
         gateLoopVisits = (ushort[])_gateLoopVisits.Clone(),
+        gateLoopTicks = (int[])_gateLoopTicks.Clone(),
         releaseGateEvent = _releaseGateEvent,
         rng = _rng.Snapshot(),
         Tick = _s.tickCount,
@@ -751,6 +796,10 @@ public sealed class GameSim
         _dat0Egr0 = sn.dat0Egr0;
         _dat0Armor = sn.dat0Armor;
         _gateLoopVisits = (ushort[])sn.gateLoopVisits.Clone();
+        // Snapshots taken before this field joined them carry an empty array; keep what the
+        // sim already has rather than shrink it out from under RecordScriptedGateCycle.
+        if (sn.gateLoopTicks.Length == _gateLoopTicks.Length)
+            _gateLoopTicks = (int[])sn.gateLoopTicks.Clone();
         _releaseGateEvent = sn.releaseGateEvent;
         _rng.Restore(sn.rng);
     }
@@ -798,7 +847,7 @@ public sealed class GameSim
         }
 
         // The ']g' that JE_loadMap reads out of the episode script belongs to the level, not
-        // to the caller, so resolve it here — the viewer, --simshot and --simtest all get it
+        // to the caller, so resolve it here — the atlas, --simshot and --simtest all get it
         // without plumbing a flag through.
         foreach (var item in ep.Levels)
             if (item.FileNum == lv.FileNum) { GalagaMode = item.GalagaMode; break; }
@@ -864,15 +913,15 @@ public sealed class GameSim
         _s.bkWrap2 = _s.bkWrap2to = 1 * 14;
         _s.bkWrap3 = _s.bkWrap3to = 1 * 15;
 
-        // initialize_starfield. Both models draw from the gameplay RNG, and the widescreen
-        // build's larger field consumes more of it — exactly as the real build does, so a
-        // widescreen run's stream legitimately differs from a vanilla one.
-        bool wideStars = WideStarfield;
-        int starCount = wideStars ? WideStarCount : VanillaStarCount;
+        // initialize_starfield. Both models draw from the gameplay RNG, and the Engaged
+        // build's larger field consumes more of it — exactly as the real build does, so an
+        // Engaged run's stream legitimately differs from a vanilla one.
+        bool tallStars = TallStarfield;
+        int starCount = tallStars ? TallStarCount : VanillaStarCount;
         if (_stars.Length != starCount) _stars = new Star[starCount];
         for (int i = _stars.Length - 1; i >= 0; i--)
         {
-            if (wideStars)
+            if (tallStars)
             {
                 _stars[i].x = (int)(_rng.Next() % (uint)SurfaceWidth);
                 _stars[i].y = _rng.Next() % StarfieldWrap;
@@ -906,7 +955,7 @@ public sealed class GameSim
     /// <summary>
     /// Arcade-style maps can use location 1 only to jump into a 60000-series
     /// route/setup table. The game hides that bootstrap frame behind its opening
-    /// fade, but the viewer exposes it when color effects are disabled or the field
+    /// fade, but the atlas exposes it when color effects are disabled or the field
     /// is zoomed out. Start those maps at location 1 so the map is re-anchored before
     /// the first inspectable frame.
     /// </summary>
@@ -948,15 +997,15 @@ public sealed class GameSim
         _ => 0,
     };
 
-    /// <summary>Neutral-frame parallax offsets (mainint.c:4693, phantom player). In
-    /// widescreen the widescreen build's rewritten formula (mainint.c
-    /// JE_mainGamePlayerFunctions) applies instead: a clamped 0..1 ramp over the widened
-    /// player range, with layer 2 pulled back 17px. notes.md §Widescreen.</summary>
+    /// <summary>Neutral-frame parallax offsets (mainint.c:4693, phantom player). In Engaged
+    /// mode the build's rewritten formula (mainint.c JE_mainGamePlayerFunctions) applies
+    /// instead: a clamped 0..1 ramp over the widened player range, with layer 2 pulled back
+    /// 17px. notes.md §Widescreen.</summary>
     private void ComputeParallax()
     {
         int tempX = PlayerX;
         int tempW;
-        if (Widescreen)
+        if (Engaged)
         {
             // w_f is the shared float driver for all three layers: mapX3Ofs = w_f,
             // mapX2Ofs = (w_f-17)*2/3, mapXOfs = mapX2Ofs/2 (the original coupled 4:2:1 ratio).
@@ -971,18 +1020,18 @@ public sealed class GameSim
                 // w_f is back-derived (3*near + 17) so the mid/deep layers keep the coupled
                 // ratio and still over-pan/uncover their edges at far-left (DrawBgLayer's base
                 // clamp guards the resulting out-of-range read).
-                const float shipLeft = 29f, shipRight = WideViewW + 4;   // SHIP_LEFT/RIGHT_MARGIN 29/-4
+                const float shipLeft = 29f, shipRight = EngagedViewW + 4;   // SHIP_LEFT/RIGHT_MARGIN 29/-4
                 const float nearFlushLeft = ViewX - PlayfieldXShift;     // 24 - (-12) = 36
-                const float nearSlack = 14 * 24 - WideViewW;             // 336 - 299 = 37
+                const float nearSlack = 14 * 24 - EngagedViewW;             // 336 - 299 = 37
                 float uu = Math.Clamp((tempX - shipLeft) / (shipRight - shipLeft), 0f, 1f);
                 wf = 3f * (nearFlushLeft - nearSlack * uu) + 17f;        // 125 (far-left) .. 14 (far-right)
             }
             else
             {
-                // Stock widescreen amplitude and normalization. (The build's far-left bg2
-                // sub-pixel snap only touches its smooth-motion float mirrors; the viewer
+                // Stock Engaged amplitude and normalization. (The build's far-left bg2
+                // sub-pixel snap only touches its smooth-motion float mirrors; the atlas
                 // renders the integer offsets directly, which is already the crisp result.)
-                float u = Math.Clamp((tempX - 40f) / (WideViewW + 64 - 40), 0f, 1f);
+                float u = Math.Clamp((tempX - 40f) / (EngagedViewW + 64 - 40), 0f, 1f);
                 wf = (1f - u) * (24 * 3);
             }
             tempW = (int)MathF.Floor(wf);
@@ -1012,13 +1061,13 @@ public sealed class GameSim
         }
 
         // Layer 2 (bg2 overlay) right-edge coverage guard (commit ae13d1c). Its 14-tile (336px)
-        // strip is 1px too short of the widescreen playfield's right edge (col 322) once the pan
+        // strip is 1px too short of the Engaged playfield's right edge (col 322) once the pan
         // pushes mapX2Ofs to its far-right -2 (strip at x=-14 ends on col 321); the near layer
         // bottoms out at -1, so clamp layer 2 to that same floor. Applied AFTER mapXOfs is
         // derived from the unclamped value (engine order), so only layer 2 itself moves. Not
-        // gated on ExpandedParallax -- the gap exists in plain widescreen too; vanilla mapX2Ofs
-        // never drops below 0, so the Widescreen gate keeps normal mode byte-identical.
-        if (Widescreen && _s.mapX2Ofs < -1)
+        // gated on ExpandedParallax -- the gap exists in plain Engaged mode too; vanilla mapX2Ofs
+        // never drops below 0, so the Engaged gate keeps normal mode byte-identical.
+        if (Engaged && _s.mapX2Ofs < -1)
         {
             _s.mapX2Ofs = -1;
             _s.mapX2Pos = _s.mapX2Ofs % 24;
@@ -1092,7 +1141,7 @@ public sealed class GameSim
         // Events run before the engine's player/parallax update. In particular,
         // SQUADRON sets background3x1 at time zero; calculating before events makes
         // that layer use the normal BG3 anchor for one frame, then snap 42 px left.
-        // The viewer has a fixed phantom player, so calculate from the just-authored
+        // The atlas has a fixed phantom player, so calculate from the just-authored
         // mode before drawing the frame and never expose that hidden startup state.
         ComputeParallax();
 
@@ -1133,8 +1182,8 @@ public sealed class GameSim
         if (anySmoothies && _s.smoothies[4] != 0) ApplySmoothie(SmoothieKind.IcedBlur);
 
         // --- BACKGROUND 2 (early positions; over==3 never blends) ---
-        if (_s.background2over == 3) DrawBackground2(draw, allowBlend: false);
-        if (_s.background2over == 0) DrawBackground2(draw);
+        if (Bg2Over == 3) DrawBackground2(draw, allowBlend: false);
+        if (Bg2Over == 0) DrawBackground2(draw);
 
         // lava (early variant) and water run before the ground bands
         if (anySmoothies && _s.smoothies[0] != 0 && _s.smoothieData[0] == 0)
@@ -1153,8 +1202,8 @@ public sealed class GameSim
         if (anySmoothies && _s.smoothies[0] != 0 && _s.smoothieData[0] > 0)
             ApplySmoothie(SmoothieKind.Lava);
 
-        if (_s.background2over == 1) DrawBackground2(draw);
-        if (_s.background3over == 2) eff3 = DrawBackground3(draw);
+        if (Bg2Over == 1) DrawBackground2(draw);
+        if (Bg3Over == 2) eff3 = DrawBackground3(draw);
 
         // --- New random enemy ---
         if (_s.enemiesActive && _rng.Next() % 100 > _s.levelEnemyFrequency && _lv.LevelEnemy.Length > 0)
@@ -1168,7 +1217,7 @@ public sealed class GameSim
         if (anySmoothies && _s.smoothies[3] != 0) ApplySmoothie(SmoothieKind.Blur);
 
         // --- Sky enemies (under bg3) ---
-        if (!_s.skyEnemyOverAll)
+        if (!SkyEnemyOverAllNow)
         {
             lastEnemyOnScreen = _s.enemyOnScreen;
             DrawEnemy(25, _s.mapX2Ofs, 0, draw);
@@ -1176,23 +1225,23 @@ public sealed class GameSim
                 if (_s.stopBackgroundNum == 2) _s.stopBackgroundNum = 9;
         }
 
-        if (_s.background3over == 0) eff3 = DrawBackground3(draw);
+        if (Bg3Over == 0) eff3 = DrawBackground3(draw);
 
         // --- Top enemies (under) ---
-        if (!_s.topEnemyOver)
+        if (!TopEnemyOverNow)
             DrawEnemy(75, _s.background3x1 ? _s.mapXOfs : _s.oldMapX3Ofs, eff3, draw);
 
         // --- Enemy shots ---
         UpdateEnemyShots(draw);
 
-        if (_s.background3over == 1) eff3 = DrawBackground3(draw);
+        if (Bg3Over == 1) eff3 = DrawBackground3(draw);
 
         // --- Top enemies (over) ---
-        if (_s.topEnemyOver)
+        if (TopEnemyOverNow)
             DrawEnemy(75, _s.background3x1 ? _s.oldMapXOfs : _s.oldMapX3Ofs, eff3, draw);
 
         // --- Sky enemies (over all) ---
-        if (_s.skyEnemyOverAll)
+        if (SkyEnemyOverAllNow)
         {
             lastEnemyOnScreen = _s.enemyOnScreen;
             DrawEnemy(25, _s.mapX2Ofs, 0, draw);
@@ -1203,15 +1252,15 @@ public sealed class GameSim
         UpdateRepExplosions();
         UpdateExplosions(draw);
 
-        if (_s.background2over == 2) DrawBackground2(draw);
+        if (Bg2Over == 2) DrawBackground2(draw);
 
         if (_s.randomExplosions && _rng.Next() % 10 == 1)
         {
-            // Widescreen spreads them across the widened playfield (PLAYFIELD_LEFT + rand %
+            // Engaged mode spreads them across the widened playfield (PLAYFIELD_LEFT + rand %
             // PLAYFIELD_WIDTH) and the full 184px height (vanilla stopped at 180). Same two
             // RNG draws either way, so the timeline stays deterministic. tyrian2.c:3513.
-            if (Widescreen)
-                SetupExplosionLarge(false, 20, ViewX + (int)(_rng.Next() % WideViewW), (int)(_rng.Next() % 184));
+            if (Engaged)
+                SetupExplosionLarge(false, 20, ViewX + (int)(_rng.Next() % EngagedViewW), (int)(_rng.Next() % 184));
             else
                 SetupExplosionLarge(false, 20, (int)(_rng.Next() % 280), (int)(_rng.Next() % 180));
         }
@@ -1284,7 +1333,7 @@ public sealed class GameSim
     /// left only the two columns before the wrap, i.e. a blue strip pinned to the left
     /// edge instead of a full-screen starfield backdrop.
     ///
-    /// The extended margins are a viewer-only invention (the engine never draws them), so
+    /// The extended margins are an atlas-only invention (the engine never draws them), so
     /// they stay row-bounded: a margin tile is drawn only while it is still in the same
     /// map row as the on-screen column it extends. That shows the authored columns just
     /// outside the 288px window without spilling neighbouring rows across the margin.
@@ -1293,10 +1342,10 @@ public sealed class GameSim
     {
         var map = _map[layer];
         int cols = layer == 2 ? 15 : 14;
-        // Widescreen (backgrnd.c): the band cursor starts one BG_TILE_COUNT (14) back instead of
+        // Engaged mode (backgrnd.c): the band cursor starts one BG_TILE_COUNT (14) back instead of
         // 12, draws 14 on-screen columns (lastCol 13) instead of 12, and every row blits shifted
         // by PLAYFIELD_X_SHIFT -- so terrain rides the same phase as the objects (see DrawEnemy).
-        int start = posIdx + bp - (Widescreen ? 14 : 12);
+        int start = posIdx + bp - (Engaged ? 14 : 12);
         // col0 = map-column index of the strip's first tile within its row: the mapY*Pos cursors
         // carry a -1 bias, so the 14-wide layers sit at bp-1; layer 3's 15-wide stride absorbs
         // the bias, leaving bp (commit 1f7ba83 bg_mirror_setup call sites).
@@ -1306,7 +1355,7 @@ public sealed class GameSim
         // panned past its side edge continues as a seamless mirror image instead of wrapping
         // into the adjacent map row. If the first row itself starts before the map (level-end
         // re-seat), fall back to the base clamp with mirroring inert (col0 = 0).
-        bool mirror = MirrorLayers && Widescreen;
+        bool mirror = MirrorLayers && Engaged;
         if (mirror)
         {
             if (start - col0 < 0) { start = 0; col0 = 0; }
@@ -1314,8 +1363,8 @@ public sealed class GameSim
         // Mirror off: Extra Parallax keeps the old base clamp (commit edd8118 bg_clamp_map) so
         // the top-of-scroll over-pan repeats row 0 rather than reading out of bounds.
         else if (ExpandedParallax && start < 0) start = 0;
-        int lastCol = Widescreen ? 13 : 11;          // rightmost on-screen tile column
-        int xshift = Widescreen ? PlayfieldXShift : 0;
+        int lastCol = Engaged ? 13 : 11;          // rightmost on-screen tile column
+        int xshift = Engaged ? PlayfieldXShift : 0;
         // Mirror off + expanded parallax: the flat map layout would fill the over-panned strip
         // (the columns panned past the layer's left edge) with the PREVIOUS row's right columns
         // -- a phantom second copy of the map on the left. Skip exactly those, so the uncovered
@@ -1480,7 +1529,7 @@ public sealed class GameSim
     {
         byte[] src = _tgt;
         byte[] dst = Screen;
-        // The filters walk vga_width per scanline (backgrnd.c), which is 356 in widescreen --
+        // The filters walk vga_width per scanline (backgrnd.c), which is 356 in Engaged mode --
         // 36 px past the vanilla 320, and the playfield's right edge (PLAYFIELD_RIGHT = 322)
         // sits inside that extra span. Running them at a fixed 320 left the last 3 displayed
         // columns unfiltered: raw terrain beside the smoothed image.
@@ -1608,13 +1657,13 @@ public sealed class GameSim
     //  Starfield (backgrnd.c). Vanilla carries each star as a single JE_word linear offset
     //  that relies on 16-bit overflow to wrap, and draws it only while it is above row 177 —
     //  seven rows short of the 184-row playfield, so the bottom of the screen has no stars,
-    //  and the wrap lands mid-row so a star jumps sideways as it recycles. The widescreen
+    //  and the wrap lands mid-row so a star jumps sideways as it recycles. The Engaged
     //  build rewrote it as (x, float y) points: x never moves, the field spans the full surface
     //  width and all 184 displayed rows, and a recycled star respawns just above the top edge
-    //  instead of popping in at row 0. Which model runs is WideStarfield's call, independent of
-    //  Widescreen — the dead stripe at the bottom is the same bug at either width.
+    //  instead of popping in at row 0. Which model runs is TallStarfield's call, independent of
+    //  Engaged — the dead stripe at the bottom is the same bug at either width.
     // =====================================================================
-    private const int VanillaStarCount = 100, WideStarCount = 330;
+    private const int VanillaStarCount = 100, TallStarCount = 330;
     private const int StarfieldHue = 0x90;
     private const int StarfieldWrap = 184;      // rows; a star recycles once it drifts past this
     private const int StarfieldVisible = 184;   // rows; stars draw above this (the playfield bottom)
@@ -1622,7 +1671,7 @@ public sealed class GameSim
 
     private void UpdateAndDrawStarfield(bool draw)
     {
-        if (WideStarfield) { UpdateAndDrawStarfieldWide(draw); return; }
+        if (TallStarfield) { UpdateAndDrawStarfieldWide(draw); return; }
 
         var tgt = _tgt;
         for (int i = _stars.Length - 1; i >= 0; i--)
@@ -1769,11 +1818,11 @@ public sealed class GameSim
     // =====================================================================
     private void DrawEnemy(int enemyOffset, int tempMapXOfs, int tempBackMove, bool draw)
     {
-        // Widescreen shifts every pass's tempMapXOfs by PLAYFIELD_X_SHIFT (tyrian2.c sets it on
+        // Engaged mode shifts every pass's tempMapXOfs by PLAYFIELD_X_SHIFT (tyrian2.c sets it on
         // the tempMapXOfs global before each JE_drawEnemy). This flows to the enemy blit position,
         // e.mapoffset (hover/on-screen), the draw/cull gates, aim, and shot creation (sh.sx), so
         // objects ride the same shifted playfield as the background. notes.md §Widescreen.
-        if (Widescreen) tempMapXOfs += PlayfieldXShift;
+        if (Engaged) tempMapXOfs += PlayfieldXShift;
         bool skyBank = enemyOffset == 25;   // slots 0..24, the batch with no tempBackMove channel
         int px = PlayerX - 25;   // player[0].x -= 25 wrapper
         for (int i = enemyOffset - 25; i < enemyOffset; i++)
@@ -1793,8 +1842,8 @@ public sealed class GameSim
                 else { if (e.eyc >= 0 || -e.eyc < e.yaccel - 89) e.eyc--; }
             }
 
-            if (e.ex + tempMapXOfs > (Widescreen ? WsDrawGateL : -29) &&
-                e.ex + tempMapXOfs < (Widescreen ? WsDrawGateR : 300))
+            if (e.ex + tempMapXOfs > (Engaged ? EngDrawGateL : -29) &&
+                e.ex + tempMapXOfs < (Engaged ? EngDrawGateR : 300))
             {
                 if (e.aniactive == 1)
                 {
@@ -1858,7 +1907,7 @@ public sealed class GameSim
             e.ey += e.fixedmovey;
 
             e.ex += e.exc;
-            if (e.ex < -80 || e.ex > (Widescreen ? WsEnemyCullR : 340)) { _avail[i] = 1; continue; }
+            if (e.ex < -80 || e.ex > (Engaged ? EngEnemyCullR : 340)) { _avail[i] = 1; continue; }
             e.ey += e.eyc;
             if (e.ey < -112 || e.ey > 190) { _avail[i] = 1; continue; }
 
@@ -1897,13 +1946,13 @@ public sealed class GameSim
 
             if (e.scoreitem)
             {
-                if (e.ex < (Widescreen ? WsScoreParkL : -5)) e.ex++;
-                if (e.ex > (Widescreen ? WsScoreParkR : 245)) e.ex--;
+                if (e.ex < (Engaged ? EngScoreParkL : -5)) e.ex++;
+                if (e.ex > (Engaged ? EngScoreParkR : 245)) e.ex--;
             }
 
             e.ey += tempBackMove;
 
-            if (e.ex <= -24 || e.ex >= (Widescreen ? WsOnScreenR : 296)) continue;
+            if (e.ex <= -24 || e.ex >= (Engaged ? EngOnScreenR : 296)) continue;
 
             int tempX = e.ex, tempY = e.ey;
 
@@ -2121,7 +2170,7 @@ public sealed class GameSim
                 else { if (sh.sym < sh.ty) sh.sym++; }
             }
             if (sh.duration-- == 0 || sh.sy > 190 || sh.sy <= -14 ||
-                sh.sx > (Widescreen ? WsShotCullR : 275) || sh.sx <= 0)
+                sh.sx > (Engaged ? EngShotCullR : 275) || sh.sx <= 0)
             {
                 _shotAvail[z] = 1;
                 continue;
@@ -2305,14 +2354,14 @@ public sealed class GameSim
 
         if (draw && ShowBossBars)
         {
-            // Widescreen re-centres the bars in the wider playfield (the widescreen build centres
+            // Engaged mode re-centres the bars in the wider playfield (the build centres
             // its boss bars on PLAYFIELD_WIDTH/2), so a centred bar stays centred rather than
             // sitting left of centre. The bars are HUD overlays, so they take the centring delta,
             // not the terrain's PLAYFIELD_X_SHIFT.
-            int wsBarShift = Widescreen ? (WideViewW - ViewW) / 2 : 0;   // 17
+            int engBarShift = Engaged ? (EngagedViewW - ViewW) / 2 : 0;   // 17
             for (int bi = 0; bi < bars; bi++)
             {
-                int x = (bars == 2 ? (bi == 0 ? 125 : 185) : (_s.levelTimer ? 250 : 155)) + wsBarShift;
+                int x = (bars == 2 ? (bi == 0 ? 125 : 185) : (_s.levelTimer ? 250 : 155)) + engBarShift;
                 int y = _s.levelTimer ? 15 : 7;
                 BarX(x - 25, y, x + 25, y + 5, 115);
                 BarX(x - armor[bi] / 10, y, x + (armor[bi] + 5) / 10, y + 5, 118 + color[bi]);
@@ -2354,7 +2403,7 @@ public sealed class GameSim
 
         if (!draw || !ShowScreenFilter) return;
 
-        int pw = PlayfieldWidth;   // 299 widescreen / 264 vanilla
+        int pw = PlayfieldWidth;   // 299 Engaged / 264 vanilla
         if (col != -99)
         {
             int hue = (col << 4) & 0xF0;
@@ -2390,7 +2439,7 @@ public sealed class GameSim
     public void PreparePresent()
     {
         Array.Copy(Screen, PresentScreen, Screen.Length);
-        int pw = PlayfieldWidth;   // 299 widescreen / 264 vanilla
+        int pw = PlayfieldWidth;   // 299 Engaged / 264 vanilla
         int code = _s.smoothies[8] + (_s.smoothies[5] << 1);
         if (code == 1 && ShowScreenFlip)
         {
@@ -2405,7 +2454,7 @@ public sealed class GameSim
         else if (code == 2 && ShowSpotlight)
         {
             // spotlight around the (phantom) player; everything else darkened. lightx/x
-            // widen with the playfield: 281 = 264+17, 316 = 299+17 (widescreen
+            // widen with the playfield: 281 = 264+17, 316 = 299+17 (Engaged
             // composite_playfield: PLAYFIELD_WIDTH - PLAYFIELD_X_SHIFT + 5). notes.md §Widescreen.
             int lighty = 172 - PlayerY;
             int lightx = pw + 17 - PlayerX;
@@ -2452,7 +2501,7 @@ public sealed class GameSim
     }
 
     /// <summary><paramref name="band"/> is the slot group the enemy is being created in
-    /// (0 sky / 25 ground / 50 top / 75 ground2) — it only feeds the viewer's category
+    /// (0 sky / 25 ground / 50 top / 75 ground2) — it only feeds the atlas's category
     /// tag, which must be stamped here because slots are recycled and would otherwise
     /// keep the previous occupant's category.</summary>
     private byte MakeEnemy(ref Enemy e, int eDatI, int uniqueShapeTableI, int band)
@@ -2614,11 +2663,11 @@ public sealed class GameSim
 
         if (ev.Dat2 != -99)
         {
-            // Widescreen starts the background map cursor 2 tiles earlier (DrawBgLayer's
+            // Engaged mode starts the background map cursor 2 tiles earlier (DrawBgLayer's
             // -tile_count), so event-spawned enemies compensate by 2 tiles -- (mapX-3) vs the
             // vanilla (mapX-1), and case 50's else form drops the -24*2 -- to stay locked to the
             // terrain column they are authored onto. tyrian2.c JE_createNewEventEnemy.
-            int mapXAdj = Widescreen ? 3 : 1;
+            int mapXAdj = Engaged ? 3 : 1;
             switch (enemyOffset)
             {
                 case 0:
@@ -2634,7 +2683,7 @@ public sealed class GameSim
                     if (_s.background3x1)
                         e.ex = ev.Dat2 - (_lv.MapX - mapXAdj) * 24 - 12;
                     else
-                        e.ex = ev.Dat2 - _lv.MapX3 * 24 + 6 - (Widescreen ? 0 : 24 * 2);
+                        e.ex = ev.Dat2 - _lv.MapX3 * 24 + 6 - (Engaged ? 0 : 24 * 2);
                     e.ey -= _s.backMove3;
                     if (_s.background3x1b) e.ex -= 6;
                     break;
@@ -3391,10 +3440,10 @@ public sealed class GameSim
                     if (ev.Dat4 != 0 && _enemy[i].linknum != ev.Dat4) continue;
                     if (ev.Dat5 != -99) _enemy[i].xminbounce = ev.Dat5;
                     if (ev.Dat6 != -99) _enemy[i].yminbounce = ev.Dat6;
-                    // Widescreen: the right bounce bound was authored for the 320px field; shift
-                    // it out by the widescreen extension (vga_width - LEGACY_WIDTH = 36) so
+                    // Engaged mode: the right bounce bound was authored for the 320px field; shift
+                    // it out by the Engaged widening (vga_width - LEGACY_WIDTH = 36) so
                     // sweeping enemies cover the full widened playfield. tyrian2.c case 74.
-                    if (ev.Dat != -99) _enemy[i].xmaxbounce = ev.Dat + (Widescreen ? 36 : 0);
+                    if (ev.Dat != -99) _enemy[i].xmaxbounce = ev.Dat + (Engaged ? 36 : 0);
                     if (ev.Dat2 != -99) _enemy[i].ymaxbounce = ev.Dat2;
                 }
                 break;

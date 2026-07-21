@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The analysis panel: what a level is actually made of, and how the levels rank against
@@ -18,7 +18,7 @@ namespace T2LV;
 /// enemy really lingers rather than assuming it fires forever.
 ///
 /// Every number the level view shows is placed against its peers -- the same statistic across
-/// every level the viewer is browsing -- because "armour 5.8 per tick" means nothing on its
+/// every level the atlas is browsing -- because "armour 5.8 per tick" means nothing on its
 /// own and "5.8, the second heaviest of twenty" means quite a lot.
 /// </summary>
 public sealed unsafe partial class App
@@ -266,7 +266,7 @@ public sealed unsafe partial class App
                 "levels here does not disturb the run being watched.");
         BandDivider();
         SegBar("##anmode", ref _analysisMode, AcAnalysis, 220f,
-            ("This level", "What the level in the viewer is built out of."),
+            ("This level", "What the level in the atlas is built out of."),
             ("All levels", "Every browsed level ranked against the others."));
         BandDivider();
         if (ThreatBusy)
@@ -791,7 +791,7 @@ public sealed unsafe partial class App
                           $"{rt.Shots:n0} shots   ·   up to {rt.PeakBulletDensity:0.0} in the air   ·   " +
                           $"{SimPlayback.FormatTime(rt.Ticks)} long\n") +
                     $"{r.SpawnCount} spawns   ·   {r.TotalArmor:n0} armour authored\n" +
-                    "click to open this level in the viewer");
+                    "click to open this level in the atlas");
 
             // Standing on the current sort, so re-sorting renumbers rather than just reorders.
             string place = $"{i + 1}";

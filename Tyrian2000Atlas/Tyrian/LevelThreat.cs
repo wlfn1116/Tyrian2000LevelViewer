@@ -1,11 +1,11 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
 /// How hard a level is to survive, measured by running it rather than by reading its event
 /// list. <see cref="LevelStats"/> answers "what is in this level"; this answers "what does it
 /// throw at you, and how much of it can you not simply sidestep".
 ///
-/// The readings come from the same <see cref="GameSim"/> the viewer plays back, at a chosen
+/// The readings come from the same <see cref="GameSim"/> the atlas plays back, at a chosen
 /// difficulty, so every engine rule that scales with difficulty is already applied by the time
 /// the numbers are taken: armour multipliers, the halved (and re-halved) turret reload above
 /// Normal, and the aim bonus that makes tracked shots faster (tyrian2.c:1355, 1512, 5954).
@@ -187,8 +187,8 @@ public sealed class LevelThreat
     /// (<see cref="Score"/> still declines to credit such a level for its length, since the tick
     /// count there is the length of the measurement, not of the level.)
     ///
-    /// The simulation is left on its defaults -- vanilla playfield, no widescreen, one boss-gate
-    /// cycle -- rather than following the viewer's playback settings. A difficulty ranking has to
+    /// The simulation is left on its defaults -- vanilla playfield, no Engaged mode, one boss-gate
+    /// cycle -- rather than following the atlas's playback settings. A difficulty ranking has to
     /// mean the same thing whatever the person looking at it happens to be watching in.
     /// </summary>
     public static LevelThreat Measure(GameData gd, EpisodeInfo ep, Level lv, int difficulty,

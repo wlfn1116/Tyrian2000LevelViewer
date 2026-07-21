@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The enemy browser: every enemyDat entry animated the way the engine animates it, plus the
@@ -498,6 +498,7 @@ public sealed unsafe partial class App
         BandLabel("zoom");
         ImGui.SetNextItemWidth(96);
         ImGui.SliderFloat("##enzoom", ref _enemyZoom, 1f, 8f, "%.0fx");
+        SliderReset(ref _enemyZoom, 3f, "How far the stage blows the entry up.", "3x");
 
         BandDivider(9f);
         if (UiToggle("animate", ref _enemyAnimate, AcEnemy,
@@ -507,7 +508,8 @@ public sealed unsafe partial class App
         ImGui.SameLine(0, 5);
         ImGui.SetNextItemWidth(84);
         ImGui.SliderFloat("##enspeed", ref _enemyAnimSpeed, 0.1f, 3f, "x%.2f");
-        if (ImGui.IsItemHovered()) ImGui.SetTooltip("The engine runs at 35 ticks a second; this scales that.");
+        SliderReset(ref _enemyAnimSpeed, 1f,
+            "The engine runs at 35 ticks a second; this scales that.", "x1");
 
         // An animate-2 entry is idle unless it is shooting, so the trigger is the control that
         // decides whether it animates at all -- the same gate the sidekick stage has.
@@ -1024,7 +1026,7 @@ public sealed unsafe partial class App
         var shown = ShownAssemblies();
         if (shown.Count == 0) { ImGui.TextDisabled("No multi-part groups found."); return; }
 
-        // Follow the viewer: opening this on a level you are looking at should land on that
+        // Follow the atlas: opening this on a level you are looking at should land on that
         // level's groups, not on whatever sorts first in the episode. A row named on the
         // command line wins, once, so a screenshot can be aimed at it.
         if (_asmAimed) { _asmAimed = false; _asmFollowedLevel = _levelFileNum; }
@@ -1152,7 +1154,7 @@ public sealed unsafe partial class App
         SelectLevelFile(s.EpisodeIdx, s.LevelFileNum);
         _pendingJump = new MapJump(s.Time,
             asm.Parts.Select(p => p.EnemyId).Where(id => id != 0).Distinct().ToArray());
-        // The list follows the viewer's level, but not when the viewer followed the list:
+        // The list follows the atlas's level, but not when the atlas followed the list:
         // re-snapping here would throw the selection off the group that was just opened.
         _asmFollowedLevel = _levelFileNum;
     }

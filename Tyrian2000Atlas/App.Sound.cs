@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian.Audio;
+using T2A.Render;
+using T2A.Tyrian.Audio;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The sound player: all forty clips the game has -- thirty-one effects out of
@@ -125,9 +125,10 @@ public sealed unsafe partial class App
         BandLabel("volume");
         ImGui.SetNextItemWidth(110);
         int vol = _fxVolume;
-        if (ImGui.SliderInt("##sndvol", ref vol, 0, 255, "%d")) _fxVolume = vol;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("The engine's own 0-255 effects volume, on its 30 dB curve.\nThe game ships at 191.");
+        if (ImGui.SliderInt("##sndvol", ref vol, 0, 255, "%d") |
+            SliderReset(ref vol, DefaultVolume,
+                "The engine's own 0-255 effects volume, on its 30 dB curve.\nThe game ships at 191."))
+            _fxVolume = vol;
 
         BandDivider();
         int xmas = _xmasVoices ? 1 : 0;
@@ -307,17 +308,17 @@ public sealed unsafe partial class App
         BandLabel("channel");
         ImGui.SetNextItemWidth(90);
         ImGui.SliderInt("##sndchan", ref _soundChannel, 0, 7);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("The game mixes eight channels and a new sound simply replaces\n" +
-                             "whatever that channel was playing. Channel 3 is the announcer's.");
+        SliderReset(ref _soundChannel, 7,
+            "The game mixes eight channels and a new sound simply replaces\n" +
+            "whatever that channel was playing. Channel 3 is the announcer's.");
 
         BandDivider();
         BandLabel("level");
         ImGui.SetNextItemWidth(90);
         ImGui.SliderInt("##sndlevel", ref _soundLevel, 0, 7);
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("One of the mixer's eight volume steps. In game: 4 on the announcer\n" +
-                             "channel, 2 for most effects, 1 for the Lightning weapon.");
+        SliderReset(ref _soundLevel, 4,
+            "One of the mixer's eight volume steps. In game: 4 on the announcer\n" +
+            "channel, 2 for most effects, 1 for the Lightning weapon.");
 
         BandDivider();
         DrawExportRow(AcSound, ExportKind.SoundWav, c.Number, withMidi: false);

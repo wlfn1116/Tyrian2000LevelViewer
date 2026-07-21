@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 public struct WeaponDat
 {

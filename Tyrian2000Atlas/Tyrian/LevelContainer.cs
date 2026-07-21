@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
 /// tyrian%d.lvl container header: u16 lvlNum, then s32 lvlPos[lvlNum].

@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
 /// shapes%c.dat — 600 background tiles. Each record: 1 byte "blank" flag;

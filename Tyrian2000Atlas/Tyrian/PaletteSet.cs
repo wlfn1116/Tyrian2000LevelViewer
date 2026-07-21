@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
 /// palette.dat — 24 palettes of 256 RGB colors. Each channel is a 6-bit VGA

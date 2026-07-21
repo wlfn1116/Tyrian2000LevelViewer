@@ -4,11 +4,11 @@ param()
 $ErrorActionPreference = "Stop"
 
 $workspace = [System.IO.Path]::GetFullPath($PSScriptRoot)
-$project = Join-Path $workspace "Tyrian2000LevelViewer\Tyrian2000LevelViewer.csproj"
+$project = Join-Path $workspace "Tyrian2000Atlas\Tyrian2000Atlas.csproj"
 $artifacts = [System.IO.Path]::GetFullPath((Join-Path $workspace "artifacts"))
 $publish = Join-Path $artifacts "publish\win-x64"
 $release = Join-Path $artifacts "release"
-$archive = Join-Path $release "Tyrian2000LevelViewer-win-x64.zip"
+$archive = Join-Path $release "Tyrian2000Atlas-win-x64.zip"
 
 if (-not $artifacts.StartsWith($workspace.TrimEnd("\") + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "The artifacts directory must stay inside the workspace."

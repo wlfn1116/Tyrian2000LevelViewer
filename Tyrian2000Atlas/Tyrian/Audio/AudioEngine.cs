@@ -2,10 +2,10 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SdlNs = Hexa.NET.SDL2;
 
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>
-/// The viewer's one audio device and mixer. It follows loudness.c: eight sample
+/// The atlas's one audio device and mixer. It follows loudness.c: eight sample
 /// channels at eight volume steps, a 30 dB volume curve, and the music summed in
 /// ahead of them. Two deliberate differences: the device is stereo rather than
 /// mono (the game's mono sources are simply written to both sides, but a SoundFont

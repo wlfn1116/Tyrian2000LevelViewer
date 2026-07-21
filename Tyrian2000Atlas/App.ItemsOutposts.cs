@@ -1,16 +1,16 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The Outposts tab: the shops the other way round. The left column is every level whose flow
 /// puts an outpost on the way in (a ']I', <see cref="GraphNode.ShopStops"/>), in campaign order;
 /// the right pane is that outpost's whole shelf -- ships, front and rear weapons, generator, the
 /// two sidekick slots and the shield -- each a click through to the item's own page. The
-/// widescreen fork's Charge-Laser re-add is folded in exactly where <see cref="ChargeLaserOutpost"/>
+/// Engaged fork's Charge-Laser re-add is folded in exactly where <see cref="ChargeLaserOutpost"/>
 /// puts it, so the shelf matches the build the browser is set to.
 /// </summary>
 public sealed unsafe partial class App

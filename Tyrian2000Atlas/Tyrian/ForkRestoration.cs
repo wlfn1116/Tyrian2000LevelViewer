@@ -1,7 +1,7 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
-/// The post-load pass the widescreen build runs over the item block before the game ever
+/// The post-load pass the Engaged build runs over the item block before the game ever
 /// sees it (episodes.c:597-646). The tables on disk are only half the story: several entries
 /// are rewritten in code, and one of those rewrites puts back content Tyrian 2000 cut.
 ///
@@ -14,7 +14,7 @@ namespace T2LV.Tyrian;
 /// tagging (212-295), because nothing here renders a bolt in flight.
 ///
 /// Applying it is optional, because "what does the shop actually offer" has two honest answers
-/// depending on which build you play: the browser carries a vanilla/widescreen switch and this
+/// depending on which build you play: the browser carries a vanilla/Engaged switch and this
 /// is what the switch turns on.
 /// </summary>
 public static class ForkRestoration

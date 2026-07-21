@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
 /// One piece of an assembly, at the spot the level spawns it, in game pixels relative to the

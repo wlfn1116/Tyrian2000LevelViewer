@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// "Where you get it": for every shop item, the outposts that sell it and the levels its pickup
@@ -14,7 +14,7 @@ namespace T2LV;
 ///
 /// * The outposts come from the flow graph, which now carries each ']I' shelf on the level it
 ///   leads into (<see cref="ShopStop"/>). Seven of a shelf's nine rows are ever sold from, and
-///   which row is which upgrade slot is fixed (game_menu.c:182). The widescreen fork's re-added
+///   which row is which upgrade slot is fixed (game_menu.c:182). The Engaged fork's re-added
 ///   Charge-Laser Cannon is injected here rather than in the graph, so one graph serves both
 ///   builds -- exactly the shops tyrian2.c:4360 puts it in (Episode 2 sections 3/11/16, Episode
 ///   3 section 16), as the two sidekick slots.
@@ -24,7 +24,7 @@ namespace T2LV;
 ///   special 32100+id. Death drops count too, so each spawn's enemydie chain is followed the way
 ///   the secret-warp scan does (<see cref="EpisodeGraph.FindSecretTargets"/>).
 ///
-/// Both are filtered to the episodes the viewer is showing, so a click always lands on a level
+/// Both are filtered to the episodes the atlas is showing, so a click always lands on a level
 /// that is in the browse list.
 /// </summary>
 public sealed unsafe partial class App
@@ -59,7 +59,7 @@ public sealed unsafe partial class App
     private readonly record struct FoundSite(int EpisodeIdx, int Episode, int FileNum, string Level,
         ushort Time, PickupKind Kind, bool ViaDeath, int EnemyId);
 
-    // Built lazily; the sold-at index depends on the vanilla/widescreen switch, the found-in one
+    // Built lazily; the sold-at index depends on the vanilla/Engaged switch, the found-in one
     // does not (pickup codes are in the level data, which the fork never touches).
     private Dictionary<(int Tab, int Id), List<SoldSite>>? _itemSoldAt;
     private bool _itemSoldAtFork;
@@ -91,7 +91,7 @@ public sealed unsafe partial class App
     }
 
     /// <summary>Every outpost that sells item <paramref name="id"/> of <paramref name="tab"/>,
-    /// for the shop the browser is currently showing (vanilla or widescreen).</summary>
+    /// for the shop the browser is currently showing (vanilla or Engaged).</summary>
     private List<SoldSite> ItemSoldAt(int tab, int id)
     {
         if (_itemSoldAt == null || _itemSoldAtFork != _itemFork)
@@ -123,7 +123,7 @@ public sealed unsafe partial class App
         return (5, value - 32100, PickupKind.Special);
     }
 
-    /// <summary>The Charge-Laser Cannon's home shops in the widescreen fork (tyrian2.c:4360),
+    /// <summary>The Charge-Laser Cannon's home shops in the Engaged fork (tyrian2.c:4360),
     /// keyed on the outpost's own section like the engine is.</summary>
     private static bool ChargeLaserOutpost(int epNum, int section) =>
         (epNum == 2 && (section == 3 || section == 11 || section == 16)) ||
@@ -246,7 +246,7 @@ public sealed unsafe partial class App
     }
 
     /// <summary>Whether the pickup names a real item in this episode's tables -- guards against a
-    /// stray value in the pickup band mapping to an empty slot. Checked against the widescreen
+    /// stray value in the pickup band mapping to an empty slot. Checked against the Engaged
     /// table (a superset of vanilla's named items) so this index stays fork-independent and can
     /// be built once; the ids are the same in both builds.</summary>
     private bool ItemFoundExists(EpisodeInfo ep, int tab, int id)

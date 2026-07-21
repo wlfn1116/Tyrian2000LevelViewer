@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>A weapon port: what a front or rear gun slot fires at each power level.</summary>
 public sealed class PortItem
@@ -109,7 +109,7 @@ public sealed class ItemData
 
     /// <summary>
     /// The shop's own view of the weapon table: the same records the simulation reads, plus
-    /// the widescreen build's in-code rewrites (see <see cref="ForkRestoration"/>). Kept
+    /// the Engaged build's in-code rewrites (see <see cref="ForkRestoration"/>). Kept
     /// separate from <see cref="GameData.GetWeapons"/> so patching a weapon a shop sells can
     /// never move an enemy's shot.
     /// </summary>
@@ -123,13 +123,13 @@ public sealed class ItemData
     /// showing a table of noise.</summary>
     public bool Loaded { get; private set; }
 
-    /// <summary>Whether the widescreen fork's post-load rewrites were applied to this copy.</summary>
+    /// <summary>Whether the Engaged fork's post-load rewrites were applied to this copy.</summary>
     public bool Fork { get; private set; }
 
     /// <summary>
     /// Read one episode's item block. <paramref name="fork"/> chooses which shop you are
     /// looking at: false is the tables exactly as Tyrian 2000 shipped them, true adds the
-    /// widescreen build's post-load pass (see <see cref="ForkRestoration"/>) -- the restored
+    /// Engaged build's post-load pass (see <see cref="ForkRestoration"/>) -- the restored
     /// Charge-Laser Cannon, the Wobbley frame fix, placeholder icons and the rest.
     /// </summary>
     public static ItemData Load(string dataDir, EpisodeInfo ep, bool fork = true)

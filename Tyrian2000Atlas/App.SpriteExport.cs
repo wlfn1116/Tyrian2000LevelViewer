@@ -1,7 +1,7 @@
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// Saving sprites out of the browser: one sprite on its own, or a whole bank as a sheet.
@@ -128,7 +128,7 @@ public sealed unsafe partial class App
         int count = Math.Max(0, sprites.Length - first);
         if (count == 0) { why = "That bank has nothing in it."; return false; }
 
-        // The cell is the bank's largest sprite, exactly as the atlas sizes it, so no sprite
+        // The cell is the bank's largest sprite, exactly as the sprite atlas sizes it, so no sprite
         // can spill into its neighbour.
         int cw = 1, ch = 1;
         for (int i = first; i < sprites.Length; i++)

@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Tyrian;
+using T2A.Tyrian;
 using SdlNs = Hexa.NET.SDL2;
 
-namespace T2LV.Render;
+namespace T2A.Render;
 
 /// <summary>
 /// One indexed sprite pushed through a palette into an SDL texture — the datacube

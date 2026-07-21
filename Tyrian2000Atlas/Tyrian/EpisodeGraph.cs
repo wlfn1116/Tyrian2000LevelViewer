@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>Why one node leads to another. Drives the tree view's colours and labels.</summary>
 public enum EdgeKind
@@ -41,7 +41,7 @@ public sealed class CubeStop
 /// (tyrian2.c:4340). Nine rows are read — the engine reads nine — of which seven are ever
 /// sold from; which row is which upgrade slot is fixed (game_menu.c:182 itemAvailMap).
 ///
-/// The rows are stored verbatim, WITHOUT the widescreen fork's re-added Charge-Laser Cannon:
+/// The rows are stored verbatim, WITHOUT the Engaged fork's re-added Charge-Laser Cannon:
 /// that injection depends on which build you play, so the item browser applies it itself and
 /// one fork-agnostic graph serves both. <see cref="Section"/> is the ']I''s own section
 /// (the engine's mainLevel), which the injection keys on (tyrian2.c:4360).
@@ -647,6 +647,29 @@ public sealed class EpisodeGraph
     public bool IsSecretOnly(int lvlFileNum) => GatedBy(lvlFileNum, _openly ??= Reachable(e => e.Kind != EdgeKind.Secret));
 
     /// <summary>
+    /// Is this level file one of Timed Battle's arenas? That mode picks its arena off the title
+    /// screen (']T'), so an arena hangs straight off the episode start on an edge of its own.
+    ///
+    /// Deliberately the level's own incoming edges rather than reachability, which is the
+    /// opposite of what <see cref="IsSecretOnly"/> wants: "secret" asks whether the campaign
+    /// can avoid a level, and the answer has to survive a secret level leading on to more of
+    /// them. This asks whether the title screen offers this level, which is a property of the
+    /// level and nothing downstream of it. Episode 1's file #5 is the case that tells the two
+    /// apart — it is both DELI, arena 1, and DELIANI, the campaign's tenth stage.
+    /// </summary>
+    public bool IsTimedBattleArena(int lvlFileNum) =>
+        Nodes.Any(n => n.Kind == GraphNodeKind.Level && n.LvlFileNum == lvlFileNum &&
+                       n.In.Any(ei => Edges[ei].Kind == EdgeKind.TimedBattle));
+
+    /// <summary>
+    /// Is this node on a route the campaign itself can walk — that is, reachable without the
+    /// title screen's Timed Battle pick? What tells the two cuts of a doubled level apart, so
+    /// the level list can put such a level where it is actually played.
+    /// </summary>
+    public bool OnCampaignRoute(GraphNode n) =>
+        (_campaign ??= Reachable(e => e.Kind != EdgeKind.TimedBattle)).Contains(n.Id);
+
+    /// <summary>
     /// Which difficulty a level file is locked behind (<see cref="DiffHard"/> /
     /// <see cref="DiffBelow"/>), or "" when it can be reached whatever you started on.
     /// Same reasoning as the secret check: what matters is whether any route avoids the
@@ -663,7 +686,7 @@ public sealed class EpisodeGraph
         return opens.Count == 1 ? opens[0] : "";
     }
 
-    private HashSet<int>? _openly, _eitherDiff;
+    private HashSet<int>? _openly, _eitherDiff, _campaign;
     private Dictionary<string, HashSet<int>>? _diffReach;
 
     /// <summary>True when no cut of this level file is in the given reachable set.</summary>

@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>
 /// Renders a song to samples away from the audio device, for export. It runs the same

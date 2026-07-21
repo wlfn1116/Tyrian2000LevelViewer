@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>One event of a flattened song, tagged with the Loudness channel it came from
 /// (0..8, or -1 for the conductor track) so the player can mute a single voice.</summary>

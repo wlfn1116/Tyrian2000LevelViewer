@@ -7,12 +7,12 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <AssemblyName>Tyrian2000LevelViewer</AssemblyName>
-    <RootNamespace>T2LV</RootNamespace>
+    <AssemblyName>Tyrian2000Atlas</AssemblyName>
+    <RootNamespace>T2A</RootNamespace>
     <Platforms>x64</Platforms>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <ApplicationTitle>Tyrian 2000 Level Viewer</ApplicationTitle>
-    <Description>Viewer and PNG exporter for Tyrian 2000 level data.</Description>
+    <ApplicationTitle>Tyrian 2000 Atlas</ApplicationTitle>
+    <Description>Reference atlas, playback preview and PNG exporter for Tyrian 2000 game data.</Description>
   </PropertyGroup>
 
   <ItemGroup>

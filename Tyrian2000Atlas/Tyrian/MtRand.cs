@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>
 /// Exact port of the engine's Mersenne Twister (mtrand.c) with snapshot support,

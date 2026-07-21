@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 /// <summary>One playable level as declared by a ]L command in levels%d.dat.</summary>
 public sealed class LevelEntry

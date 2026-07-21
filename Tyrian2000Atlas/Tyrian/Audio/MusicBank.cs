@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>One song out of <c>music.mus</c>: the raw LDS bytes plus whatever has
 /// been decoded from them so far. Decoding is lazy -- a 41-song MIDI conversion on

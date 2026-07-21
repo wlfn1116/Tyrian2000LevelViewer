@@ -1,13 +1,13 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
-using T2LV.Tyrian.Audio;
+using T2A.Render;
+using T2A.Tyrian;
+using T2A.Tyrian.Audio;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
-/// The viewer's audio: one device, one mixer, shared by the level playback and the two
+/// The atlas's audio: one device, one mixer, shared by the level playback and the two
 /// reference browsers. Playback is the interesting half -- the simulation already runs
 /// the engine's logic tick for tick, so it can fill the engine's own eight-slot sound
 /// queue at exactly the moments the game does, and this drains it once per live tick.
@@ -26,7 +26,10 @@ public sealed unsafe partial class App
     private string _audioProblem = "";
 
     private bool _audioEnabled = true;
-    private int _musicVolume = 191, _fxVolume = 191;   // the engine's own 0..255 scale
+    /// <summary>Where both volume sliders sit on a fresh install, and what right-clicking one
+    /// puts it back to (see <see cref="SliderReset(ref int, int, string, string)"/>).</summary>
+    private const int DefaultVolume = 191;
+    private int _musicVolume = DefaultVolume, _fxVolume = DefaultVolume;   // engine's 0..255 scale
     private bool _gameMusic = true;
     private bool _gameSounds = true;
     private MusicDevice _musicDevice = MusicDevice.Opl;
@@ -118,21 +121,50 @@ public sealed unsafe partial class App
         int song = LevelSong(CurEpisode, _levelFileNum);
         var pb = _playback;
         if (pb == null || _level == null) return song;
-        foreach (var e in pb.Events)
+
+        void Apply(IReadOnlyList<GameSim.EventExec> log, int upTo)
         {
-            if (e.Tick > tick) break;
-            if (e.Type != 35) continue;
-            if ((uint)e.Index >= (uint)_level.Events.Length) continue;
-            int dat = _level.Events[e.Index].Dat;
-            if (dat > 0) song = dat - 1;
+            foreach (var e in log)
+            {
+                if (e.Tick > upTo) break;
+                if (e.Type != 35) continue;
+                if ((uint)e.Index >= (uint)_level.Events.Length) continue;
+                int dat = _level.Events[e.Index].Dat;
+                if (dat > 0) song = dat - 1;
+            }
         }
+
+        // Up to the divergence the prediction is the record of what ran; past it, the branch
+        // is. Reading only the prediction there left this insisting on the song from a route
+        // the run had already left -- and, asked every frame, it would have fought the live
+        // event 35s for the track.
+        Apply(pb.Events, pb.Branched ? Math.Min(tick, pb.BranchTick) : tick);
+        if (pb.Branched) Apply(pb.BranchEvents, tick);
         return song;
     }
 
-    /// <summary>Starts a song on behalf of the level playback.</summary>
+    /// <summary>
+    /// Starts a song on behalf of the level playback. Asking for the song that is already
+    /// playing is deliberately NOT a restart: it resumes it if it was paused and otherwise
+    /// leaves it exactly where it is.
+    ///
+    /// Almost every reason this gets called is not a change of song — pressing play, letting
+    /// go of the timeline, a gate loop re-running the same event 35 every cycle — and each of
+    /// them used to drop the track back to bar one. A level whose music restarts several times
+    /// a minute is the wrong soundtrack to the level. Only an event 35 naming a *different*
+    /// song should be heard as a change, which is what the level is actually asking for.
+    /// </summary>
     private void PlayLevelSong(int songIndex)
     {
         if (!AudioOn || !_gameMusic || _audio?.Player == null) return;
+        var player = _audio.Player;
+        if (_musicOwner == 1 && _levelSongPlaying == songIndex &&
+            (player.IsPlaying || player.IsPaused))
+        {
+            if (player.IsPaused && _playing) player.Resume();
+            return;
+        }
+
         var track = _audio.Music[songIndex];
         if (track == null) return;
         MusicPlayer.Prepare(track);      // decode off the mixer's lock
@@ -192,14 +224,16 @@ public sealed unsafe partial class App
             if (_musicOwner == 1) player?.Stop();
         }
 
-        // Pressing play takes the music back from the music window; so does a new level.
-        // Only on those transitions, not every frame: SongAtTick walks the whole executed-
-        // event log, and in the steady state the per-tick handler is already following the
-        // event-35 changes as they happen.
+        // What should be playing here, asked every frame the transport is running. It used to
+        // be asked only on transitions, because SongAtTick walks the executed-event log and
+        // PlayLevelSong restarted the track whatever it was handed. Now that a request for the
+        // song already playing is a no-op, asking constantly is both cheap and the thing that
+        // makes scrubbing work: a seek moves the playhead without executing any ticks, so the
+        // per-tick handler never sees the event 35s the playhead crossed, and only this notices
+        // that the second half of TORM wants a different song than the first.
         bool rising = _playing && !_wasPlaying;
         _wasPlaying = _playing;
-        bool needSong = _gameMusic && _playing && (rising || _musicOwner != 1 || _levelSongPlaying < 0);
-        if (needSong)
+        if (_gameMusic && _playing)
         {
             int want = SongAtTick(_playback.CurrentTick);
             if (want >= 0) PlayLevelSong(want);
@@ -307,7 +341,7 @@ public sealed unsafe partial class App
         {
             string dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Tyrian2000LevelViewer");
+                "Tyrian2000Atlas");
             Directory.CreateDirectory(dir);
             File.AppendAllText(Path.Combine(dir, "audio-open.log"),
                 $"{DateTime.Now:HH:mm:ss.fff}  {step}\n");

@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian.Audio;
+using T2A.Render;
+using T2A.Tyrian.Audio;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// Saving audio out of the two browsers: a song as WAVE or as a Standard MIDI File, a sound
@@ -153,7 +153,7 @@ public sealed unsafe partial class App
                             channels = 1;
                         }
 
-                        T2LV.Util.Wav.Write(path, pcm, SongRenderer.SampleRate, channels);
+                        T2A.Util.Wav.Write(path, pcm, SongRenderer.SampleRate, channels);
                         double secs = pcm.Length / (double)(SongRenderer.SampleRate * channels);
                         _expMessage = $"Wrote {Path.GetFileName(path)} " +
                                       $"({secs:0.0} s, {(channels == 2 ? "stereo" : "mono")}, " +
@@ -167,7 +167,7 @@ public sealed unsafe partial class App
                         // mixer resampled: that is the clip as the game ships it.
                         var pcm = new short[clip.Raw.Length];
                         for (int i = 0; i < pcm.Length; i++) pcm[i] = (short)(clip.Raw[i] << 8);
-                        T2LV.Util.Wav.Write(path, pcm, SoundBank.SourceRate, 1);
+                        T2A.Util.Wav.Write(path, pcm, SoundBank.SourceRate, 1);
                         _expMessage = $"Wrote {Path.GetFileName(path)} " +
                                       $"({clip.Seconds:0.000} s at {SoundBank.SourceRate} Hz).";
                         break;
@@ -289,7 +289,7 @@ public sealed unsafe partial class App
                     channels = 1;
                 }
                 else viaFluid++;
-                T2LV.Util.Wav.Write(path, pcm, SongRenderer.SampleRate, channels);
+                T2A.Util.Wav.Write(path, pcm, SongRenderer.SampleRate, channels);
             }
             written++;
             bytes += new FileInfo(path).Length;
@@ -324,7 +324,7 @@ public sealed unsafe partial class App
             var pcm = new short[clip.Raw.Length];
             for (int k = 0; k < pcm.Length; k++) pcm[k] = (short)(clip.Raw[k] << 8);
             string path = Path.Combine(dir, $"{clip.Number:00} {Safe(clip.Title)}.wav");
-            T2LV.Util.Wav.Write(path, pcm, SoundBank.SourceRate, 1);
+            T2A.Util.Wav.Write(path, pcm, SoundBank.SourceRate, 1);
             written++;
             bytes += new FileInfo(path).Length;
         }

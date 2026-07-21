@@ -1,14 +1,15 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
+using T2A.Render;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
-/// One box over the whole data set: levels, enemies, shop items, datacubes and sprite banks.
-/// Everything the other windows browse is reachable by typing part of its name, and every
-/// result opens the window that owns it.
+/// One box over the whole data set: levels, enemies, shop items, the field pickups and arcade
+/// loadouts beside them, the outposts that sell them, datacubes and sprite banks. Everything the
+/// other windows browse is reachable by typing part of its name, and every result opens the
+/// window -- and the tab within it -- that owns it.
 ///
 /// It is driven from the keyboard first -- type, arrow down, Enter -- because the point of a
 /// search box is not having to reach for the mouse. The kind chips across the top double as
@@ -23,22 +24,24 @@ public sealed unsafe partial class App
     private int _searchSel;              // row in the flattened result list
     private int _searchKinds = AllKindsMask;   // bitmask over HitKind; all on
     private bool _searchScroll;          // pull the selected row back into view
-    /// <summary>Set while the palette owns the arrow keys, so the viewer's own level stepping
+    /// <summary>Set while the palette owns the arrow keys, so the atlas's own level stepping
     /// stands down instead of scrolling the level list behind it.</summary>
     private bool _searchOwnsKeys;
 
     /// <summary>The window's own colour, shared with its launcher chip. See AcAnalysis.</summary>
     private static uint AcSearch => AcPlayer;
 
-    /// <summary>What a hit points at, which decides its colour and where it opens.</summary>
-    private enum HitKind { Level, Enemy, Assembly, Item, Cube, Bank, Song, Sound }
+    /// <summary>What a hit points at, which decides its colour and where it opens. The four shop
+    /// kinds are kept together, because the sort groups results in this order and the shop, its
+    /// pickups, its arcade loadouts and its outposts read as one block.</summary>
+    private enum HitKind { Level, Enemy, Assembly, Item, Pickup, Arcade, Outpost, Cube, Bank, Song, Sound }
 
-    private static readonly HitKind[] AllHitKinds =
-        { HitKind.Level, HitKind.Enemy, HitKind.Assembly, HitKind.Item, HitKind.Cube, HitKind.Bank,
-          HitKind.Song, HitKind.Sound };
+    /// <summary>Taken off the enum rather than written out again: the list, the chips, the help
+    /// and the mask all come from here, so a new kind is one line in <see cref="HitKind"/>.</summary>
+    private static readonly HitKind[] AllHitKinds = Enum.GetValues<HitKind>();
 
     /// <summary>Every kind switched on -- one bit per <see cref="HitKind"/>.</summary>
-    private const int AllKindsMask = (1 << 8) - 1;
+    private static readonly int AllKindsMask = (1 << AllHitKinds.Length) - 1;
 
     /// <summary><paramref name="Rank"/> is how well the query fit: 0 exact, 1 from the start,
     /// 2 at a word boundary, 3 buried in the middle. It orders a kind's own hits.</summary>
@@ -69,6 +72,9 @@ public sealed unsafe partial class App
         HitKind.Enemy => Gfx.Rgba(255, 120, 120),
         HitKind.Assembly => Gfx.Rgba(255, 150, 90),
         HitKind.Item => Gfx.Rgba(110, 225, 195),
+        HitKind.Pickup => AcItem,
+        HitKind.Arcade => AcArcade,
+        HitKind.Outpost => AcShop,
         HitKind.Cube => Gfx.Rgba(185, 150, 255),
         HitKind.Song => AcMusic,
         HitKind.Sound => AcSound,
@@ -83,6 +89,9 @@ public sealed unsafe partial class App
         HitKind.Enemy => "enemy",
         HitKind.Assembly => "group",
         HitKind.Item => "item",
+        HitKind.Pickup => "pickup",
+        HitKind.Arcade => "arcade ship",
+        HitKind.Outpost => "outpost",
         HitKind.Cube => "datacube",
         HitKind.Song => "song",
         HitKind.Sound => "sound",
@@ -104,6 +113,9 @@ public sealed unsafe partial class App
         HitKind.Enemy => "EN",
         HitKind.Assembly => "GR",
         HitKind.Item => "IT",
+        HitKind.Pickup => "PU",
+        HitKind.Arcade => "AR",
+        HitKind.Outpost => "OP",
         HitKind.Cube => "DC",
         HitKind.Song => "MU",
         HitKind.Sound => "SFX",
@@ -138,7 +150,7 @@ public sealed unsafe partial class App
         if (q.Length < 2) DrawSearchHelp();
         else DrawSearchResults(shown, q);
 
-        // The palette owns the arrows only while it is the focused window; the viewer's level
+        // The palette owns the arrows only while it is the focused window; the atlas's level
         // stepping reads this next frame and keeps out of the way.
         _searchOwnsKeys = ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows);
         RefEnd(AcSearch);
@@ -162,7 +174,7 @@ public sealed unsafe partial class App
         BandBegin("searchband", AcSearch, 1 + Math.Max(1, chipRows));
 
         float avail = ImGui.GetContentRegionAvail().X;
-        UiFilter("##searchbox", "levels, enemies, items, cubes, sprites, songs, sounds...",
+        UiFilter("##searchbox", "levels, enemies, items, pickups, outposts, cubes, sprites, songs...",
             _searchBuf, Math.Max(200f, avail - 190f), AcSearch, _searchFocus);
         if (_searchFocus) _searchFocus = false;
 
@@ -216,7 +228,10 @@ public sealed unsafe partial class App
                 HitKind.Level => "level names and file numbers",
                 HitKind.Enemy => "enemyDat entries by id, category or shape bank",
                 HitKind.Assembly => "the formations and bosses, once the enemy browser has read them",
-                HitKind.Item => "everything the shop sells",
+                HitKind.Item => "everything the shop sells -- by name, by the kind it sits in, or by its twiddle",
+                HitKind.Pickup => "field pickups: power-ups, money, armour, the datacube, the secret orb, the weapon balls",
+                HitKind.Arcade => "the nine Super-Arcade ships, by their name, hull or fitted special",
+                HitKind.Outpost => "the outposts, by the level each one sits before",
                 HitKind.Cube => "datacube titles, headers and the readings themselves",
                 HitKind.Song => "the 41 songs, by title or number",
                 HitKind.Sound => "the 40 effects and announcer lines, by name or what they say",
@@ -226,7 +241,8 @@ public sealed unsafe partial class App
 
         ImGui.Dummy(new Vector2(0, 10f));
         UiSection("try", AcSearch);
-        string[] examples = { "savara", "351", "pulse cannon", "microsol", "bank 12", "gravitron" };
+        string[] examples =
+            { "savara", "351", "pulse cannon", "microsol", "sidekick", "twiddle", "super bomb", "outpost", "bank 12" };
         for (int i = 0; i < examples.Length; i++)
         {
             if (i > 0) ImGui.SameLine(0, 6f);
@@ -236,7 +252,9 @@ public sealed unsafe partial class App
         ImGui.Dummy(new Vector2(0, 10f));
         ImGui.TextColored(ColorOf(UiFaint),
             "Up / Down to walk the results, Enter to open one, Esc to close.\n" +
-            "Results cover the episodes the viewer is currently browsing.");
+            "Results cover the episodes the atlas is currently browsing, and the shop build\n" +
+            "(vanilla or Engaged) the item browser is set to. Groups and pickups join in once\n" +
+            "the browser that indexes them has been opened -- both mean reading every level.");
         WellEnd();
     }
 
@@ -371,36 +389,6 @@ public sealed unsafe partial class App
                 n++;
             }
 
-            // --- Shop items ---
-            // Whichever shop the browser is showing, so a search result and the row it opens
-            // are always the same item.
-            var items = _gd.GetItems(ep, _itemFork);
-            if (items.Loaded)
-            {
-                n = 0;
-                void ItemHits<T>(T[] table, int tab, string kind, Func<T, string> name, Func<T, int> cost)
-                {
-                    for (int i = 0; i < table.Length && n < PerKindMax; i++)
-                    {
-                        string nm = name(table[i]);
-                        int rank = nm.Length == 0 ? -1 : Rank(q, nm);
-                        if (rank < 0) continue;
-                        int idx = i, t = tab;
-                        int c = cost(table[i]);
-                        hits.Add(new SearchHit(HitKind.Item, nm,
-                            kind + (c > 0 ? $"  ·  {c:n0} credits" : ""), rank,
-                            () => OpenItem(t, idx)));
-                        n++;
-                    }
-                }
-                ItemHits(items.Ships, 0, "ship", s => s.Name, s => s.Cost);
-                ItemHits(items.Ports, 1, "weapon port", p => p.Name, p => p.Cost);
-                ItemHits(items.Options, 2, "sidekick", o => o.Name, o => o.Cost);
-                ItemHits(items.Shields, 3, "shield", s => s.Name, s => s.Cost);
-                ItemHits(items.Powers, 4, "generator", p => p.Name, p => p.Cost);
-                ItemHits(items.Specials, 5, "special weapon", s => s.Name, _ => 0);
-            }
-
             // --- Enemies, by id or by the bank they draw from ---
             EnemyData? ed = null;
             try { ed = _gd.GetEnemyData(ep); } catch { }
@@ -415,14 +403,34 @@ public sealed unsafe partial class App
                     int rank = Rank(q, i.ToString(), $"bank {d.ShapeBank}", ObjectPlacer.CategoryName(cat));
                     if (rank < 0) continue;
                     int id = i;
+                    // The episode is named because the same id is a different entry in each of
+                    // them: browsing them all otherwise gives five identical-looking rows that
+                    // open five different enemies.
                     hits.Add(new SearchHit(HitKind.Enemy, $"enemy #{id}",
-                        $"{ObjectPlacer.CategoryName(cat).ToLowerInvariant()}  ·  armour {d.Armor}" +
-                        $"  ·  bank {d.ShapeBank}", rank,
+                        $"episode {ep.Number}  ·  {ObjectPlacer.CategoryName(cat).ToLowerInvariant()}" +
+                        $"  ·  armour {d.Armor}  ·  bank {d.ShapeBank}", rank,
                         () => OpenEnemy(epIdx, id)));
                     n++;
                 }
             }
         }
+
+        // --- The shop and the three tabs beside it ---
+        // Read once, for the episode and the build the item browser itself shows, rather than
+        // once per shown episode: the item tables are the same in every episode bar the weapon
+        // behaviour behind them, so the loop only ever listed each item four times over, all
+        // four opening the one row.
+        if (CurEpisode is { } shopEp)
+        {
+            var items = _gd.GetItems(shopEp, _itemFork);
+            if (items.Loaded)
+            {
+                SearchShopItems(q, hits, items);
+                SearchArcadeShips(q, hits, items);
+                SearchPickups(q, hits, items);
+            }
+        }
+        SearchOutposts(q, hits);
 
         // --- Assemblies, but only when the enemy browser has already read them. Building the
         //     index means parsing every level in the set, which is not something a keystroke
@@ -493,6 +501,153 @@ public sealed unsafe partial class App
             : x.Rank != y.Rank ? x.Rank.CompareTo(y.Rank)
             : string.Compare(x.Title, y.Title, StringComparison.OrdinalIgnoreCase));
         return hits;
+    }
+
+    /// <summary>
+    /// The six shop tables. A row matches on its own name, on the kind it sits in -- so
+    /// "sidekick" lists the sidekicks -- and, for a special, on the twiddle that fires it.
+    ///
+    /// The tables are ranked as one set rather than capped table by table: they are read in tab
+    /// order, not in relevance order, and a kind-word match on the ports (61 rows) would
+    /// otherwise spend the whole budget before the specials are even looked at.
+    /// </summary>
+    private void SearchShopItems(string q, List<SearchHit> hits, ItemData items)
+    {
+        var shown = new HashSet<int>(ShownEpisodes());
+        var found = new List<SearchHit>();
+
+        void Table<T>(T[] table, int tab, string kind, Func<T, string> name, Func<T, int> cost)
+        {
+            // A kind-word match is real but weak, the way a datacube's body is: it belongs under
+            // everything whose own name carries the word.
+            int kindRank = Rank(q, kind) >= 0 ? 5 : -1;
+            for (int i = 0; i < table.Length; i++)
+            {
+                string nm = name(table[i]).Trim();
+                if (nm.Length == 0) continue;
+
+                string note = "";
+                int rank = Rank(q, nm);
+                if (rank < 0 && tab == 5)
+                {
+                    rank = TwiddleRank(q, i, out string seq);
+                    if (rank >= 0) note = $"  ·  twiddle: {seq}";
+                }
+                if (rank < 0) rank = kindRank;
+                if (rank < 0) continue;
+
+                int idx = i, t = tab, c = cost(table[i]);
+                int shops = ItemSoldAt(tab, i).Count(s => shown.Contains(s.EpisodeIdx));
+                found.Add(new SearchHit(HitKind.Item, nm,
+                    kind + (c > 0 ? $"  ·  {c:n0} credits" : "") +
+                    (shops > 0 ? $"  ·  sold at {shops} outpost{(shops == 1 ? "" : "s")}" : "") + note,
+                    rank, () => OpenItem(t, idx)));
+            }
+        }
+
+        Table(items.Ships, 0, "ship", s => s.Name, s => s.Cost);
+        Table(items.Ports, 1, "weapon port", p => p.Name, p => p.Cost);
+        Table(items.Options, 2, "sidekick", o => o.Name, o => o.Cost);
+        Table(items.Shields, 3, "shield", s => s.Name, s => s.Cost);
+        Table(items.Powers, 4, "generator", p => p.Name, p => p.Cost);
+        Table(items.Specials, 5, "special weapon", s => s.Name, _ => 0);
+
+        hits.AddRange(found.OrderBy(h => h.Rank).Take(PerKindMax));
+    }
+
+    /// <summary>Does the query name the twiddle that fires this special -- the word itself, or
+    /// part of the direction sequence? Weak, like a body match: the combo is not its name.</summary>
+    private int TwiddleRank(string q, int specialId, out string sequence)
+    {
+        sequence = "";
+        var twiddles = TwiddlesForSpecial(specialId);
+        if (twiddles.Count == 0) return -1;
+        sequence = TwiddleSequence(twiddles[0].Combo);
+        return Rank(q, "twiddle code", "combo", sequence) >= 0 ? 4 : -1;
+    }
+
+    /// <summary>The nine Super-Arcade ships. Their loadouts are tables rather than an index, so
+    /// unlike the pickups below these are searchable without the tab having been opened.</summary>
+    private void SearchArcadeShips(string q, List<SearchHit> hits, ItemData items)
+    {
+        for (int i = 0; i < ArcadeShipCount; i++)
+        {
+            int hullId = SAShip[i], sp = SASpecialWeapon[i];
+            string hull = hullId < items.Ships.Length ? items.Ships[hullId].Name.Trim() : $"ship #{hullId}";
+            string special = sp < items.Specials.Length ? items.Specials[sp].Name.Trim() : "";
+            int rank = Rank(q, ArcadeShipNames[i], hull, special, "arcade ship", "super arcade");
+            if (rank < 0) continue;
+            int row = i;
+            hits.Add(new SearchHit(HitKind.Arcade, ArcadeShipNames[i],
+                $"super-arcade ship  ·  hull {hull}" + (special.Length > 0 ? $"  ·  {special}" : ""),
+                rank, () => ShowItemTab(TabArcade, row)));
+        }
+    }
+
+    /// <summary>
+    /// The Other tab's field pickups and the Arcade tab's ball pool. Only once something has
+    /// built the index: it reads every level of every episode, which is not work a keystroke in
+    /// a search box should set off -- the same reason the assemblies are guarded.
+    ///
+    /// The row indices are the ones the two tabs list, so a hit opens the row it named.
+    /// </summary>
+    private void SearchPickups(string q, List<SearchHit> hits, ItemData items)
+    {
+        if (_otherPickups == null) return;
+        var shown = new HashSet<int>(ShownEpisodes());
+
+        void Rows(List<OtherPickup> list, int tab, int firstRow, bool arcade)
+        {
+            int n = 0;
+            for (int i = 0; i < list.Count && n < PerKindMax; i++)
+            {
+                var p = list[i];
+                string title = OtherRowTitle(items, p);
+                int rank = Rank(q, title, OtherKindName(p.Kind), $"value {p.Value}");
+                if (rank < 0) continue;
+
+                // The same line each tab's own list draws under the row.
+                int lvls = p.Direct.Select(s => (s.EpisodeIdx, s.FileNum))
+                    .Concat(p.Carriers.Where(c => c.FileNum > 0).Select(c => (c.EpisodeIdx, c.FileNum)))
+                    .Where(s => shown.Contains(s.EpisodeIdx)).Distinct().Count();
+                int droppers = p.Carriers.Where(c => shown.Contains(c.EpisodeIdx))
+                    .Select(c => (c.EpisodeIdx, c.CarrierId)).Distinct().Count();
+                string sub = arcade
+                    ? p.Appears ? "placed / dropped" : "arcade pool"
+                    : $"{lvls} level{(lvls == 1 ? "" : "s")}" +
+                      (droppers > 0 ? $"  ·  {droppers} dropper{(droppers == 1 ? "" : "s")}" : "");
+
+                int row = firstRow + i, t = tab;
+                hits.Add(new SearchHit(HitKind.Pickup, title,
+                    $"{OtherKindName(p.Kind)}  ·  {sub}", rank, () => ShowItemTab(t, row)));
+                n++;
+            }
+        }
+
+        Rows(OtherTabPickups(), TabOther, 0, false);
+        Rows(ArcadeBallPickups(), TabArcade, ArcadeShipCount, true);
+    }
+
+    /// <summary>The outposts, by the level each one sits before -- so a level's name finds the
+    /// shop on the way into it as well as the level. Cheap enough for every keystroke: the
+    /// shelves ride on the flow graph, which is cached per episode.</summary>
+    private void SearchOutposts(string q, List<SearchHit> hits)
+    {
+        var rows = OutpostRows();
+        int n = 0;
+        for (int i = 0; i < rows.Count && n < PerKindMax; i++)
+        {
+            var r = rows[i];
+            int rank = Rank(q, r.Level, "outpost", "shop", r.FileNum.ToString());
+            if (rank < 0) continue;
+            int shelf = r.Node.ShopStops.Sum(s => s.Rows.Sum(line => line.Count(id => id > 0)));
+            int row = i;
+            hits.Add(new SearchHit(HitKind.Outpost, $"outpost before {r.Level}",
+                $"episode {r.Episode}  ·  level file {r.FileNum:00}  ·  " +
+                (shelf == 0 ? "nothing sellable" : $"{shelf} item{(shelf == 1 ? "" : "s")} on the shelf"),
+                rank, () => ShowItemTab(TabOutposts, row)));
+            n++;
+        }
     }
 
     /// <summary>Open a shop row: the tab, the row within it, and a scroll so it is on screen.</summary>

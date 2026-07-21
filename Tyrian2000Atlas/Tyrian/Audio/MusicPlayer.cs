@@ -1,8 +1,8 @@
 using System.Diagnostics;
 
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
-/// <summary>How a song is turned into sound. Mirrors the widescreen fork's
+/// <summary>How a song is turned into sound. Mirrors the Engaged fork's
 /// <c>MusicDevice</c>: OPL is the authentic AdLib voice, the other two play the
 /// same song converted to MIDI.</summary>
 public enum MusicDevice
@@ -681,7 +681,7 @@ public sealed unsafe class MusicPlayer : IDisposable
         _nativeThread = new Thread(() => NativeLoop(gen))
         {
             IsBackground = true,
-            Name = "T2LV native MIDI",
+            Name = "T2A native MIDI",
             Priority = ThreadPriority.AboveNormal,
         };
         _nativeThread.Start();

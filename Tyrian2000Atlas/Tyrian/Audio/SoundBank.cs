@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>One decoded sound: the original 8-bit data as shipped, plus the
 /// 16-bit copy resampled to the mixer's rate.</summary>
@@ -13,7 +13,7 @@ public sealed class SoundClip
     /// <summary>The engine's constant for it (<c>S_POWERUP</c>, <c>V_BOSS</c>, ...).</summary>
     public string Symbol = "";
 
-    /// <summary>What the sound is used for, in plain words (viewer-only annotation).</summary>
+    /// <summary>What the sound is used for, in plain words (atlas-only annotation).</summary>
     public string Note = "";
 
     /// <summary>True for the nine announcer lines out of voices.snd rather than tyrian.snd.</summary>

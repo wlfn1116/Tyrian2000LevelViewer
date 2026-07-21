@@ -1,10 +1,10 @@
 using System.Runtime.InteropServices;
 
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>
 /// The OS synthesizer (the Windows MIDI mapper / Microsoft GS Wavetable), driven
-/// straight through <c>midiOut*</c>. The widescreen fork does the same thing in
+/// straight through <c>midiOut*</c>. The Engaged fork does the same thing in
 /// win_native_midi.c, and for the same reason: it is the one music device that
 /// costs nothing to set up and needs no SoundFont.
 /// </summary>

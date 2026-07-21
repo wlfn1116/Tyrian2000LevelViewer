@@ -3,7 +3,7 @@ using Hexa.NET.ImGui;
 using SdlNs = Hexa.NET.SDL2;
 using ImSdl = Hexa.NET.ImGui.Backends.SDL2;
 
-namespace T2LV;
+namespace T2A;
 
 internal static unsafe class Program
 {
@@ -74,7 +74,7 @@ internal static unsafe class Program
         uint winFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
         if (persist && settings.WinMaximized) winFlags |= SDL_WINDOW_MAXIMIZED;
 
-        var window = SdlNs.SDL.CreateWindow("Tyrian 2000 Level Viewer", winX, winY, winW, winH, winFlags);
+        var window = SdlNs.SDL.CreateWindow("Tyrian 2000 Atlas", winX, winY, winW, winH, winFlags);
         if (window.IsNull)
         {
             Console.Error.WriteLine("CreateWindow failed: " + SdlNs.SDL.GetErrorS());
@@ -94,13 +94,13 @@ internal static unsafe class Program
         ImSdl.ImGuiImplSDL2.SetCurrentContext(ctx);
 
         var io = ImGui.GetIO();
-        // No NavEnableKeyboard: the arrow/page keys are viewer shortcuts (level switching,
+        // No NavEnableKeyboard: the arrow/page keys are atlas shortcuts (level switching,
         // canvas jumps) and must not also wander the widget focus.
         io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
         io.IniFilename = null;   // window/panel state lives in settings.json, not imgui.ini
         // One house style for every window the app opens, so the floating playback HUD, the
         // reference browsers and every popup share the same rounded shell.
-        T2LV.App.ApplyGlobalStyle();
+        T2A.App.ApplyGlobalStyle();
 
         var bWindow = new ImSdl.SDLWindowPtr((ImSdl.SDLWindow*)(void*)window.Handle);
         var bRenderer = new ImSdl.SDLRendererPtr((ImSdl.SDLRenderer*)(void*)renderer.Handle);
@@ -127,8 +127,8 @@ internal static unsafe class Program
         if (noSmoothies || Array.IndexOf(args, "--no-screen-flip") >= 0)
             settings.ShowScreenFlip = false;
         if (Array.IndexOf(args, "--no-boss-bars") >= 0) settings.ShowBossBars = false;
-        if (Array.IndexOf(args, "--vanilla-stars") >= 0) settings.WideStarfield = false;
-        if (Array.IndexOf(args, "--wide") >= 0) settings.Widescreen = true;
+        if (Array.IndexOf(args, "--vanilla-stars") >= 0) settings.TallStarfield = false;
+        if (Array.IndexOf(args, "--engaged") >= 0) settings.Engaged = true;
         if (Array.IndexOf(args, "--click-kill") >= 0) settings.ClickKill = true;
         if (Array.IndexOf(args, "--showtree") >= 0) settings.ShowTree = true;
         if (Array.IndexOf(args, "--showcubes") >= 0) settings.ShowCubes = true;
@@ -144,6 +144,9 @@ internal static unsafe class Program
         if (Array.IndexOf(args, "--showsounds") >= 0) settings.ShowSounds = true;
         if (Array.IndexOf(args, "--mute") >= 0) settings.AudioEnabled = false;
         if (Array.IndexOf(args, "--allepisodes") >= 0) settings.AllEpisodes = true;
+        // "--playorder": list the levels in the order the episode script plays them rather
+        // than the order the .lvl file holds them, so the ordering is shootable with --uishot.
+        if (Array.IndexOf(args, "--playorder") >= 0) settings.LevelOrder = 1;
         int pli = Array.IndexOf(args, "--player");
         int cliPlayerX = pli >= 0 && pli + 1 < args.Length && int.TryParse(args[pli + 1], out int pxv) ? pxv : -1;
         int cliPlayerY = pli >= 0 && pli + 2 < args.Length && int.TryParse(args[pli + 2], out int pyv) ? pyv : 150;
@@ -271,7 +274,7 @@ internal static unsafe class Program
                     SdlNs.SDL.RenderReadPixels(renderer, default, Render.Gfx.SDL_PIXELFORMAT_ABGR8888, (nint)bp, w * 4);
                 string outp = uishot + 1 < args.Length ? args[uishot + 1]
                     : Path.Combine(Environment.CurrentDirectory, "uishot.png");
-                T2LV.Util.Png.WriteRgba(outp, w, h, buf);
+                T2A.Util.Png.WriteRgba(outp, w, h, buf);
                 Console.WriteLine($"Wrote UI screenshot {outp} ({w}x{h})");
                 running = false;
             }
@@ -340,9 +343,9 @@ internal static unsafe class Program
         string outDir = (gi + 4 < args.Length && (args[gi + 4].Contains('/') || args[gi + 4].Contains('\\'))) ? args[gi + 4] : defaultOut;
         Directory.CreateDirectory(outDir);
 
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
         var ep = gd.Episodes.Find(e => e.Number == epNum);
         if (ep == null) { Console.Error.WriteLine("no episode"); return 1; }
         var lv = gd.LoadLevel(ep, fileNum);
@@ -354,18 +357,18 @@ internal static unsafe class Program
         bool uniformScale = Array.IndexOf(args, "uniformscale") >= 0;
         bool route = Array.IndexOf(args, "route") >= 0;   // legacy route-axis render
         bool customOrder = args.Any(a => a.StartsWith("ontop="));
-        var img = new T2LV.Render.CompositeImage();
+        var img = new T2A.Render.CompositeImage();
         var ed = gd.GetEnemyData(ep);
-        var timeline = T2LV.Tyrian.LevelTimeline.Build(lv);
-        var layerScroll = new T2LV.Tyrian.ObjectPlacer.LayerScroll();
-        var objs = T2LV.Tyrian.ObjectPlacer.Place(gd, ep, lv, ed,
+        var timeline = T2A.Tyrian.LevelTimeline.Build(lv);
+        var layerScroll = new T2A.Tyrian.ObjectPlacer.LayerScroll();
+        var objs = T2A.Tyrian.ObjectPlacer.Place(gd, ep, lv, ed,
             route ? timeline : null, layerScroll);
         foreach (var a in args)
             if (a.StartsWith("isobase="))
             {
                 int b = int.Parse(a.Substring(8));
                 var first = objs.First(o => o.Esize == 1 && o.SpriteIndex == b);
-                objs = new List<T2LV.Tyrian.PlacedObject> { first };
+                objs = new List<T2A.Tyrian.PlacedObject> { first };
                 Console.WriteLine($"  isolating base {b} at ({first.X:0},{first.Y:0})");
             }
             else if (a == "iso2x2")
@@ -381,9 +384,9 @@ internal static unsafe class Program
                     Console.WriteLine($"    obj base={o.SpriteIndex} X={o.X:0} Y={o.Y:0} band={o.Band} cat={o.Cat}");
             }
         // Build the level's in-game layer stack and apply dev-flag overrides.
-        var stack = T2LV.Render.LayerStack.GameOrder(T2LV.Render.LayerStack.CreateDefault(), lv.ComputeStartFlags());
-        T2LV.Render.LayerDef Bg(int s) => stack.First(l => l.Kind == T2LV.Render.LayerKind.Background && l.Slot == s);
-        if (objOnly) foreach (var l in stack) if (l.Kind == T2LV.Render.LayerKind.Background) l.Visible = false;
+        var stack = T2A.Render.LayerStack.GameOrder(T2A.Render.LayerStack.CreateDefault(), lv.ComputeStartFlags());
+        T2A.Render.LayerDef Bg(int s) => stack.First(l => l.Kind == T2A.Render.LayerKind.Background && l.Slot == s);
+        if (objOnly) foreach (var l in stack) if (l.Kind == T2A.Render.LayerKind.Background) l.Visible = false;
         if (Array.IndexOf(args, "l1only") >= 0) { foreach (var l in stack) l.Visible = false; Bg(0).Visible = true; }
         if (Array.IndexOf(args, "l2only") >= 0) { foreach (var l in stack) l.Visible = false; Bg(1).Visible = true; }
         if (Array.IndexOf(args, "l3only") >= 0) { foreach (var l in stack) l.Visible = false; Bg(2).Visible = true; }
@@ -392,7 +395,7 @@ internal static unsafe class Program
             if (a.StartsWith("a1=")) Bg(0).Alpha = int.Parse(a.Substring(3));
             else if (a.StartsWith("a2=")) Bg(1).Alpha = int.Parse(a.Substring(3));
             else if (a.StartsWith("a3=")) Bg(2).Alpha = int.Parse(a.Substring(3));
-            else if (a.StartsWith("ao=")) { int v = int.Parse(a.Substring(3)); foreach (var l in stack) if (l.Kind == T2LV.Render.LayerKind.Objects) l.Alpha = v; }
+            else if (a.StartsWith("ao=")) { int v = int.Parse(a.Substring(3)); foreach (var l in stack) if (l.Kind == T2A.Render.LayerKind.Objects) l.Alpha = v; }
         }
         foreach (var a in args)
             if (a.StartsWith("ontop="))   // dev: move layer with this id to the front
@@ -403,10 +406,10 @@ internal static unsafe class Program
             }
         bool drawObjs = !bgOnly;
         if (parallax)
-            T2LV.Render.LevelRenderer.ComposeParallax(img, lv, shapes, gd.Palettes.Get(pal),
+            T2A.Render.LevelRenderer.ComposeParallax(img, lv, shapes, gd.Palettes.Get(pal),
                 stack, objs, drawObjs, timeline, uniformScale, !customOrder, !route, layerScroll);
         else
-            T2LV.Render.LevelRenderer.Compose(img, lv, shapes, gd.Palettes.Get(pal),
+            T2A.Render.LevelRenderer.Compose(img, lv, shapes, gd.Palettes.Get(pal),
                 stack, objs, drawObjs, route ? timeline : null, uniformScale, !customOrder,
                 !route, route ? null : layerScroll);
         Console.WriteLine($"placed objects: {objs.Count}");
@@ -439,7 +442,7 @@ internal static unsafe class Program
         int H = img.Height;
 
         // Flatten onto an opaque dark background so transparent areas are visible.
-        uint dark = T2LV.Render.Gfx.Rgba(18, 18, 22);
+        uint dark = T2A.Render.Gfx.Rgba(18, 18, 22);
         var flat = new uint[img.Pixels.Length];
         for (int i = 0; i < flat.Length; i++)
         {
@@ -454,7 +457,7 @@ internal static unsafe class Program
         var crop = new uint[W * cropH];
         Array.Copy(flat, y0 * W, crop, 0, crop.Length);
         string startPath = Path.Combine(outDir, "export_start.png");
-        T2LV.Util.Png.WriteRgba(startPath, W, cropH, crop);
+        T2A.Util.Png.WriteRgba(startPath, W, cropH, crop);
 
         // Magnified crop (3x nearest) of a region with objects, so sprites are clear.
         int ArgInt(string key, int def) { foreach (var a in args) if (a.StartsWith(key + "=")) return int.Parse(a.Substring(key.Length + 1)); return def; }
@@ -467,16 +470,16 @@ internal static unsafe class Program
                 int sxp = mx0 + x / mScale, syp = my0 + y / mScale;
                 mag[y * mw * mScale + x] = (sxp >= 0 && sxp < W && syp >= 0 && syp < H) ? flat[syp * W + sxp] : dark;
             }
-        T2LV.Util.Png.WriteRgba(Path.Combine(outDir, "export_mag.png"), mw * mScale, mh * mScale, mag);
+        T2A.Util.Png.WriteRgba(Path.Combine(outDir, "export_mag.png"), mw * mScale, mh * mScale, mag);
 
-        // Whole level downsampled vertically so structure is visible (fits the viewer).
+        // Whole level downsampled vertically so structure is visible (fits the atlas).
         int step = Math.Max(4, (H + 1699) / 1700);
         int dh = H / step;
         var thumb = new uint[W * dh];
         for (int y = 0; y < dh; y++)
             Array.Copy(flat, (y * step) * W, thumb, y * W, W);
         string thumbPath = Path.Combine(outDir, "export_thumb.png");
-        T2LV.Util.Png.WriteRgba(thumbPath, W, dh, thumb);
+        T2A.Util.Png.WriteRgba(thumbPath, W, dh, thumb);
 
         Console.WriteLine($"Episode {epNum} level #{fileNum} '{(ep.Levels.Find(l => l.FileNum == fileNum)?.Name ?? "").Trim()}' shapes{char.ToLower(lv.ShapeChar)}.dat palette {pal}");
         Console.WriteLine($"Wrote {startPath} ({W}x{cropH}) and {thumbPath} ({W}x{dh})");
@@ -489,9 +492,9 @@ internal static unsafe class Program
     {
         int gi = Array.IndexOf(args, "--tree");
         int only = gi + 1 < args.Length && int.TryParse(args[gi + 1], out int e) ? e : -1;
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("Could not find Tyrian 2000 data files."); return 1; }
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
         try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* redirected */ }
 
         foreach (var ep in gd.Episodes)
@@ -504,7 +507,7 @@ internal static unsafe class Program
             foreach (var n in g.Nodes)
             {
                 string flags = "";
-                if (n.Kind == T2LV.Tyrian.GraphNodeKind.Level)
+                if (n.Kind == T2A.Tyrian.GraphNodeKind.Level)
                 {
                     flags = $"  sec {n.Section}  lvl #{n.LvlFileNum}  song {n.Song}";
                     if (n.Bonus) flags += "  [bonus]";
@@ -547,7 +550,7 @@ internal static unsafe class Program
         int epNum = int.Parse(args[gi + 1]);
         int lo = int.Parse(args[gi + 2]);
         int hi = int.Parse(args[gi + 3]);
-        var gd = new T2LV.Tyrian.GameData(T2LV.Tyrian.GameData.FindDataDir()!);
+        var gd = new T2A.Tyrian.GameData(T2A.Tyrian.GameData.FindDataDir()!);
         var ep = gd.Episodes.Find(e => e.Number == epNum)!;
         var ed = gd.GetEnemyData(ep);
         for (int i = lo; i <= hi; i++)
@@ -569,8 +572,8 @@ internal static unsafe class Program
         int epNum = gi + 1 < args.Length ? int.Parse(args[gi + 1]) : 1;
         int fileNum = gi + 2 < args.Length ? int.Parse(args[gi + 2]) : 1;
         int wantType = gi + 3 < args.Length ? int.Parse(args[gi + 3]) : -1;
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
-        var gd = new T2LV.Tyrian.GameData(dir!);
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
+        var gd = new T2A.Tyrian.GameData(dir!);
         var ep = gd.Episodes.Find(e => e.Number == epNum)!;
         var lv = gd.LoadLevel(ep, fileNum);
         var ed = gd.GetEnemyData(ep);
@@ -601,14 +604,14 @@ internal static unsafe class Program
         int epNum = int.TryParse(epArg, out int en) ? en : -1;
         int only = gi + 2 < args.Length && int.TryParse(args[gi + 2], out int f) ? f : -1;
         bool all = Array.IndexOf(args, "--asm-all") >= 0;   // every spawn, not one row per body
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
-        var gd = new T2LV.Tyrian.GameData(dir!);
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
+        var gd = new T2A.Tyrian.GameData(dir!);
         var episodes = epNum < 0 ? gd.Episodes : gd.Episodes.Where(e => e.Number == epNum).ToList();
 
         // Gather first, then fold: the browser's scope is everything it is showing, so a body
         // used in four levels is one entry with four sites rather than four entries.
-        var groups = new List<T2LV.Tyrian.EnemyAssembly>();
-        var levels = new Dictionary<(int Ep, int File), (T2LV.Tyrian.EpisodeInfo Ep, T2LV.Tyrian.Level Lv)>();
+        var groups = new List<T2A.Tyrian.EnemyAssembly>();
+        var levels = new Dictionary<(int Ep, int File), (T2A.Tyrian.EpisodeInfo Ep, T2A.Tyrian.Level Lv)>();
         for (int e = 0; e < gd.Episodes.Count; e++)
         {
             var ep = gd.Episodes[e];
@@ -622,10 +625,10 @@ internal static unsafe class Program
                 string name = string.IsNullOrWhiteSpace(item.Name) ? $"level {item.FileNum}" : item.Name.Trim();
                 var lv = gd.LoadLevel(ep, item.FileNum);
                 levels[(e, item.FileNum)] = (ep, lv);
-                groups.AddRange(T2LV.Tyrian.EnemyAssembly.Find(lv, ed, name, e));
+                groups.AddRange(T2A.Tyrian.EnemyAssembly.Find(lv, ed, name, e));
             }
         }
-        T2LV.Tyrian.EnemyAssembly.MarkRepeats(groups, acrossLevels: true);
+        T2A.Tyrian.EnemyAssembly.MarkRepeats(groups, acrossLevels: true);
 
         foreach (var a in groups.OrderBy(a => a.EpisodeIdx).ThenBy(a => a.LevelFileNum).ThenBy(a => a.Time))
         {
@@ -661,25 +664,25 @@ internal static unsafe class Program
     /// </summary>
     static int CheckAudio()
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("Could not find Tyrian 2000 data files."); return 1; }
         Console.WriteLine($"data: {dir}");
         bool failed = false;
 
-        var music = new T2LV.Tyrian.Audio.MusicBank();
+        var music = new T2A.Tyrian.Audio.MusicBank();
         if (!music.Load(dir)) { Console.Error.WriteLine("music.mus did not parse."); return 1; }
         Console.WriteLine($"music.mus: {music.Tracks.Length} songs");
 
         const int rate = 44100;
-        var opl = new T2LV.Tyrian.Audio.OplChip(rate);
-        var lds = new T2LV.Tyrian.Audio.LdsPlayer(opl);
+        var opl = new T2A.Tyrian.Audio.OplChip(rate);
+        var lds = new T2A.Tyrian.Audio.LdsPlayer(opl);
         var buf = new short[(int)(rate / 69.5) + 2];
 
         Console.WriteLine("  #  title                              lds    notes  length   loop   oplPeak");
         foreach (var t in music.Tracks)
         {
             var song = t.Lds;
-            var seq = T2LV.Tyrian.Audio.MidiSequence.From(t.Midi);
+            var seq = T2A.Tyrian.Audio.MidiSequence.From(t.Midi);
             if (song == null) { Console.Error.WriteLine($"  song {t.Index + 1} will not parse as LDS"); failed = true; continue; }
             if (seq == null) { Console.Error.WriteLine($"  song {t.Index + 1} will not convert to MIDI"); failed = true; continue; }
 
@@ -699,9 +702,9 @@ internal static unsafe class Program
                 $"{seq.Duration,6}  {(seq.Loops ? seq.LoopStart.ToString() : "once"),6}  {peak,7}");
         }
 
-        var sounds = new T2LV.Tyrian.Audio.SoundBank();
+        var sounds = new T2A.Tyrian.Audio.SoundBank();
         if (!sounds.Load(dir, rate)) { Console.Error.WriteLine("tyrian.snd / voices.snd did not parse."); return 1; }
-        Console.WriteLine($"\ntyrian.snd + {sounds.VoiceFile}: {T2LV.Tyrian.Audio.SoundBank.SoundCount} sounds");
+        Console.WriteLine($"\ntyrian.snd + {sounds.VoiceFile}: {T2A.Tyrian.Audio.SoundBank.SoundCount} sounds");
         foreach (var c in sounds.Clips)
         {
             if (c == null || c.Raw.Length == 0)
@@ -710,13 +713,13 @@ internal static unsafe class Program
                 $"{c.Raw.Length,6} samples  peak {c.Peak,5:0.00}");
         }
 
-        var gd = new T2LV.Tyrian.GameData(dir);
-        var usage = T2LV.Tyrian.Audio.AudioUsageIndex.Build(gd);
+        var gd = new T2A.Tyrian.GameData(dir);
+        var usage = T2A.Tyrian.Audio.AudioUsageIndex.Build(gd);
         int songsUsed = 0, soundsUsed = 0;
         for (int i = 0; i < music.Tracks.Length; i++) if (usage.Song(i).Count > 0) songsUsed++;
-        for (int i = 1; i <= T2LV.Tyrian.Audio.SoundBank.SoundCount; i++) if (usage.Sound(i).Count > 0) soundsUsed++;
+        for (int i = 1; i <= T2A.Tyrian.Audio.SoundBank.SoundCount; i++) if (usage.Sound(i).Count > 0) soundsUsed++;
         Console.WriteLine($"\ncross-reference: {songsUsed}/{music.Tracks.Length} songs and " +
-            $"{soundsUsed}/{T2LV.Tyrian.Audio.SoundBank.SoundCount} sounds are named by the data set");
+            $"{soundsUsed}/{T2A.Tyrian.Audio.SoundBank.SoundCount} sounds are named by the data set");
 
         return failed ? 1 : 0;
     }
@@ -727,13 +730,13 @@ internal static unsafe class Program
     /// </summary>
     static void WriteCrashLog(Exception ex)
     {
-        string text = $"Tyrian 2000 Level Viewer crash\n{DateTime.Now:yyyy-MM-dd HH:mm:ss}\n\n{ex}\n";
+        string text = $"Tyrian 2000 Atlas crash\n{DateTime.Now:yyyy-MM-dd HH:mm:ss}\n\n{ex}\n";
         Console.Error.WriteLine(text);
         try
         {
             string dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Tyrian2000LevelViewer");
+                "Tyrian2000Atlas");
             Directory.CreateDirectory(dir);
             File.WriteAllText(Path.Combine(dir, "crash.log"), text);
         }
@@ -742,15 +745,15 @@ internal static unsafe class Program
 
     static int CheckSprites()
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
-        var gd = new T2LV.Tyrian.GameData(dir!);
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
+        var gd = new T2A.Tyrian.GameData(dir!);
         foreach (var ep in gd.Episodes)
         {
             var ed = gd.GetEnemyData(ep);
             foreach (var item in ep.Levels)
             {
                 var lv = gd.LoadLevel(ep, item.FileNum);
-                var objs = T2LV.Tyrian.ObjectPlacer.Place(gd, ep, lv, ed);
+                var objs = T2A.Tyrian.ObjectPlacer.Place(gd, ep, lv, ed);
                 int big = 0, nullBottom = 0, shortTop = 0;
                 var seen = new HashSet<int>();
                 foreach (var o in objs)
@@ -779,9 +782,9 @@ internal static unsafe class Program
     /// </summary>
     static int SimTest(string[] args)
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
 
         int si = Array.IndexOf(args, "--simtest");
         int onlyEp = si + 1 < args.Length && int.TryParse(args[si + 1], out int e) ? e : -1;
@@ -791,11 +794,11 @@ internal static unsafe class Program
         static ulong Hash(byte[] screen)
         {
             ulong h = 14695981039346656037UL;
-            for (int y = 0; y < T2LV.Tyrian.GameSim.ViewH; y++)
+            for (int y = 0; y < T2A.Tyrian.GameSim.ViewH; y++)
             {
-                int row = (y + T2LV.Tyrian.GameSim.OY) * T2LV.Tyrian.GameSim.BufW
-                    + T2LV.Tyrian.GameSim.OX + T2LV.Tyrian.GameSim.ViewX;
-                for (int x = 0; x < T2LV.Tyrian.GameSim.ViewW; x++)
+                int row = (y + T2A.Tyrian.GameSim.OY) * T2A.Tyrian.GameSim.BufW
+                    + T2A.Tyrian.GameSim.OX + T2A.Tyrian.GameSim.ViewX;
+                for (int x = 0; x < T2A.Tyrian.GameSim.ViewW; x++)
                     h = (h ^ screen[row + x]) * 1099511628211UL;
             }
             return h;
@@ -811,11 +814,11 @@ internal static unsafe class Program
                 if (onlyLevel > 0 && item.FileNum != onlyLevel) continue;
                 var level = gd.LoadLevel(ep, item.FileNum);
                 var shapes = gd.GetShapeTable(level.ShapeChar);
-                var sim = new T2LV.Tyrian.GameSim(gd, ep, level, shapes);
-                T2LV.Tyrian.SimPlayback pb;
+                var sim = new T2A.Tyrian.GameSim(gd, ep, level, shapes);
+                T2A.Tyrian.SimPlayback pb;
                 try
                 {
-                    pb = new T2LV.Tyrian.SimPlayback(sim, 10 * 60 * 35);
+                    pb = new T2A.Tyrian.SimPlayback(sim, 10 * 60 * 35);
                 }
                 catch (Exception ex)
                 {
@@ -859,10 +862,10 @@ internal static unsafe class Program
                     $"previews {pb.LoopRegions.Count}: " + string.Join(";", pb.LoopRegions.Select(r =>
                         $"{r.Kind}@{r.StartTick}->{r.EndTick}")) + "  ";
                 Console.WriteLine($"ep{ep.Number} #{item.FileNum:00} {item.Name,-10} " +
-                    $"{T2LV.Tyrian.SimPlayback.FormatTime(pb.Duration),7} " +
+                    $"{T2A.Tyrian.SimPlayback.FormatTime(pb.Duration),7} " +
                     $"({pb.Duration,5} ticks) " +
                     (pb.EndedNaturally ? "end  " :
-                        pb.LoopRegions.Any(r => r.Kind != T2LV.Tyrian.SimPlayback.HoldLoopKind.EnemyHold)
+                        pb.LoopRegions.Any(r => r.Kind != T2A.Tyrian.SimPlayback.HoldLoopKind.EnemyHold)
                             ? "loop " : pb.LoopDetected ? "hold " : "cap  ") +
                     $"build {pb.PrecomputeMs,4} ms  events {pb.Events.Count,4}  " +
                     previewText +
@@ -878,14 +881,14 @@ internal static unsafe class Program
     /// draw-only layer visibility the GUI's layer list drives, so playback rendering with
     /// layers switched off is reproducible from the command line.
     /// </summary>
-    static void ApplyHideList(T2LV.Tyrian.GameSim sim, string[] args)
+    static void ApplyHideList(T2A.Tyrian.GameSim sim, string[] args)
     {
         int hi = Array.IndexOf(args, "--hide");
         if (hi < 0 || hi + 1 >= args.Length) return;
         foreach (string raw in args[hi + 1].Split(',', StringSplitOptions.RemoveEmptyEntries))
         {
             string name = raw.Trim().ToLowerInvariant();
-            void Drop(T2LV.Tyrian.ObjCategory c) => sim.ObjectCategoryMask &= ~(1 << (int)c);
+            void Drop(T2A.Tyrian.ObjCategory c) => sim.ObjectCategoryMask &= ~(1 << (int)c);
             switch (name)
             {
                 case "bg1": sim.ShowBg1 = false; break;
@@ -893,22 +896,43 @@ internal static unsafe class Program
                 case "bg3": sim.ShowBg3 = false; break;
                 case "star": sim.ShowStarfield = false; break;
                 case "objects": sim.ObjectCategoryMask = 0; break;
-                case "air": Drop(T2LV.Tyrian.ObjCategory.EnemyAir); break;
-                case "ground": Drop(T2LV.Tyrian.ObjCategory.EnemyGround); break;
-                case "fg": Drop(T2LV.Tyrian.ObjCategory.EnemyForeground); break;
-                case "powerup": Drop(T2LV.Tyrian.ObjCategory.Powerup); break;
-                case "money": Drop(T2LV.Tyrian.ObjCategory.Money); break;
-                case "cube": Drop(T2LV.Tyrian.ObjCategory.Datacube); break;
-                case "decor": Drop(T2LV.Tyrian.ObjCategory.Decor); break;
+                case "air": Drop(T2A.Tyrian.ObjCategory.EnemyAir); break;
+                case "ground": Drop(T2A.Tyrian.ObjCategory.EnemyGround); break;
+                case "fg": Drop(T2A.Tyrian.ObjCategory.EnemyForeground); break;
+                case "powerup": Drop(T2A.Tyrian.ObjCategory.Powerup); break;
+                case "money": Drop(T2A.Tyrian.ObjCategory.Money); break;
+                case "cube": Drop(T2A.Tyrian.ObjCategory.Datacube); break;
+                case "decor": Drop(T2A.Tyrian.ObjCategory.Decor); break;
                 default: Console.Error.WriteLine($"--hide: unknown layer '{name}'"); break;
             }
         }
     }
 
+    /// <summary>
+    /// "--draworder b2,b3,top,sky": force the draw order the atlas's layer list forces, so
+    /// reordering layers during playback is reproducible from the command line. The four values
+    /// are the engine's own flags — background2over 0..3, background3over 0..2, topEnemyOver and
+    /// skyEnemyOverAll as 0/1 — which is exactly what the panel resolves a drag to.
+    /// </summary>
+    static void ApplyDrawOrder(T2A.Tyrian.GameSim sim, string[] args)
+    {
+        int di = Array.IndexOf(args, "--draworder");
+        if (di < 0 || di + 1 >= args.Length) return;
+        var v = args[di + 1].Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(int.Parse).ToArray();
+        if (v.Length != 4)
+        { Console.Error.WriteLine("--draworder: expected b2,b3,top,sky"); return; }
+        sim.DrawOrder = new T2A.Tyrian.LevelStartFlags
+        {
+            Background2Over = v[0], Background3Over = v[1],
+            TopEnemyOver = v[2] != 0, SkyEnemyOverAll = v[3] != 0,
+        };
+    }
+
     /// <summary>"--simshot ep level tick[,tick...] out_prefix": save playback frames as PNGs.</summary>
     static int SimShot(string[] args)
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
         int si = Array.IndexOf(args, "--simshot");
         if (si + 4 >= args.Length)
@@ -918,11 +942,11 @@ internal static unsafe class Program
         int[] ticks = args[si + 3].Split(',').Select(int.Parse).ToArray();
         string prefix = args[si + 4];
 
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
         var epi = gd.Episodes.First(e => e.Number == ep);
         var level = gd.LoadLevel(epi, lvl);
         var shapes = gd.GetShapeTable(level.ShapeChar);
-        var sim = new T2LV.Tyrian.GameSim(gd, epi, level, shapes);
+        var sim = new T2A.Tyrian.GameSim(gd, epi, level, shapes);
         bool noSmoothies = Array.IndexOf(args, "--no-smoothies") >= 0;
         sim.ShowScreenFilter = Array.IndexOf(args, "--no-filters") < 0 &&
                                Array.IndexOf(args, "--no-color-fades") < 0;
@@ -930,26 +954,27 @@ internal static unsafe class Program
                                     Array.IndexOf(args, "--no-terrain-smoothies") < 0;
         sim.ShowSpotlight = !noSmoothies && Array.IndexOf(args, "--no-spotlight") < 0;
         sim.ShowScreenFlip = !noSmoothies && Array.IndexOf(args, "--no-screen-flip") < 0;
-        // Widescreen playback and its sub-options, so the widescreen-only paths (parallax
+        // Engaged playback and its sub-options, so the Engaged-only paths (parallax
         // span, mirrored layers, starfield) are reproducible from the command line.
-        sim.Widescreen = Array.IndexOf(args, "--wide") >= 0;
-        sim.ExpandedParallax = sim.Widescreen && Array.IndexOf(args, "--parallax") >= 0;
-        sim.MirrorLayers = sim.Widescreen && Array.IndexOf(args, "--mirror") >= 0;
-        sim.WideStarfield = Array.IndexOf(args, "--vanilla-stars") < 0;
+        sim.Engaged = Array.IndexOf(args, "--engaged") >= 0;
+        sim.ExpandedParallax = sim.Engaged && Array.IndexOf(args, "--parallax") >= 0;
+        sim.MirrorLayers = sim.Engaged && Array.IndexOf(args, "--mirror") >= 0;
+        sim.TallStarfield = Array.IndexOf(args, "--vanilla-stars") < 0;
         int plx = Array.IndexOf(args, "--player");
         if (plx >= 0 && plx + 2 < args.Length)
         { sim.PlayerX = int.Parse(args[plx + 1]); sim.PlayerY = int.Parse(args[plx + 2]); }
         ApplyHideList(sim, args);
-        var pb = new T2LV.Tyrian.SimPlayback(sim, 21000);
+        ApplyDrawOrder(sim, args);
+        var pb = new T2A.Tyrian.SimPlayback(sim, 21000);
         uint[] pal = gd.Palettes.Get(AppSettings.GamePalette);
 
         bool ext = Array.IndexOf(args, "--ext") >= 0;
         sim.ExtendedDraw = ext;
-        int W = ext ? T2LV.Tyrian.GameSim.BufW : sim.PlayfieldWidth;
-        int H = ext ? T2LV.Tyrian.GameSim.BufH : T2LV.Tyrian.GameSim.ViewH;
-        int cx = ext ? 0 : T2LV.Tyrian.GameSim.OX + T2LV.Tyrian.GameSim.ViewX;
-        int cy = ext ? 0 : T2LV.Tyrian.GameSim.OY;
-        // "--kill sx,sy [--kill-damage N] [--no-kill-explosions]": exercise the viewer's
+        int W = ext ? T2A.Tyrian.GameSim.BufW : sim.PlayfieldWidth;
+        int H = ext ? T2A.Tyrian.GameSim.BufH : T2A.Tyrian.GameSim.ViewH;
+        int cx = ext ? 0 : T2A.Tyrian.GameSim.OX + T2A.Tyrian.GameSim.ViewX;
+        int cy = ext ? 0 : T2A.Tyrian.GameSim.OY;
+        // "--kill sx,sy [--kill-damage N] [--no-kill-explosions]": exercise the atlas's
         // click-to-kill at a screen-space point, listing what was live at that tick first so a
         // target is easy to name. Applied on the frame requested, then one tick is stepped so
         // the result is what gets written — the same thing the GUI click does.
@@ -958,11 +983,11 @@ internal static unsafe class Program
             ? args[ki + 1].Split(',').Select(int.Parse).ToArray() : Array.Empty<int>();
         int kdi = Array.IndexOf(args, "--kill-damage");
         int killDamage = kdi >= 0 && kdi + 1 < args.Length
-            ? int.Parse(args[kdi + 1]) : T2LV.Tyrian.GameSim.InstantKillDamage;
+            ? int.Parse(args[kdi + 1]) : T2A.Tyrian.GameSim.InstantKillDamage;
         bool killBoom = Array.IndexOf(args, "--no-kill-explosions") < 0;
 
         var rgba = new uint[W * H];
-        var live = new List<T2LV.Tyrian.GameSim.EnemyView>();
+        var live = new List<T2A.Tyrian.GameSim.EnemyView>();
         foreach (int t in ticks)
         {
             pb.SeekTo(t);
@@ -975,8 +1000,8 @@ internal static unsafe class Program
                     Console.WriteLine($"   slot {v.Slot,2} id {v.EnemyId,4} link {v.LinkNum,3} " +
                         $"screen {v.ScreenX,4},{v.ScreenY,4} armor {v.ArmorLeft,3} " +
                         $"{(v.Size == 1 ? "2x2" : "1x1")} {v.Category}");
-                int slot = sim.PickEnemyAt(killAt[0] + T2LV.Tyrian.GameSim.OX,
-                                           killAt[1] + T2LV.Tyrian.GameSim.OY);
+                int slot = sim.PickEnemyAt(killAt[0] + T2A.Tyrian.GameSim.OX,
+                                           killAt[1] + T2A.Tyrian.GameSim.OY);
                 Console.WriteLine(slot < 0
                     ? $"   --kill {killAt[0]},{killAt[1]}: no enemy there"
                     : $"   --kill {killAt[0]},{killAt[1]}: hit slot {slot} for {killDamage}" +
@@ -985,15 +1010,34 @@ internal static unsafe class Program
                 if (slot >= 0)
                 {
                     sim.DamageEnemy(slot, killDamage, killBoom);
+                    // Through the same door the GUI click uses, so the run branches off its
+                    // prediction here and the CLI can be used to check that it does.
+                    pb.NoteLiveChange();
                     pb.Advance(1);
                     sim.CollectEnemies(live);
                     Console.WriteLine($"   -> {live.Count} enemies left at t={pb.CurrentTick}");
+
+                    // "--kill-play N": run the branch on for N ticks and report what it found,
+                    // which is the only headless way to see a kill change where the level goes.
+                    int kpi = Array.IndexOf(args, "--kill-play");
+                    if (kpi >= 0 && kpi + 1 < args.Length)
+                    {
+                        pb.Advance(int.Parse(args[kpi + 1]));
+                        Console.WriteLine(
+                            $"   branch @{pb.BranchTick} -> {pb.BranchEnd} " +
+                            $"(predicted end was {pb.Duration}; {(pb.BranchDone ? "branch ended" : "still running")})");
+                        foreach (var r in pb.BranchRegions)
+                            Console.WriteLine($"      branch region {r.Kind}@{r.StartTick}->{r.EndTick} " +
+                                $"cycles {r.CycleEnds.Length}");
+                        Console.WriteLine($"      branch events {pb.BranchEvents.Count}, " +
+                            $"display end {pb.DisplayEnd}");
+                    }
                 }
             }
             sim.PreparePresent();
             for (int y = 0; y < H; y++)
             {
-                int src = (cy + y) * T2LV.Tyrian.GameSim.BufW + cx;
+                int src = (cy + y) * T2A.Tyrian.GameSim.BufW + cx;
                 for (int x = 0; x < W; x++)
                     rgba[y * W + x] = pal[sim.PresentScreen[src + x]] | 0xFF000000u;
             }
@@ -1006,9 +1050,9 @@ internal static unsafe class Program
 
     static int CheckTimelines()
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
         bool failed = false;
         var seen = new HashSet<(int Episode, int File)>();
         foreach (var ep in gd.Episodes)
@@ -1016,9 +1060,9 @@ internal static unsafe class Program
         {
             if (!seen.Add((ep.Number, item.FileNum))) continue;
             var level = gd.LoadLevel(ep, item.FileNum);
-            var timeline = T2LV.Tyrian.LevelTimeline.Build(level);
+            var timeline = T2A.Tyrian.LevelTimeline.Build(level);
             if (!timeline.IsUnrolled) continue;
-            var objects = T2LV.Tyrian.ObjectPlacer.Place(
+            var objects = T2A.Tyrian.ObjectPlacer.Place(
                 gd, ep, level, gd.GetEnemyData(ep), timeline);
             int invalidObjects = objects.Count(o =>
                 o.PathDistance < 0 || o.PathDistance > timeline.Distance ||
@@ -1039,17 +1083,17 @@ internal static unsafe class Program
                     o.UniformSourceY + screenY;
             }).ToList();
             int badFootprints = badFootprintObjects.Count;
-            static bool SameFlags(in T2LV.Tyrian.LevelStartFlags a,
-                in T2LV.Tyrian.LevelStartFlags b) =>
+            static bool SameFlags(in T2A.Tyrian.LevelStartFlags a,
+                in T2A.Tyrian.LevelStartFlags b) =>
                 a.Background2Over == b.Background2Over &&
                 a.Background3Over == b.Background3Over &&
                 a.TopEnemyOver == b.TopEnemyOver &&
                 a.SkyEnemyOverAll == b.SkyEnemyOverAll &&
                 a.Background2NotTransparent == b.Background2NotTransparent;
-            var expectedFlags = T2LV.Tyrian.LevelStartFlags.Defaults;
+            var expectedFlags = T2A.Tyrian.LevelStartFlags.Defaults;
             bool expectedStars = true;
-            var flagsByGameDistance = new Dictionary<int, T2LV.Tyrian.LevelStartFlags>();
-            var flagsByUniformDistance = new Dictionary<int, T2LV.Tyrian.LevelStartFlags>();
+            var flagsByGameDistance = new Dictionary<int, T2A.Tyrian.LevelStartFlags>();
+            var flagsByUniformDistance = new Dictionary<int, T2A.Tyrian.LevelStartFlags>();
             var starsByGameDistance = new Dictionary<int, bool>();
             var starsByUniformDistance = new Dictionary<int, bool>();
             foreach (var occurrence in timeline.Occurrences)
@@ -1078,12 +1122,12 @@ internal static unsafe class Program
                 flagsByUniformDistance.Count(kv => !SameFlags(timeline.RenderFlags(kv.Key, true), kv.Value)) +
                 starsByGameDistance.Count(kv => timeline.StarActive(kv.Key) != kv.Value) +
                 starsByUniformDistance.Count(kv => timeline.StarActive(kv.Key, true) != kv.Value);
-            int expectedHeight = timeline.Distance + T2LV.Tyrian.LevelTimeline.ViewBottom;
-            int expectedUniformHeight = timeline.UniformExtent + T2LV.Tyrian.LevelTimeline.ViewBottom;
-            bool badHeight = T2LV.Render.LevelRenderer.HeightFor(timeline, false) != expectedHeight ||
-                T2LV.Render.LevelRenderer.HeightFor(timeline, true) != expectedHeight ||
-                T2LV.Render.LevelRenderer.HeightFor(timeline, false, true) != expectedUniformHeight ||
-                T2LV.Render.LevelRenderer.HeightFor(timeline, true, true) != expectedUniformHeight;
+            int expectedHeight = timeline.Distance + T2A.Tyrian.LevelTimeline.ViewBottom;
+            int expectedUniformHeight = timeline.UniformExtent + T2A.Tyrian.LevelTimeline.ViewBottom;
+            bool badHeight = T2A.Render.LevelRenderer.HeightFor(timeline, false) != expectedHeight ||
+                T2A.Render.LevelRenderer.HeightFor(timeline, true) != expectedHeight ||
+                T2A.Render.LevelRenderer.HeightFor(timeline, false, true) != expectedUniformHeight ||
+                T2A.Render.LevelRenderer.HeightFor(timeline, true, true) != expectedUniformHeight;
             Console.WriteLine($"ep{ep.Number} #{item.FileNum,-2} {item.Name.Trim(),-10} {timeline.Distance,6}px " +
                 $"uniform {timeline.UniformExtent,6}px " +
                 $"[{timeline.LayerDistance(0),6}/{timeline.LayerDistance(1),6}/{timeline.LayerDistance(2),6}] " +
@@ -1108,10 +1152,10 @@ internal static unsafe class Program
 
     static int CheckAllLevels()
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
-        var gd = new T2LV.Tyrian.GameData(dir);
-        var image = new T2LV.Render.CompositeImage();
+        var gd = new T2A.Tyrian.GameData(dir);
+        var image = new T2A.Render.CompositeImage();
         var seen = new HashSet<(int Episode, int File)>();
         bool failed = false;
         int rendered = 0;
@@ -1122,21 +1166,21 @@ internal static unsafe class Program
             try
             {
                 var level = gd.LoadLevel(ep, item.FileNum);
-                var timeline = T2LV.Tyrian.LevelTimeline.Build(level);
-                var objects = T2LV.Tyrian.ObjectPlacer.Place(
+                var timeline = T2A.Tyrian.LevelTimeline.Build(level);
+                var objects = T2A.Tyrian.ObjectPlacer.Place(
                     gd, ep, level, gd.GetEnemyData(ep), timeline);
                 int unresolved = objects.Count(o => o.SpriteIndex > 0 && o.SpriteIndex != 999 &&
                     (o.Sheet == null || o.Sheet.Decode(o.SpriteIndex) == null));
                 int nonFinite = objects.Count(o => !float.IsFinite(o.X) || !float.IsFinite(o.Y) ||
                     !float.IsFinite(o.ScreenY));
-                var layers = T2LV.Render.LayerStack.GameOrder(
-                    T2LV.Render.LayerStack.CreateDefault(), level.ComputeStartFlags());
+                var layers = T2A.Render.LayerStack.GameOrder(
+                    T2A.Render.LayerStack.CreateDefault(), level.ComputeStartFlags());
                 var palette = gd.Palettes.Get(AppSettings.GamePalette);
-                T2LV.Render.LevelRenderer.ComposeParallax(image, level,
+                T2A.Render.LevelRenderer.ComposeParallax(image, level,
                     gd.GetShapeTable(level.ShapeChar), palette, layers, objects, true,
                     timeline, false, true);
                 if (timeline.IsUnrolled)
-                    T2LV.Render.LevelRenderer.ComposeParallax(image, level,
+                    T2A.Render.LevelRenderer.ComposeParallax(image, level,
                         gd.GetShapeTable(level.ShapeChar), palette, layers, objects, true,
                         timeline, true, true);
                 Console.WriteLine($"ep{ep.Number} #{item.FileNum,-2} {item.Name.Trim(),-10} " +
@@ -1161,9 +1205,9 @@ internal static unsafe class Program
 
     static int AuditControlEvents()
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
         int[] controlTypes = [8, 9, 21, 22, 26, 28, 29, 38, 42, 43, 44, 48, 53, 54, 61, 63,
             64, 65, 66, 67, 70, 71, 72, 73, 75, 76, 77, 80, 81, 84];
         var wanted = controlTypes.ToHashSet();
@@ -1190,9 +1234,9 @@ internal static unsafe class Program
 
     static int AuditSpawns()
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("no data dir"); return 1; }
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
         byte[] spawnTypes = [6, 7, 10, 12, 15, 17, 18, 23, 32, 49, 50, 51, 52, 56];
         var wanted = spawnTypes.ToHashSet();
         var seen = new HashSet<(int Episode, int File)>();
@@ -1234,17 +1278,17 @@ internal static unsafe class Program
         int epNum = gi + 1 < args.Length ? int.Parse(args[gi + 1]) : 1;
         int fileNum = gi + 2 < args.Length ? int.Parse(args[gi + 2]) : 1;
         string outDir = Environment.CurrentDirectory;
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
-        var gd = new T2LV.Tyrian.GameData(dir!);
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
+        var gd = new T2A.Tyrian.GameData(dir!);
         var ep = gd.Episodes.Find(e => e.Number == epNum)!;
         var lv = gd.LoadLevel(ep, fileNum);
         var edd = gd.GetEnemyData(ep);
-        var objs = T2LV.Tyrian.ObjectPlacer.Place(gd, ep, lv, edd);
+        var objs = T2A.Tyrian.ObjectPlacer.Place(gd, ep, lv, edd);
         var pal = gd.Palettes.Get(0);
 
         // distinct enemies by (sprite, esize), with a resolved sheet
         var seen = new HashSet<(int, int)>();
-        var distinct = new List<T2LV.Tyrian.PlacedObject>();
+        var distinct = new List<T2A.Tyrian.PlacedObject>();
         foreach (var o in objs)
             if (o.Sheet != null && o.SpriteIndex > 0 && o.SpriteIndex != 999 && seen.Add((o.SpriteIndex, o.Esize)))
                 distinct.Add(o);
@@ -1254,9 +1298,9 @@ internal static unsafe class Program
         int rows = (distinct.Count + cols - 1) / cols;
         int gw = cols * cellW, gh = rows * cellH;
         var buf = new uint[gw * gh];
-        for (int i = 0; i < buf.Length; i++) buf[i] = T2LV.Render.Gfx.Rgba(20, 20, 28);
+        for (int i = 0; i < buf.Length; i++) buf[i] = T2A.Render.Gfx.Rgba(20, 20, 28);
 
-        void BlitG(T2LV.Tyrian.CompShapes sheet, int index, int x, int y)
+        void BlitG(T2A.Tyrian.CompShapes sheet, int index, int x, int y)
         {
             var s = sheet.Decode(index);
             if (s == null) return;
@@ -1307,7 +1351,7 @@ internal static unsafe class Program
             for (int x = 0; x < gw * scale; x++)
                 mag[y * gw * scale + x] = buf[(y / scale) * gw + (x / scale)];
         string path = Path.Combine(outDir, "sprites.png");
-        T2LV.Util.Png.WriteRgba(path, gw * scale, gh * scale, mag);
+        T2A.Util.Png.WriteRgba(path, gw * scale, gh * scale, mag);
         Console.WriteLine($"{distinct.Count} distinct enemy sprites -> {path} ({gw * scale}x{gh * scale})");
         return 0;
     }
@@ -1316,11 +1360,11 @@ internal static unsafe class Program
     {
         int gi = Array.IndexOf(args, "--findenemy");
         int epNum = gi + 1 < args.Length ? int.Parse(args[gi + 1]) : 1;
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
-        var gd = new T2LV.Tyrian.GameData(dir!);
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
+        var gd = new T2A.Tyrian.GameData(dir!);
         var ep = gd.Episodes.Find(e => e.Number == epNum)!;
-        var (raw, blockStart) = T2LV.Tyrian.EnemyData.LocateBlock(gd.DataDir, ep);
-        int computed = blockStart + new T2LV.Tyrian.EnemyData().PreEnemyOffset();
+        var (raw, blockStart) = T2A.Tyrian.EnemyData.LocateBlock(gd.DataDir, ep);
+        int computed = blockStart + new T2A.Tyrian.EnemyData().PreEnemyOffset();
         Console.WriteLine($"ep{epNum} blockStart={blockStart} computedEnemies={computed} fileLen={raw.Length}");
 
         // Lightweight scorer: read shapebank(off+63), esize(off+20), egr0(off+21) per 77-byte record.
@@ -1359,10 +1403,10 @@ internal static unsafe class Program
 
     static int DumpSelfTest()
     {
-        string? dir = T2LV.Tyrian.GameData.FindDataDir();
+        string? dir = T2A.Tyrian.GameData.FindDataDir();
         if (dir == null) { Console.Error.WriteLine("Could not find Tyrian 2000 data files."); return 1; }
         Console.WriteLine($"Data dir: {dir}");
-        var gd = new T2LV.Tyrian.GameData(dir);
+        var gd = new T2A.Tyrian.GameData(dir);
         Console.WriteLine($"Palettes: {gd.Palettes.Count}");
         foreach (var ep in gd.Episodes)
         {

@@ -1,8 +1,8 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
+using T2A.Render;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The shared chrome the seven reference browsers are built out of. They used to be seven
@@ -52,7 +52,7 @@ public sealed unsafe partial class App
     /// The house geometry, applied once to the ImGui style at startup so that *every* window
     /// the app opens carries it -- the reference browsers, the floating playback HUD, popups
     /// and tooltips alike. Only window-level shape is set here on purpose: padding, spacing
-    /// and frame metrics stay at ImGui's defaults so the main viewer's own layout is not
+    /// and frame metrics stay at ImGui's defaults so the main window's own layout is not
     /// reflowed, and the reference windows push their tighter metrics themselves.
     /// </summary>
     public static void ApplyGlobalStyle()
@@ -60,7 +60,7 @@ public sealed unsafe partial class App
         var st = ImGui.GetStyle();
         st.WindowRounding = 8f;
         st.WindowBorderSize = 1f;
-        // ChildRounding stays at 0 on purpose: the viewer's own columns are flush against the
+        // ChildRounding stays at 0 on purpose: the atlas's own columns are flush against the
         // window edges and rounding them would notch the corners. The reference browsers'
         // children are transparent and sit on wells that draw their own rounded shape.
         st.PopupRounding = 7f;
@@ -480,6 +480,35 @@ public sealed unsafe partial class App
         if (lo > 0) dl.AddText(at, col, text[..lo].TrimEnd() + cut);
     }
 
+    /// <summary>
+    /// Right-aligned <see cref="ClipText"/>: the text's own right edge lands on
+    /// <paramref name="rightX"/>, and it is cut from the far end with an ellipsis when it will
+    /// not fit in <paramref name="maxW"/>. What a badge, a count or a trailing note wants --
+    /// right-aligned text that overruns grows leftwards, straight through whatever heading it
+    /// shares the row with, and a plain AddText has no idea it is doing it.
+    /// </summary>
+    private static void ClipTextRight(ImDrawListPtr dl, float rightX, float y, float maxW,
+        uint col, string text)
+    {
+        if (text.Length == 0 || maxW <= 2f) return;
+        float w = ImGui.CalcTextSize(text).X;
+        if (w <= maxW) { dl.AddText(new Vector2(rightX - w, y), col, text); return; }
+        ClipText(dl, new Vector2(rightX - maxW, y), maxW, col, text);
+    }
+
+    /// <summary>
+    /// One line of ordinary text that must not overrun -- or widen -- the panel it is in: drawn
+    /// to <paramref name="w"/> and cut with an ellipsis there. ImGui's own Text() would take
+    /// whatever width the string wants, which in a fixed-width column means a long song title
+    /// either clips against the border or drags a scrollbar in under it.
+    /// </summary>
+    private static void UiTextClip(string text, uint col, float w)
+    {
+        var at = ImGui.GetCursorScreenPos();
+        ClipText(ImGui.GetWindowDrawList(), at, w, col, text);
+        ImGui.Dummy(new Vector2(w, ImGui.GetTextLineHeight()));
+    }
+
     /// <summary>The <see cref="ScaledText"/> form of <see cref="ClipText"/>, for headings.</summary>
     private static void ClipScaled(ImDrawListPtr dl, Vector2 at, float maxW, uint col, int multiple, string text)
     {
@@ -895,6 +924,54 @@ public sealed unsafe partial class App
 
     /// <summary>What a <see cref="BandNote"/> is worth widening a window for.</summary>
     private const float BandNoteRoom = 120f;
+
+    // =====================================================================
+    // Sliders
+    // =====================================================================
+
+    /// <summary>
+    /// Give the slider that was just submitted a default to snap back to, and say so in its
+    /// tooltip. Call it immediately after the slider, on the same variable; it returns true on
+    /// the frame it reset, exactly as the slider itself returns true on the frame it moved.
+    ///
+    /// The right button was free to take: ImGui's own drag/slider widgets answer to the left
+    /// one only -- drag to move, ctrl-click or double-click to type a number -- so nothing is
+    /// being overridden here. Before this, putting a control back meant remembering what it had
+    /// been and dialling it in by hand, which for the playback HUD's four simulation sliders
+    /// (each of which rebuilds the timeline) was the difference between trying a value and
+    /// committing to it.
+    ///
+    /// The tooltip is written here rather than by the caller because a second
+    /// <see cref="ImGui.SetTooltip"/> in the same frame would replace the first: a slider that
+    /// already had something to say passes it in through <paramref name="tip"/>.
+    /// </summary>
+    private static bool SliderReset(ref int value, int def, string tip = "", string shown = "")
+    {
+        if (!SliderResetHint(tip, shown.Length > 0 ? shown : def.ToString())) return false;
+        if (value == def) return false;
+        value = def;
+        return true;
+    }
+
+    /// <summary>The float form of <see cref="SliderReset(ref int, int, string, string)"/>.</summary>
+    private static bool SliderReset(ref float value, float def, string tip = "", string shown = "")
+    {
+        if (!SliderResetHint(tip, shown.Length > 0 ? shown : def.ToString("0.##"))) return false;
+        if (Math.Abs(value - def) < 0.0001f) return false;
+        value = def;
+        return true;
+    }
+
+    /// <summary>Hover half of <see cref="SliderReset(ref int, int, string, string)"/>: the
+    /// tooltip, and whether this frame is the right-click. Split out so both overloads say the
+    /// same thing.</summary>
+    private static bool SliderResetHint(string tip, string shown)
+    {
+        if (!ImGui.IsItemHovered()) return false;
+        string note = $"right-click: back to {shown}";
+        ImGui.SetTooltip(tip.Length > 0 ? tip + "\n\n" + note : note);
+        return ImGui.IsMouseClicked(ImGuiMouseButton.Right);
+    }
 
     // =====================================================================
     // List rows

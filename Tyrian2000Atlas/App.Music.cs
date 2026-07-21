@@ -1,14 +1,14 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Render;
-using T2LV.Tyrian;
-using T2LV.Tyrian.Audio;
+using T2A.Render;
+using T2A.Tyrian;
+using T2A.Tyrian.Audio;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// The music player: every song in music.mus, its notes laid out the way a DAW lays
-/// out a MIDI clip, and the three voices the widescreen build can speak them in.
+/// out a MIDI clip, and the three voices the Engaged build can speak them in.
 ///
 /// The timeline is the point of the window. A Loudness song is nine hardware channels
 /// and nothing else, so the lanes are the song -- there is no arranging above them and
@@ -204,7 +204,7 @@ public sealed unsafe partial class App
                 ("OPL3", "The emulated AdLib chip -- what the game actually sounds like.\n" +
                          "Every song in music.mus is written for it."),
                 ("FluidSynth", "The same song converted to MIDI and played through a SoundFont.\n" +
-                               "Needs libfluidsynth-3.dll beside the viewer or in the data folder,\n" +
+                               "Needs libfluidsynth-3.dll beside the atlas or in the data folder,\n" +
                                "and a .sf2 bank to play out of."),
                 ("Native MIDI", "The operating system's own synthesizer (the Microsoft GS\n" +
                                 "wavetable, unless you have another one installed).")))
@@ -220,9 +220,10 @@ public sealed unsafe partial class App
         BandLabel("volume");
         ImGui.SetNextItemWidth(120);
         int vol = _musicVolume;
-        if (ImGui.SliderInt("##musvol", ref vol, 0, 255, "%d")) _musicVolume = vol;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("The engine's own 0-255 music volume, on its 30 dB curve.\nThe game ships at 191.");
+        if (ImGui.SliderInt("##musvol", ref vol, 0, 255, "%d") |
+            SliderReset(ref vol, DefaultVolume,
+                "The engine's own 0-255 music volume, on its 30 dB curve.\nThe game ships at 191."))
+            _musicVolume = vol;
 
         BandDivider();
         DrawExportAllSongsRow();
@@ -336,8 +337,8 @@ public sealed unsafe partial class App
             ImGui.EndCombo();
         }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Any .sf2/.sf3 next to the viewer, in the data folder, or in the\n" +
-                             "OpenTyrian install above it. The widescreen build ships WeedsGM3.sf2.");
+            ImGui.SetTooltip("Any .sf2/.sf3 next to the atlas, in the data folder, or in the\n" +
+                             "OpenTyrian install above it. The Engaged build ships WeedsGM3.sf2.");
 
         ImGui.SameLine(0, 5);
         if (UiButton("Browse...", AcMusic, "Choose a SoundFont from anywhere on disk", 78f,
@@ -586,9 +587,10 @@ public sealed unsafe partial class App
         BandLabel("speed");
         ImGui.SetNextItemWidth(96);
         float speed = (float)player.Speed;
-        if (ImGui.SliderFloat("##musspeed", ref speed, 0.25f, 2f, "x%.2f")) player.Speed = speed;
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Scales the Loudness tick rate. The song is the same, just slower or faster.");
+        if (ImGui.SliderFloat("##musspeed", ref speed, 0.25f, 2f, "x%.2f") |
+            SliderReset(ref speed, 1f,
+                "Scales the Loudness tick rate. The song is the same, just slower or faster.", "x1"))
+            player.Speed = speed;
         ImGui.SameLine(0, 5);
         // A slider cannot be nudged back to exactly 1 by hand, and anything off it is no longer
         // the song at the rate the game plays it.
@@ -619,9 +621,11 @@ public sealed unsafe partial class App
             // Drilled into the piano roll, the same control sets the key height, on its own scale.
             float kh = _pianoKeyH > 0 ? _pianoKeyH : _pianoKeyHDrawn;
             if (ImGui.SliderFloat("##muskeyh", ref kh, MinKeyH, MaxKeyH, "%.0f px")) _pianoKeyH = kh;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("How tall each semitone is drawn.\n" +
-                                 "Also shift+wheel over the roll; alt+wheel runs up and down it.");
+            // Its default is not a number on the slider's own scale but "whatever fits", which
+            // is what the button beside it does -- so the right-click goes there instead.
+            if (SliderResetHint("How tall each semitone is drawn.\n" +
+                    "Also shift+wheel over the roll; alt+wheel runs up and down it.", "fit"))
+            { _pianoKeyH = 0; _pianoCenterPending = true; }
             ImGui.SameLine(0, 5);
             if (UiButton("fit", AcMusic, "Back to a readable default, centred on the channel", 34f, _pianoKeyH <= 0))
             { _pianoKeyH = 0; _pianoCenterPending = true; }
@@ -630,9 +634,9 @@ public sealed unsafe partial class App
         {
             float laneH = _laneZoom > 0 ? _laneZoom : _laneH;
             if (ImGui.SliderFloat("##muslaneh", ref laneH, MinLaneH, MaxLaneH, "%.0f px")) _laneZoom = laneH;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("How tall each channel lane is drawn.\n" +
-                                 "Also shift+wheel over the timeline; alt+wheel scrolls down them.");
+            if (SliderResetHint("How tall each channel lane is drawn.\n" +
+                    "Also shift+wheel over the timeline; alt+wheel scrolls down them.", "fit"))
+            { _laneZoom = 0; _laneScroll = 0; }
             ImGui.SameLine(0, 5);
             if (UiButton("fit", AcMusic, "Back to every used channel in the panel", 34f, _laneZoom <= 0))
             { _laneZoom = 0; _laneScroll = 0; }
@@ -1099,7 +1103,7 @@ public sealed unsafe partial class App
         dl.AddRect(bar0, bar1, Alpha(accent, hot ? (byte)170 : (byte)105), 3f);
         if (hot && tip.Length > 0) ImGui.SetTooltip(tip);
 
-        // Ordinary text, at the font's own size: the atlas is a bitmap, so anything scaled
+        // Ordinary text, at the font's own size: the font atlas is a bitmap, so anything scaled
         // off it comes out soft.
         var sz = ImGui.CalcTextSize(label);
         if (sz.X + 12f > bar1.X - bar0.X) return;      // too narrow a span to letter
@@ -1950,12 +1954,12 @@ public sealed unsafe partial class App
             ImGui.TextColored(ColorOf(AcEnemy),
                 _audioProblem.Length > 0 ? _audioProblem : "No audio device.");
             ImGui.PopTextWrapPos();
-            if (UiButton("try again", AcMusic, "Re-open the audio device", HudW) && _gd != null)
+            if (UiButton("try again", AcMusic, "Re-open the audio device", _hudW) && _gd != null)
                 InitAudio(_dataDir);
             return;
         }
 
-        float w = (HudW - 5f) / 2f;
+        float w = (_hudW - 5f) / 2f;
         if (Chip("sound", _audioEnabled, AcMusic, w,
                 "Everything: the level's music and the sounds the simulation fires."))
             _audioEnabled = !_audioEnabled;
@@ -1973,15 +1977,19 @@ public sealed unsafe partial class App
             _showMusic = !_showMusic;
 
         ImGui.Dummy(new Vector2(0, 2f));
-        ImGui.SetNextItemWidth(HudW - 74f);
+        ImGui.SetNextItemWidth(_hudW - 74f);
         int mv = _musicVolume;
-        if (ImGui.SliderInt("music##hudmv", ref mv, 0, 255)) _musicVolume = mv;
-        ImGui.SetNextItemWidth(HudW - 74f);
+        if (ImGui.SliderInt("music##hudmv", ref mv, 0, 255) |
+            SliderReset(ref mv, DefaultVolume, "The level's song, on the engine's own 0..255 scale."))
+            _musicVolume = mv;
+        ImGui.SetNextItemWidth(_hudW - 74f);
         int fv = _fxVolume;
-        if (ImGui.SliderInt("effects##hudfv", ref fv, 0, 255)) _fxVolume = fv;
+        if (ImGui.SliderInt("effects##hudfv", ref fv, 0, 255) |
+            SliderReset(ref fv, DefaultVolume, "Explosions, enemy fire and the announcer."))
+            _fxVolume = fv;
 
         int dev = (int)_musicDevice;
-        if (SegBar("##hudmusdev", ref dev, AcMusic, HudW,
+        if (SegBar("##hudmusdev", ref dev, AcMusic, _hudW,
                 ("OPL3", "The emulated AdLib chip."),
                 ("SoundFont", "FluidSynth, if libfluidsynth-3.dll is available."),
                 ("Native", "The OS synthesizer.")))
@@ -1994,15 +2002,18 @@ public sealed unsafe partial class App
             2 => $"music window: {_audio.Player?.Track?.Title ?? ""}",
             _ => "nothing playing",
         };
-        ImGui.TextColored(ColorOf(UiFaint), now);
+        // Cut rather than wrapped: song titles are sentences ("gyges, will you please help
+        // me?"), and a wrapped one grows the panel by a line every time the level changes song.
+        UiTextClip(now, UiFaint, _hudW);
+        if (ImGui.IsItemHovered() && ImGui.CalcTextSize(now).X > _hudW) ImGui.SetTooltip(now);
 
         // Output meter: the peak of the last buffer the mixer actually wrote, so "is anything
         // coming out" is answerable without unplugging the headphones.
         var dl = ImGui.GetWindowDrawList();
         var at = ImGui.GetCursorScreenPos();
         float lvl = _audio.Level;
-        MeterBar(dl, at, at + new Vector2(HudW, 5f), lvl, lvl > 0.98f ? AcEnemy : AcGo);
-        ImGui.Dummy(new Vector2(HudW, 7f));
+        MeterBar(dl, at, at + new Vector2(_hudW, 5f), lvl, lvl > 0.98f ? AcEnemy : AcGo);
+        ImGui.Dummy(new Vector2(_hudW, 7f));
 
         // ... and the device's own account of itself under it. A buffer count that is not
         // climbing means nothing above this line can be heard.

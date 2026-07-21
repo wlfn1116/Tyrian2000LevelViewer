@@ -1,7 +1,7 @@
 using System.Text;
-using T2LV.Tyrian;
+using T2A.Tyrian;
 
-namespace T2LV;
+namespace T2A;
 
 /// <summary>
 /// Saving datacube readings out of the reader as Markdown: the one on show, or every reading

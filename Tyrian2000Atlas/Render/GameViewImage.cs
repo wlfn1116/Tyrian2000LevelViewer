@@ -1,9 +1,9 @@
 using System.Numerics;
 using Hexa.NET.ImGui;
-using T2LV.Tyrian;
+using T2A.Tyrian;
 using SdlNs = Hexa.NET.SDL2;
 
-namespace T2LV.Render;
+namespace T2A.Render;
 
 /// <summary>
 /// The playback frame: a crop of the simulator's indexed buffer (the 264x184 playfield,
@@ -51,7 +51,7 @@ public sealed unsafe class GameViewImage : IDisposable
 
     /// <summary>
     /// A copy of the pixels last uploaded, for saving a screenshot. Whatever crop the view is
-    /// showing (widescreen / extended) is what comes out, because this is that same frame.
+    /// showing (Engaged / extended) is what comes out, because this is that same frame.
     /// </summary>
     public uint[] Snapshot() => (uint[])_rgba.Clone();
 

@@ -1,14 +1,14 @@
 using System.Runtime.InteropServices;
 
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>
 /// A minimal binding to libfluidsynth, used as a SoundFont MIDI voice for the
-/// converted songs. Unlike the widescreen fork we do not let FluidSynth own an
+/// converted songs. Unlike the Engaged fork we do not let FluidSynth own an
 /// audio driver: the synth is rendered into our own mixer, so a SoundFont song
 /// and the game's sound effects come out of one device and one volume path.
 ///
-/// The DLL is not shipped with the viewer. It is looked for next to the exe, in
+/// The DLL is not shipped with the atlas. It is looked for next to the exe, in
 /// the Tyrian data folder and the folder above it (an OpenTyrian2000 install has
 /// one), and finally on PATH.
 /// </summary>

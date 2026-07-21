@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>Where a song or a sound is used. The first four kinds are read out of the
 /// data files; <see cref="Engine"/> is the handful of places the engine hard-codes.</summary>

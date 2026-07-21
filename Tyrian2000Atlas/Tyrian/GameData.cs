@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 public sealed class LevelListItem
 {
@@ -9,12 +9,17 @@ public sealed class LevelListItem
     /// <summary>Every way in is a warp ball — the level is off the campaign's normal route.
     /// Filled in once the episode's flow graph is built (GameData.GetGraph).</summary>
     public bool SecretLevel;
+    /// <summary>One of the arenas Timed Battle offers off the title screen. Not exclusive with
+    /// the campaign: Episode 1's #5 is arena 1 <em>and</em> the campaign's DELIANI. Filled in
+    /// with <see cref="SecretLevel"/>.</summary>
+    public bool TimedBattle;
     /// <summary>"Hard+" / "below Hard" when the difficulty you started on decides whether
     /// you ever see this level; empty when any difficulty reaches it.</summary>
     public string DifficultyGate = "";
 
     public string Display =>
         $"{FileNum:00}  {(string.IsNullOrWhiteSpace(Name) ? "(unnamed)" : Name.Trim())}"
+        + (TimedBattle ? "  [timed battle]" : "")
         + (SecretLevel ? "  [secret]" : "")
         + (DifficultyGate.Length > 0 ? $"  [{DifficultyGate.ToLowerInvariant()}]" : "")
         + (BonusLevel ? "  [bonus]" : "");
@@ -209,6 +214,7 @@ public sealed class GameData
         foreach (var item in ep.Levels)
         {
             item.SecretLevel = g.IsSecretOnly(item.FileNum);
+            item.TimedBattle = g.IsTimedBattleArena(item.FileNum);
             item.DifficultyGate = g.DifficultyGate(item.FileNum);
         }
         return g;

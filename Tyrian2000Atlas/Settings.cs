@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace T2LV;
+namespace T2A;
 
 public sealed class LayerState
 {
@@ -25,8 +25,8 @@ public sealed class WindowGeom
 }
 
 /// <summary>
-/// Persisted UI state, so the viewer reopens exactly where it was left. Stored as JSON
-/// under %LOCALAPPDATA%/Tyrian2000LevelViewer/settings.json.
+/// Persisted UI state, so the atlas reopens exactly where it was left. Stored as JSON
+/// under %LOCALAPPDATA%/Tyrian2000Atlas/settings.json.
 /// </summary>
 public sealed class AppSettings
 {
@@ -40,10 +40,10 @@ public sealed class AppSettings
     public bool UniformTextureScale { get; set; }
     public bool GameLayerOrder { get; set; } = true;   // auto-apply the level's in-game layer order
     public bool SimExtendedView { get; set; }
-    public bool Widescreen { get; set; }               // true-widescreen playback (356px playfield)
-    public bool ExpandedParallax { get; set; }         // widescreen sub-option: wider all-layer parallax sweep
-    public bool MirrorLayers { get; set; } = true;     // widescreen sub-option: mirror layers past their side edges
-    public bool WideStarfield { get; set; } = true;    // the build's rewritten starfield (either mode)
+    public bool Engaged { get; set; }               // Engaged playback (356px playfield)
+    public bool ExpandedParallax { get; set; }         // Engaged sub-option: wider all-layer parallax sweep
+    public bool MirrorLayers { get; set; } = true;     // Engaged sub-option: mirror layers past their side edges
+    public bool TallStarfield { get; set; } = true;    // the build's rewritten starfield (either mode)
     public bool ShowScreenFilter { get; set; } = true;
     public bool ShowSmoothies { get; set; } = true; // retained JSON name: terrain smoothies
     // Nullable so an older settings file can inherit its former broad smoothie toggle.
@@ -77,13 +77,16 @@ public sealed class AppSettings
     public int SpritesColumns { get; set; }             // 0 = fit to the panel width
     public bool? SpritesCheckerboard { get; set; }      // null = never saved, defaults on
     public bool SpritesNumbers { get; set; }            // print each cell's sprite index on it
-    /// <summary>Shop tables with the widescreen fork's post-load pass applied; null = never
+    /// <summary>Shop tables with the Engaged fork's post-load pass applied; null = never
     /// saved, and the fork's view is the default.</summary>
     public bool? ItemsFork { get; set; }
     public bool? EnemyMotion { get; set; }              // velocity arrows over the enemy stage; null = on
     public bool CubesByLevel { get; set; }              // ... listing cubes under their level
     public float CubeListWidth { get; set; }            // ... width of its list column; 0 = default
     public bool AllEpisodes { get; set; }               // browse every episode at once
+    /// <summary>Level-list ordering: 0 = the .lvl file's own order, 1 = the order the episode
+    /// script actually plays them in.</summary>
+    public int LevelOrder { get; set; }
     /// <summary>Bitmask of the EdgeKinds the level tree draws; 0 = never saved.</summary>
     public int TreeEdgeMask { get; set; }
 
@@ -121,6 +124,9 @@ public sealed class AppSettings
 
     public float LevelsHeight { get; set; } = 170f;
     public float LayersHeight { get; set; }          // 0 = fit to content
+    public float ControlsWidth { get; set; }         // the left column's dragged width; 0 = default
+    public float HudWidth { get; set; }              // the playback HUD's content width; 0 = default
+    public float HudColumnWidth { get; set; }        // ... and the pinned column's outer width
     public List<LayerState> Layers { get; set; } = new();
 
     /// <summary>The reference windows' own frames, keyed by the id RefBegin opens them with.</summary>
@@ -134,14 +140,22 @@ public sealed class AppSettings
 
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Tyrian2000Atlas", "settings.json");
+
+    /// <summary>Where the settings lived when the tool was called Tyrian2000LevelViewer. Read
+    /// only on the first run after the rename, so window placement and browse state survive it;
+    /// the next <see cref="Save"/> writes the new path and this is never consulted again.</summary>
+    private static string LegacyFilePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "Tyrian2000LevelViewer", "settings.json");
 
     public static AppSettings Load()
     {
         try
         {
-            if (File.Exists(FilePath))
-                return JsonSerializer.Deserialize(File.ReadAllText(FilePath), AppJsonContext.Default.AppSettings)
+            string path = File.Exists(FilePath) ? FilePath : LegacyFilePath;
+            if (File.Exists(path))
+                return JsonSerializer.Deserialize(File.ReadAllText(path), AppJsonContext.Default.AppSettings)
                     ?? new AppSettings();
         }
         catch { /* corrupt/locked settings -> start fresh */ }

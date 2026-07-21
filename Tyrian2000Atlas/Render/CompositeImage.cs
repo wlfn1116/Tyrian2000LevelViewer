@@ -2,7 +2,7 @@ using System.Numerics;
 using Hexa.NET.ImGui;
 using SdlNs = Hexa.NET.SDL2;
 
-namespace T2LV.Render;
+namespace T2A.Render;
 
 /// <summary>
 /// A large RGBA image (the full composited level) backed by a vertical stack of

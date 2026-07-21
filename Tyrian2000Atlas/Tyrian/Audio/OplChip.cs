@@ -20,7 +20,7 @@
  *    opl.c line by line.
  */
 
-namespace T2LV.Tyrian.Audio;
+namespace T2A.Tyrian.Audio;
 
 /// <summary>
 /// 1:1 port of the OPL2 (AdLib/YM3812) emulator the game uses for its music

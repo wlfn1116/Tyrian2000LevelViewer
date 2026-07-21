@@ -1,4 +1,4 @@
-namespace T2LV.Tyrian;
+namespace T2A.Tyrian;
 
 // Object layer categories. Enemies (anything with armour) are split by the render band
 // they're locked to, since that's what actually distinguishes them in-game; the rest are
